@@ -150,6 +150,8 @@ def test_resolve_proxified():
         assert inputs == "/path/to/input.txt"
         assert outputs == "/path/to/output.txt"
 
+        return None
+
     input_proxy = TextFile(Path("/path/to/input.txt"))
     output_proxy = TextFile(Path("/path/to/output.txt"))
 
@@ -335,8 +337,9 @@ def test_combine_proxify_and_resolve():
     data = np.random.uniform(1.0, 1.0, size=[16, 16, 16])
 
     @proxify
-    def foo(inputs: proxy.ProxyParam[MyVolume, np.ndarray] = Output(MyVolume)):
-        assert inputs == "/tmp/temp_file_0.custom"
+    def foo(bar: Resolve[str], outputs: proxy.ProxyParam[MyVolume] = Output(MyVolume)):
+        assert bar == "42.0"
+        assert outputs == "/tmp/temp_file_0.custom"
 
     container = Container()
     container.wire(
@@ -350,10 +353,10 @@ def test_combine_proxify_and_resolve():
     temp_file_mock = TempFileMock()
 
     with container.temp_file_provider.override(temp_file_mock):
-        output_new = foo()
+        output_new = foo(42.0)
         assert str(output_new.path) == "/tmp/temp_file_0.custom"  # type: ignore
 
-        output_numpy = foo(data)
+        output_numpy = foo(bar=42.0, outputs=data)
         assert str(output_numpy.path) == "/tmp/temp_file_0.custom"  # type: ignore
 
         del output_new, output_numpy
@@ -387,4 +390,5 @@ def test_named_proxy():
 
 
 if __name__ == "__main__":
-    test_named_proxy()
+    # logging.basicConfig(level=logging.DEBUG)
+    test_combine_proxify_and_resolve()
