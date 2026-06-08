@@ -1,6 +1,7 @@
 import sys
 import inspect
 import textwrap
+import types
 import networkx as nx
 import logging
 import warnings
@@ -46,7 +47,6 @@ Intermediate = TypeVar("Intermediate", default=Any)
 if TYPE_CHECKING:
     Resolve = Union[Target, Intermediate]
 else:
-
     class Resolve(Generic[Target, Intermediate]):
         pass  # Marker Type
 
@@ -170,7 +170,7 @@ class resolution_context:
     ):
 
         global CURRENT_CTX
-        self._old_context = CURRENT_CTX
+        self._old_context: Optional[ResolveContext] = CURRENT_CTX
 
         if self._old_context is None:
             CURRENT_CTX = ResolveContext(
@@ -234,8 +234,6 @@ class Registry:
             namespace = Registry._namespace_from_symbol(
                 module=module, qualname=_get_qualname(frame.f_code), strip_last=True
             )
-
-        # print(f"Add resolver: {origin} -> {target} in {namespace}")
 
         if self.graph.has_edge(origin, target):
             edge = self.graph.edges[(origin, target)]
@@ -429,8 +427,8 @@ class Registry:
                 else ""
             )
 
-            namespaces_desc = [f"'{n}'" for n in context.namespaces]
-            namespaces_desc = ", ".join(namespaces_desc).rstrip()
+            namespaces_ctx = [f"'{n}'" for n in context.namespaces]
+            namespaces_desc = ", ".join(namespaces_ctx).rstrip()
 
             indent = " " * 4 * context.recursion_level
 
@@ -465,6 +463,21 @@ class Registry:
         )
 
         return resolved
+        
+    def lift_resolvers(self, origin_module_name: str, target_module_name: str):
+        # Assert that the target module is actually imports the module from which
+        # we want to lift the resolvers from.
+        #
+        # For example, we can declare some resolvers in scipion_bridge.typed.common
+        # and then lift those into scipion_bridge, but we cannot lift them into
+        # scipion_bridge.proxy. This is important as the resolvers are still
+        # available even if the user only imports scipion_bridge.typed.common as
+        # the parent module is always visible when resolving types
+        assert origin_module_name.startswith(target_module_name)
+
+        for _, _, attr in self.graph.edges(data=True):
+            if attr["module"] == origin_module_name:
+                attr["module"] = target_module_name
 
     def _plot_graph(self, G=None):  # pragma: no cover
         import networkx as nx
@@ -524,6 +537,28 @@ def resolver(f):
 
     return f
 
+def resolve(
+        value,
+        astype: Type[Target],
+        intermediate: Optional[Type[Intermediate]] = None,
+    ) -> Target:
+    return current_registry().resolve(value, astype=astype, intermediate=intermediate)
+
+def lift_resolvers(*modules: types.ModuleType, target: Optional[types.ModuleType] = None):
+    if target is None:
+        # Get the calling module
+        frame = inspect.currentframe()
+        assert frame is not None
+        caller_frame = frame.f_back
+        assert caller_frame is not None
+        target_module_name = caller_frame.f_globals["__name__"]
+        assert isinstance(target_module_name, str)
+    else:
+        target_module_name = target.__name__
+
+    reg = current_registry()
+    for module in modules:
+        reg.lift_resolvers(module.__name__, target_module_name)
 
 def resolve_params(f: Callable):
 

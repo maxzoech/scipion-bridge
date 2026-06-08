@@ -5,16 +5,12 @@ from pathlib import Path
 
 
 from scipion_bridge.core.typed.resolve import (
-    resolution_context,
-    Resolve,
     current_registry,
     Registry,
     resolver,
 )
 
-from scipion_bridge.core.typed import proxy, common
-from scipion_bridge.core.typed.proxy import proxify
-from scipion_bridge.core.typed.proxy import Proxy, Output, ProxyParam, namedproxy
+import scipion_bridge as sb
 from scipion_bridge.core.environment.container import Container
 from scipion_bridge.core.utils.arc import manager as arc_manager
 
@@ -39,14 +35,14 @@ class TempFileMock:
         pass
 
 
-class Volume(Proxy):
+class Volume(sb.Proxy):
 
     @classmethod
     def file_ext(cls):
         return ".vol"
 
 
-class TextFile(Proxy):
+class TextFile(sb.Proxy):
 
     @classmethod
     def file_ext(cls) -> Optional[str]:
@@ -71,7 +67,7 @@ def test_conversion_to_typed_proxy():
 
     with container.temp_file_provider.override(temp_file_mock):
 
-        untyped = Proxy(Path("/path/to/proxy"), managed=True)
+        untyped = sb.Proxy(Path("/path/to/proxy"), managed=True)
         assert arc_manager.get_count(Path("/path/to/proxy")) == 1
 
         typed = untyped.typed(astype=TextFile, copy_data=False)
@@ -82,7 +78,7 @@ def test_conversion_to_typed_proxy():
 
         del typed, untyped
 
-    proxy_obj = Proxy(Path("/tmp/test_file"), managed=True)
+    proxy_obj = sb.Proxy(Path("/tmp/test_file"), managed=True)
     with open(proxy_obj.path, mode="w") as f:
         f.write("Hello World")
 
@@ -108,7 +104,7 @@ def test_resolve_proxy_output():
     temp_file_mock = TempFileMock()
 
     with container.temp_file_provider.override(temp_file_mock):
-        p = current_registry().resolve(Output(Volume), astype=Proxy)
+        p = current_registry().resolve(sb.Output(Volume), astype=sb.Proxy)
         assert str(p.path) == "/tmp/temp_file_0.vol"
 
         del p
@@ -118,35 +114,35 @@ def test_resolve_proxy():
     import os
     from pathlib import Path
 
-    def _resolve_output_to_proxy(output: Output):
+    def _resolve_output_to_proxy(output: sb.Output):
         ext = str(output.dtype.file_ext())
         return output.dtype(Path("/path/to/output" + ext), managed=False)
 
     registry = Registry()
     registry.add_resolver(Path, str, lambda x: str(x))
-    registry.add_resolver(Proxy, Path, lambda x: x.path)
-    registry.add_resolver(Output, Proxy, _resolve_output_to_proxy)
+    registry.add_resolver(sb.Proxy, Path, lambda x: x.path)
+    registry.add_resolver(sb.Output, sb.Proxy, _resolve_output_to_proxy)
 
-    resolved_path = registry.resolve(Proxy(Path("/path/to/file.txt")), str)
+    resolved_path = registry.resolve(sb.Proxy(Path("/path/to/file.txt")), str)
     assert resolved_path == "/path/to/file.txt"
 
-    resolved_path = registry.resolve(Proxy("/path/to/file.txt"), str)  # type: ignore
+    resolved_path = registry.resolve(sb.Proxy("/path/to/file.txt"), str)  # type: ignore
     assert resolved_path == "/path/to/file.txt"
 
-    resolved_proxy = registry.resolve(Output(TextFile), Proxy)
+    resolved_proxy = registry.resolve(sb.Output(TextFile), sb.Proxy)
     assert str(resolved_proxy.path) == "/path/to/output.txt"
 
-    resolved_path = registry.resolve(Output(TextFile), str)
+    resolved_path = registry.resolve(sb.Output(TextFile), str)
     assert resolved_path == "/path/to/output.txt"
 
 
 def test_resolve_proxified():
 
-    @proxify
+    @sb.proxify
     def foo(
-        inputs: ProxyParam[TextFile],
-        outputs: ProxyParam = Output(TextFile),
-    ) -> Optional[proxy.Proxy]:
+        inputs: sb.ProxyParam[TextFile],
+        outputs: sb.ProxyParam = sb.Output(TextFile),
+    ) -> Optional[sb.Proxy]:
         assert inputs == "/path/to/input.txt"
         assert outputs == "/path/to/output.txt"
 
@@ -160,17 +156,17 @@ def test_resolve_proxified():
     assert str(out.path) == "/path/to/output.txt"
 
     out = foo(Path("/path/to/input.txt"), Path("/path/to/output.txt"))
-    assert isinstance(out, Proxy)
+    assert isinstance(out, sb.Proxy)
     assert out.path == Path("/path/to/output.txt")
     assert out.managed == False
 
 
 def test_resolve_proxy_multi_output():
 
-    @proxify
+    @sb.proxify
     def foo(
-        output_1=Output(Volume),
-        output_2=Output(Volume),
+        output_1=sb.Output(Volume),
+        output_2=sb.Output(Volume),
     ):
         pass
 
@@ -193,16 +189,16 @@ def test_resolve_proxy_multi_output():
 
 def test_nested_proxies():
 
-    @proxify
-    def func_1(output_path=Output(TextFile)):
+    @sb.proxify
+    def func_1(output_path=sb.Output(TextFile)):
         assert isinstance(output_path, str)
 
         with open(output_path, "w+") as f:
 
             f.write("Write from func 1")
 
-    @proxify
-    def func_2(output_path=Output(TextFile)):
+    @sb.proxify
+    def func_2(output_path=sb.Output(TextFile)):
         return func_1(output_path)
 
     container = Container()
@@ -216,8 +212,8 @@ def test_nested_proxies():
 
     temp_file_mock = TempFileMock()
     with container.temp_file_provider.override(temp_file_mock):
-        output = func_2(Output(TextFile))
-        assert isinstance(output, Proxy)
+        output = func_2(sb.Output(TextFile))
+        assert isinstance(output, sb.Proxy)
         assert str(output.path) == "/tmp/temp_file_0.txt"
         assert output.managed == True
 
@@ -227,17 +223,17 @@ def test_nested_proxies():
 
 def test_return_value_warning():
 
-    @proxify
-    def foo(output: Resolve[Proxy, Output] = Output(TextFile)):
+    @sb.proxify
+    def foo(output: sb.Resolve[sb.Proxy, sb.Output] = sb.Output(TextFile)):
         return 42
 
-    @proxify
-    def func_1(output_path: Resolve[Proxy, Output]):
+    @sb.proxify
+    def func_1(output_path: sb.Resolve[sb.Proxy, sb.Output]):
         pass
 
-    @proxify
+    @sb.proxify
     def func_2():
-        return func_1(Output(TextFile))
+        return func_1(sb.Output(TextFile))
 
     container = Container()
     container.wire(
@@ -251,7 +247,7 @@ def test_return_value_warning():
     temp_file_mock = TempFileMock()
     with container.temp_file_provider.override(temp_file_mock):
         with pytest.warns(UserWarning):
-            foo(Output(TextFile))
+            foo(sb.Output(TextFile))
 
         with warnings.catch_warnings(record=True) as w:
             func_2()
@@ -263,10 +259,10 @@ def test_proxify_with_params():
 
     # logging.basicConfig(level=logging.DEBUG)
 
-    @proxify
+    @sb.proxify
     def foo(
-        inputs: ProxyParam[TextFile],
-        outputs: Resolve[Proxy, Output] = Output(Volume),
+        inputs: sb.ProxyParam[TextFile],
+        outputs: sb.ProxyParam[sb.Output] = sb.Output(Volume),
         bar: Optional[Tuple] = None,
         *,
         value=None,
@@ -300,8 +296,8 @@ def test_proxify_with_params():
 
 def test_resolve_proxify_with_type_error():
 
-    @proxify
-    def foo(inputs: ProxyParam[TextFile]):
+    @sb.proxify
+    def foo(inputs: sb.ProxyParam[TextFile]):
         assert inputs == "/path/to/text_file.txt"
 
     with pytest.raises(TypeError):
@@ -314,13 +310,13 @@ def test_resolve_proxify_with_type_error():
 def test_combine_proxify_and_resolve():
     import numpy as np
 
-    class MyVolume(Proxy):
+    class MyVolume(sb.Proxy):
 
         @classmethod
         def file_ext(cls):
             return ".custom"
 
-    class OtherVolume(Proxy):
+    class OtherVolume(sb.Proxy):
 
         @classmethod
         def file_ext(cls):
@@ -336,8 +332,8 @@ def test_combine_proxify_and_resolve():
 
     data = np.random.uniform(1.0, 1.0, size=[16, 16, 16])
 
-    @proxify
-    def foo(bar: Resolve[str], outputs: proxy.ProxyParam[MyVolume] = Output(MyVolume)):
+    @sb.proxify
+    def foo(bar: sb.Resolve[str], outputs: sb.ProxyParam[MyVolume] = sb.Output(MyVolume)):
         assert bar == "42.0"
         assert outputs == "/tmp/temp_file_0.custom"
 
@@ -364,10 +360,10 @@ def test_combine_proxify_and_resolve():
 
 def test_named_proxy():
 
-    PosFile = namedproxy("PosFile", file_ext=".pos")
+    PosFile = sb.namedproxy("PosFile", file_ext=".pos")
 
-    @proxify
-    def foo(position: ProxyParam[PosFile], result: ProxyParam = Output(PosFile)):
+    @sb.proxify
+    def foo(position: sb.ProxyParam[PosFile], result: sb.ProxyParam = sb.Output(PosFile)):
         assert position == "/path/to/position.pos"
 
     container = Container()
