@@ -13,6 +13,7 @@ from ..utils.func_params import extract_func_params
 from .dijkstra import find_shortest_path, PathfindingContainer
 
 from typing import (
+    Hashable,
     Tuple,
     Set,
     List,
@@ -197,7 +198,7 @@ class resolution_context:
 class Registry:
 
     def __init__(self) -> None:
-        self.graph = nx.DiGraph()
+        self.graph: nx.DiGraph[Type[Hashable]] = nx.DiGraph()
 
     def get_registered_modules(self) -> Set[str]:
         modules = {v[2] for v in self.graph.edges.data("module")}  # type: ignore
@@ -212,12 +213,12 @@ class Registry:
 
         path = f"{module}.{qualname}"
         if strip_last:
-            path = path.split(".")[:-1]
-            if path[-1] == "<locals>":
-                path = path[:-1]
-            path = ".".join(path)
+            parts = path.split(".")[:-1]
+            if parts and parts[-1] == "<locals>":
+                parts = parts[:-1]
+            path = ".".join(parts)
 
-        return path  #
+        return path
 
     def add_resolver(
         self,
@@ -293,7 +294,7 @@ class Registry:
 
         selected_edges = [
             (u, v, e)
-            for u, v, e in self.graph.edges(data=True)
+            for u, v, e in self.graph.edges(data=True) # type: ignore
             if e["module"] in namespace
         ]
         subgraph = nx.DiGraph(selected_edges)
@@ -475,7 +476,7 @@ class Registry:
         # the parent module is always visible when resolving types
         assert origin_module_name.startswith(target_module_name)
 
-        for _, _, attr in self.graph.edges(data=True):
+        for _, _, attr in self.graph.edges(data=True): # type: ignore
             if attr["module"] == origin_module_name:
                 attr["module"] = target_module_name
 
@@ -509,8 +510,7 @@ class Registry:
 
 
 DEFAULT_REGISTRY = Registry()
-CURRENT_CTX = None
-
+CURRENT_CTX: Optional[ResolveContext] = None
 
 def current_registry() -> Registry:
     global CURRENT_CTX
