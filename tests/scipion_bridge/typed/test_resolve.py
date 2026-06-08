@@ -4,11 +4,6 @@ import logging
 import scipion_bridge as sb
 import scipion_bridge.core.typed.resolve as resolve
 from scipion_bridge.core.typed.resolve import ScopedPathfindingContainer as Container
-from scipion_bridge.core.typed.proxy import Proxy, Output
-
-# from scipion_bridge.core.typed import common
-
-from typing import Any
 
 import pytest
 

@@ -1,5 +1,4 @@
 import os
-import logging
 import warnings
 from pathlib import Path
 
@@ -15,9 +14,7 @@ from scipion_bridge.core.environment.container import Container
 from scipion_bridge.core.utils.arc import manager as arc_manager
 
 import pytest
-from typing import Optional, Tuple, Any
-
-# logging.basicConfig(level=logging.DEBUG)
+from typing import Optional, Tuple
 
 
 class TempFileMock:
@@ -181,7 +178,7 @@ def test_resolve_proxy_multi_output():
 
     temp_file_mock = TempFileMock()
     with container.temp_file_provider.override(temp_file_mock):
-        output: Tuple[Proxy, Proxy] = foo()  # type: ignore
+        output: Tuple[sb.Proxy, sb.Proxy] = foo()  # type: ignore
 
         assert str(output[0].path) == "/tmp/temp_file_0.vol"
         assert str(output[1].path) == "/tmp/temp_file_1.vol"
