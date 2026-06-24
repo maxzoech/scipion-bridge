@@ -3,5 +3,5 @@ from .core.typed.resolve import resolver, resolve_params, resolve, lift_resolver
 from .core.typed import proxy
 from .core.typed.proxy import proxify, Proxy, Output, ProxyParam, namedproxy
 
-from scipion_bridge.core.typed import common
+from .core.typed import common
 lift_resolvers(common, proxy)
