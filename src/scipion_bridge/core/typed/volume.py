@@ -3,7 +3,7 @@ import numpy as np
 from .proxy import Proxy
 from .array import ArrayConvertable
 
-from xmipp_metadata.image_handler import ImageSpider as _BackendSpiderImage
+from xmipp_metadata.image_handler import ImageSpider as _BackendSpiderImage # type: ignore
 
 
 class VolumeVisualizeable:

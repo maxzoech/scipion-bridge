@@ -1,12 +1,9 @@
 import sys
 import logging
+
+import scipion_bridge as sb
 import scipion_bridge.core.typed.resolve as resolve
 from scipion_bridge.core.typed.resolve import ScopedPathfindingContainer as Container
-from scipion_bridge.core.typed.proxy import Proxy, Output
-
-from scipion_bridge.core.typed import common
-
-from typing import Any
 
 import pytest
 
@@ -60,12 +57,12 @@ def test_unresolvable_types_error():
 
 def test_resolved_func():
 
-    @resolve.resolver
+    @sb.resolver
     def resolve_float_to_int(value: float) -> int:
         return int(value)
 
-    @resolve.resolve_params
-    def foo(bar: resolve.Resolve[str, int], number: float, value):
+    @sb.resolve_params
+    def foo(bar: sb.Resolve[str, int], number: float, value):
         assert bar == "10"
         assert number == 42.0
         assert value == "Test"
@@ -76,16 +73,16 @@ def test_resolved_func():
 
 def test_resolve_func_default_params():
 
-    @resolve.resolve_params
-    def foo(bar: resolve.Resolve[str] = 10):
+    @sb.resolve_params
+    def foo(bar: sb.Resolve[str] = 10):
         assert bar == "10"
 
     foo()
 
 
 def test_resolve_passthrough():
-    @resolve.resolve_params
-    def foo(bar: resolve.Resolve[int, float]):
+    @sb.resolve_params
+    def foo(bar: sb.Resolve[int, float]):
         assert bar == 42
 
     foo(42)
@@ -240,19 +237,19 @@ def test_pathfinding_container_ordering_local_scope_shadowing():
 def test_resolve_namespaces():
 
     def bar():
-        @resolve.resolver
+        @sb.resolver
         def resolve_float(value: float) -> str:
             return str(value * 2)
 
-        @resolve.resolve_params
-        def foo(bar: resolve.Resolve[str]):
+        @sb.resolve_params
+        def foo(bar: sb.Resolve[str]):
             return bar
 
         r = foo(42.0)
         return r
 
-    @resolve.resolve_params
-    def foo(bar: resolve.Resolve[str]):
+    @sb.resolve_params
+    def foo(bar: sb.Resolve[str]):
         return bar
 
     r = bar()
@@ -265,28 +262,28 @@ def test_resolve_namespaces():
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="Requires Python 3.11 or higher")
 def test_resolve_namespaces_recursive():
 
-    logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(level=logging.INFO)
 
-    @resolve.resolver
+    @sb.resolver
     def resolve_tuple_to_str_underline(value: tuple) -> str:
         return "_".join(
-            [resolve.current_registry().resolve(v, astype=str) for v in value]
+            [sb.resolve(v, astype=str) for v in value]
         )
 
     def bar():
-        @resolve.resolver
+        @sb.resolver
         def resolve_float(value: float) -> str:
             return str(value * 2)
 
-        @resolve.resolve_params
-        def foo(bar: resolve.Resolve[str]):
+        @sb.resolve_params
+        def foo(bar: sb.Resolve[str]):
             return bar
 
         r = foo((42.0, 40.0, 5.0))
         return r
 
-    @resolve.resolve_params
-    def foo(bar: resolve.Resolve[str]):
+    @sb.resolve_params
+    def foo(bar: sb.Resolve[str]):
         return bar
 
     r = bar()
@@ -297,4 +294,5 @@ def test_resolve_namespaces_recursive():
 
 
 if __name__ == "__main__":
+    # logging.basicConfig(level=logging.DEBUG)
     test_resolve_namespaces_recursive()

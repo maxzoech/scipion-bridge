@@ -11,7 +11,7 @@ from ..environment.cmd_exec import ShellExecProvider
 
 import ast
 import inspect
-import autopep8
+import autopep8 # type: ignore
 from typing import Dict, Any, Callable, Set, List
 
 import itertools
@@ -152,7 +152,7 @@ def foreign_function(
         if postprocess_fn is not None:
             raw_args = postprocess_fn(raw_args)
 
-        raw_args = itertools.chain.from_iterable(raw_args)
+        raw_args = list(itertools.chain.from_iterable(raw_args))
         raw_args = domain.command + [func_name, *raw_args]
 
         return __scipion_bridge_runner__(func_name, domain, raw_args, run_args)

@@ -16,11 +16,11 @@ from ..utils.func_params import extract_func_params
 from ..utils.arc import manager as arc_manager
 
 from .resolve import current_registry, resolve_params, resolver, Registry
-from typing import Optional, Generic, Type, Union, TYPE_CHECKING, Any
+from typing import Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast
 from typing_extensions import TypeAlias, TypeVar, get_args, get_origin
 
 
-Casted = TypeVar("Casted")
+Casted = TypeVar("Casted", bound="Proxy")
 T = TypeVar("T")
 
 Intermediate = TypeVar("Intermediate", default=Any)
@@ -163,22 +163,28 @@ class Output(Generic[T]):
 
         current_registry().add_resolver(Output, dtype, resolver=resolve_output_to_proxy)
 
+class ProxyProtocol(Protocol):
+    @classmethod
+    def file_ext(cls) -> Optional[str]: ...
 
-def namedproxy(typename: str, *, file_ext: str):
+def namedproxy(typename: str, *, file_ext: str) -> Type[ProxyProtocol]:
     if not typename.isidentifier():
         raise ValueError("The typename must be a valid identifier")
 
     if not file_ext.startswith("."):
         raise ValueError("The file extension must start with a .")
+    
+    _ext = file_ext
 
-    @classmethod
-    def file_ext_func(cls) -> Optional[str]:
-        return file_ext
+    class ProxySubclass(Proxy):
+        
+        @classmethod
+        def file_ext(cls) -> Optional[str]:
+            return _ext
 
-    proxy_subclass = type(typename, (Proxy,), {})
-    proxy_subclass.file_ext = file_ext_func  # type: ignore
-
-    return proxy_subclass
+    ProxySubclass.__name__ = typename
+    ProxySubclass.__qualname__ = typename
+    return ProxySubclass
 
 
 if TYPE_CHECKING:
@@ -198,7 +204,8 @@ def proxify(f):
     signature = inspect.signature(f)
 
     def _proxy_from_func_param(param: FuncParam):
-        cls = (
+        cls: Type[Proxy] = cast(
+            Type[Proxy],
             param.dtype if param.dtype is not None else Proxy
         )  # Create new untyped proxy if we only pass a path here
         assert issubclass(cls, Proxy)
