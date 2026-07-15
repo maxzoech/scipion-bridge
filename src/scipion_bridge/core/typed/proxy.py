@@ -16,8 +16,8 @@ from ..utils.func_params import extract_func_params
 from ..utils.arc import manager as arc_manager
 
 from .resolve import current_registry, resolve_params, resolver, Registry
-from typing import Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast
-from typing_extensions import TypeAlias, TypeVar, get_args, get_origin
+from typing import Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast, Callable
+from typing_extensions import TypeAlias, TypeVar, get_args, get_origin, ParamSpec
 
 
 Casted = TypeVar("Casted", bound="Proxy")
@@ -25,6 +25,9 @@ T = TypeVar("T")
 
 Intermediate = TypeVar("Intermediate", default=Any)
 Origin = TypeVar("Origin", default=Any)
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class FuncParam:
@@ -188,18 +191,14 @@ def namedproxy(typename: str, *, file_ext: str) -> Type[ProxyProtocol]:
 
 
 if TYPE_CHECKING:
-
-    # class ResolveProxy():
-    #     pass  # Marker Type
-
-    ResolveProxy = Union[Output[Intermediate], Intermediate, Origin]
+    ResolveProxy: TypeAlias = Union[Output[Intermediate], Intermediate, Origin]
 else:
 
     class ResolveProxy(Generic[Intermediate, Origin]):
         pass  # Marker Type
 
 
-def proxify(f):
+def proxify(f: Callable[P, R]) -> Callable[P, R]:
 
     signature = inspect.signature(f)
 

@@ -36,11 +36,11 @@ class _PyWorkflowExecProvider(ShellExecProvider):
     def run(self, func_name, domain: Domain, args: List[str], run_args):
         del run_args
 
-        domain_cmd = " ".join(domain.command)
-        cmd = f"{self._conda_epilogue} && {domain_cmd} {func_name}"
-        
-        self.backend.runJob(cmd, args, numberOfMpi=1)
-
+        cmd = " ".join(args)
+        if domain.isolated:
+            self.backend.runJob(self._conda_epilogue, cmd, numberOfMpi=1)
+        else:
+            self.backend.runJob(cmd, "", numberOfMpi=1)
 
 class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
 

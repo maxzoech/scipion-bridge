@@ -44,7 +44,7 @@ def test_basic_xmipp_func(mocker: MockerFixture):
         )
 
 
-@xmipp_func(inputs="i", outputs="o")
+@xmipp_func(inputs="input-file", outputs="output-file")
 def xmipp_to_something_with_mapping(inputs: str, outputs: str, *, keyword_param: int):
     pass
 
@@ -66,9 +66,9 @@ def test_basic_xmipp_func_with_mapping(mocker: MockerFixture):
                 "scipion",
                 "run",
                 "xmipp_to_something_with_mapping",
-                "-i",
+                "-input-file",
                 "/some/input",
-                "-o",
+                "-output-file",
                 "/some/output",
                 "--keyword_param",
                 "42",

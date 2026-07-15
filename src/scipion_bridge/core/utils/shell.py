@@ -27,6 +27,15 @@ F = TypeVar("F", bound=Callable[..., Any])
 class Domain:
     name: str
     command: List[str]
+    isolated: bool = False
+
+    @classmethod
+    def default(cls) -> "Domain":
+        return Domain(
+            name="Default",
+            command=[],
+            isolated=False
+        )
 
 
 class ShellDecoratorProtocol(Protocol):
@@ -68,7 +77,7 @@ class ShellDecoratorProtocol(Protocol):
 def shell_command(
     f: F,
     *,
-    domain: Domain,
+    domain: Domain = Domain.default(),
     name: Optional[str] = None,
     postprocess_fn: Optional[Callable] = None,
     **args_map,
@@ -80,7 +89,7 @@ def shell_command(
 def shell_command(
     f: None = None,
     *,
-    domain: Domain,
+    domain: Domain = Domain.default(),
     name: Optional[str] = None,
     postprocess_fn: Optional[Callable] = None,
     **args_map,
@@ -91,7 +100,7 @@ def shell_command(
 def shell_command(
     f: Optional[Callable] = None,
     *,
-    domain: Domain,
+    domain: Domain = Domain.default(),
     name: Optional[str] = None,
     postprocess_fn: Optional[Callable] = None,
     **args_map,
@@ -146,18 +155,18 @@ def _param_to_cmd_args(
 ):
 
     k = param.name
-    param = param.replace(name=args_map[k]) if k in args_map else param
-    boolean_params = {args_map[p] if p in args_map else p for p in boolean_params}
+    arg_name = args_map[k] if k in args_map else k
+    mapped_boolean_params = {args_map[p] if p in args_map else p for p in boolean_params}
 
-    if param.name in boolean_params:
+    if arg_name in mapped_boolean_params:
         return (
-            [f"--{param.name}"] if value else []
+            [f"--{arg_name}"] if value else []
         )  # Use `if value` to support implicit booleaness of Python
     else:
         is_keyword = param.kind == inspect.Parameter.KEYWORD_ONLY
         prefix = "--" if is_keyword else "-"
 
-        return [prefix + param.name, str(value)]
+        return [prefix + arg_name, str(value)]
 
 
 def _shell_command_wrapper(
