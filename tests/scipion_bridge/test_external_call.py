@@ -82,7 +82,7 @@ def xmipp_boolean(inputs: str, *, boolean_flag: bool):
 
 
 @pytest.mark.parametrize(
-    "flag,rename_flag", itertools.product([True, False], [True, False])
+    "flag,rename_flag", list(itertools.product([True, False], [True, False]))
 )
 def test_boolean_function(mocker: MockerFixture, flag: bool, rename_flag: bool):
     flag_name = "renamed" if rename_flag else "boolean_flag"

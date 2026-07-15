@@ -3,5 +3,5 @@ def configure_default_env():
 
     container = Container()
     container.wire(
-        modules=[__name__, "scipion_bridge.ffi.scipion"], packages=["scipion_bridge"]
+        modules=[__name__, "scipion_bridge"], packages=["scipion_bridge"]
     )

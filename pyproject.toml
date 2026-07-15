@@ -23,6 +23,12 @@ pytest-mock = "*"
 pytest-cov = "*"
 numpy = "*"
 
+# Optional dependencies
+scipion-pyworkflow = { version = "^3.11", optional = true }
+
 [build-system]
 requires = ["poetry-core>=1.0.0,<2.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.extras]
+pyworkflow = ["scipion-pyworkflow"]

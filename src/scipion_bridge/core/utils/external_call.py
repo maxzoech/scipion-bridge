@@ -155,6 +155,8 @@ def foreign_function(
         raw_args = list(itertools.chain.from_iterable(raw_args))
         raw_args = domain.command + [func_name, *raw_args]
 
+        print(f"Runner: {__scipion_bridge_runner__}")
+
         return __scipion_bridge_runner__(func_name, domain, raw_args, run_args)
 
     return wrapper
