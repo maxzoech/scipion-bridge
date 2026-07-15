@@ -11,8 +11,8 @@ from ..environment.cmd_exec import ShellExecProvider
 
 import ast
 import inspect
-import autopep8 # type: ignore
-from typing import Dict, Any, Callable, Set, List
+import autopep8  # type: ignore
+from typing import Dict, Any, Callable, Optional, Set, List
 
 import itertools
 import functools
@@ -63,27 +63,13 @@ def _param_to_cmd_args(
         return [prefix + param.name, str(value)]
 
 
-def foreign_function(
+def _shell_command_wrapper(
     f,
     domain: Domain,
-    func_name=None,
-    args_map=None,
-    args_validation=None,
+    name=None,
     postprocess_fn=None,
-    **run_args,
+    args_map=None,
 ):
-    """
-    Use this decorator to expose XMIPP programs to Python.
-
-    XMIPP programs are called in the command line using scipion, for example
-    `scipion run xmipp_xmipp_volume_from_pdb -i ... -o ...`. The
-    `foreign_function` decorator sets up wiring to transform a Python function
-    call into command line arguments.
-
-    When exposing an XMIPP program you can rename input arguments to make the
-    function more Pythonic and add input validation. See Exposing XMIPP Programs
-    for more details.
-    """
 
     is_empty = _func_is_empty(f)
     if not is_empty:
@@ -93,10 +79,8 @@ def foreign_function(
 
     if args_map is None:
         args_map = {}
-    if args_validation is None:
-        args_validation = {}
 
-    func_name = func_name if func_name is not None else f.__name__
+    func_name = name if name is not None else f.__name__
 
     signature = inspect.signature(f)
     params = signature.parameters
@@ -111,11 +95,9 @@ def foreign_function(
     if boolean_params.intersection(pos_args):
         raise RuntimeError("Positional arguments cannot be declared as boolean flags")
 
+    run_args: Dict[str, Any] = {}
     run_args.setdefault("shell", True)
-    # run_args["stdout"]=PIPE
     run_args["stderr"] = PIPE
-
-    args_validation = {k: re.compile(v) for k, v in args_validation.items()}
 
     @functools.wraps(f)
     @inject
@@ -133,18 +115,6 @@ def foreign_function(
         # Filter args that are None to support optional arguments
         merged_args = {k: v for k, v in merged_args.items() if v is not None}
 
-        # Validate inputs before calling external program
-        # arg_names = {k.name for k in merged_args}
-        for arg, value in merged_args.items():
-            if not arg.name in args_validation:
-                continue
-
-            pattern = args_validation[arg.name]
-            if not re.fullmatch(pattern, value):
-                raise ValueError(
-                    f"Value '{value}' for does not have the required format for '{arg.name}'"
-                )
-
         raw_args = [
             _param_to_cmd_args(p, v, args_map, boolean_params)
             for p, v in merged_args.items()
@@ -160,3 +130,25 @@ def foreign_function(
         return __scipion_bridge_runner__(func_name, domain, raw_args, run_args)
 
     return wrapper
+
+
+def shell_command(
+    f: Optional[Callable] = None,
+    *,
+    domain: Domain,
+    name: Optional[str] = None,
+    postprocess_fn: Optional[Callable] = None,
+    **args_map,
+):
+    def _wrap(func: Callable) -> Callable:
+        return _shell_command_wrapper(
+            func,
+            domain,
+            name,
+            postprocess_fn,
+            args_map,
+        )
+
+    if f is None:
+        return _wrap
+    return _wrap(f)

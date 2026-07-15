@@ -1,14 +1,14 @@
 import itertools
 from functools import partial
 
-from scipion_bridge.core.utils.external_call import foreign_function, Domain
-from scipion_bridge.core.environment.container import Container
+import scipion_bridge as B
+from scipion_bridge.core.environment import Container
 
 import pytest
 from pytest_mock import MockerFixture
 
-xmipp_domain = Domain("XMIPP", ["scipion", "run"])
-xmipp_func = partial(foreign_function, domain=xmipp_domain)
+xmipp_domain = B.Domain("XMIPP", ["scipion", "run"])
+xmipp_func = partial(B.shell_command, domain=xmipp_domain)
 
 
 @xmipp_func
@@ -44,7 +44,7 @@ def test_basic_xmipp_func(mocker: MockerFixture):
         )
 
 
-@partial(xmipp_func, args_map={"inputs": "i", "outputs": "o"})
+@xmipp_func(inputs="i", outputs="o")
 def xmipp_to_something_with_mapping(inputs: str, outputs: str, *, keyword_param: int):
     pass
 
@@ -90,7 +90,7 @@ def test_boolean_function(mocker: MockerFixture, flag: bool, rename_flag: bool):
         {"inputs": "i", "boolean_flag": flag_name} if rename_flag else {"inputs": "i"}
     )
 
-    _xmipp_boolean = xmipp_func(xmipp_boolean, args_map=args_map)
+    _xmipp_boolean = xmipp_func(xmipp_boolean, **args_map)
 
     container = Container()
     container.wire(modules=[__name__])
@@ -164,7 +164,7 @@ def test_non_empty_function():
 def test_inner_func_definition():
     try:
 
-        @partial(xmipp_func)
+        @xmipp_func
         def xmipp_to_something_with_mapping():
             pass
 
@@ -181,42 +181,7 @@ def test_invalid_boolean_args_definition():
         xmipp_func(xmipp_invalid_flag_function)
 
 
-@partial(
-    xmipp_func,
-    args_map={"some_argument": "renamed"},
-    args_validation={"some_argument": "(.+)\\.vol"},
-)
-def xmipp_function_with_validation(some_argument: str):
-    pass
-
-
-def test_argument_validation(mocker: MockerFixture):  # , arg_name):
-    container = Container()
-    container.wire(modules=[__name__])
-
-    exec_mock = mocker.Mock()
-
-    with container.shell_exec.override(exec_mock):
-        xmipp_function_with_validation("/some/path/to/file.vol")
-
-        exec_mock.assert_called_with(
-            "xmipp_function_with_validation",
-            xmipp_domain,
-            [
-                "scipion",
-                "run",
-                "xmipp_function_with_validation",
-                "-renamed",
-                "/some/path/to/file.vol",
-            ],
-            {"shell": True, "stderr": -1},
-        )
-
-        with pytest.raises(ValueError):
-            xmipp_function_with_validation("/some/path/to/file.invalid")
-
-
-@partial(xmipp_func, postprocess_fn=lambda x: [[x[0][1]]] + x[1:])
+@xmipp_func(postprocess_fn=lambda x: [[x[0][1]]] + x[1:])
 def xmipp_func_custom_postprocessing(argument: str, *, flag: bool):
     pass
 

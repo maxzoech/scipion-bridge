@@ -11,7 +11,7 @@ from dependency_injector.wiring import Provide, inject
 from scipion_bridge.core.environment import temp_files
 from scipion_bridge.core.environment.cmd_exec import ShellExecProvider
 from scipion_bridge.core.environment.temp_files import TemporaryFilesProvider
-from scipion_bridge.core.utils.external_call import Domain
+from scipion_bridge.core.utils.shell import Domain
 
 from scipion_bridge.core.environment.container import Container as CoreContainer
 from typing import Optional
