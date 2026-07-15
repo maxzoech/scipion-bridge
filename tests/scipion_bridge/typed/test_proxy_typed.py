@@ -137,8 +137,8 @@ def test_resolve_proxified():
 
     @sb.proxify
     def foo(
-        inputs: sb.ProxyParam[TextFile],
-        outputs: sb.ProxyParam = sb.Output(TextFile),
+        inputs: sb.ResolveProxy[TextFile],
+        outputs: sb.ResolveProxy = sb.Output(TextFile),
     ) -> Optional[sb.Proxy]:
         assert inputs == "/path/to/input.txt"
         assert outputs == "/path/to/output.txt"
@@ -258,8 +258,8 @@ def test_proxify_with_params():
 
     @sb.proxify
     def foo(
-        inputs: sb.ProxyParam[TextFile],
-        outputs: sb.ProxyParam[sb.Output] = sb.Output(Volume),
+        inputs: sb.ResolveProxy[TextFile],
+        outputs: sb.ResolveProxy[sb.Output] = sb.Output(Volume),
         bar: Optional[Tuple] = None,
         *,
         value=None,
@@ -294,7 +294,7 @@ def test_proxify_with_params():
 def test_resolve_proxify_with_type_error():
 
     @sb.proxify
-    def foo(inputs: sb.ProxyParam[TextFile]):
+    def foo(inputs: sb.ResolveProxy[TextFile]):
         assert inputs == "/path/to/text_file.txt"
 
     with pytest.raises(TypeError):
@@ -330,7 +330,7 @@ def test_combine_proxify_and_resolve():
     data = np.random.uniform(1.0, 1.0, size=[16, 16, 16])
 
     @sb.proxify
-    def foo(bar: sb.Resolve[str], outputs: sb.ProxyParam[MyVolume] = sb.Output(MyVolume)):
+    def foo(bar: sb.Resolve[str], outputs: sb.ResolveProxy[MyVolume] = sb.Output(MyVolume)):
         assert bar == "42.0"
         assert outputs == "/tmp/temp_file_0.custom"
 
@@ -360,7 +360,7 @@ def test_named_proxy():
     PosFile = sb.namedproxy("PosFile", file_ext=".pos")
 
     @sb.proxify
-    def foo(position: sb.ProxyParam[PosFile], result: sb.ProxyParam = sb.Output(PosFile)):
+    def foo(position: sb.ResolveProxy[PosFile], result: sb.ResolveProxy = sb.Output(PosFile)):
         assert position == "/path/to/position.pos"
 
     container = Container()

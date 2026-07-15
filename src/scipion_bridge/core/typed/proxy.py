@@ -189,13 +189,13 @@ def namedproxy(typename: str, *, file_ext: str) -> Type[ProxyProtocol]:
 
 if TYPE_CHECKING:
 
-    # class ProxyParam():
+    # class ResolveProxy():
     #     pass  # Marker Type
 
-    ProxyParam = Union[Output[Intermediate], Intermediate, Origin]
+    ResolveProxy = Union[Output[Intermediate], Intermediate, Origin]
 else:
 
-    class ProxyParam(Generic[Intermediate, Origin]):
+    class ResolveProxy(Generic[Intermediate, Origin]):
         pass  # Marker Type
 
 
@@ -215,7 +215,7 @@ def proxify(f):
     def _resolve_proxy_arg(value, param: inspect.Parameter) -> FuncParam:
         intermediate = None
 
-        if param.annotation is not None and get_origin(param.annotation) == ProxyParam:
+        if param.annotation is not None and get_origin(param.annotation) == ResolveProxy:
             args = get_args(param.annotation)
             if args:
                 arg = args[0]
