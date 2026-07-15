@@ -12,7 +12,7 @@ from ..environment.cmd_exec import ShellExecProvider
 import ast
 import inspect
 import autopep8  # type: ignore
-from typing import Dict, Any, Callable, Optional, Set, List
+from typing import Dict, Any, Callable, Optional, Set, List, Protocol, TypeVar, overload
 
 import itertools
 import functools
@@ -20,11 +20,108 @@ from functools import partial
 
 from .func_params import extract_func_params
 
+F = TypeVar("F", bound=Callable[..., Any])
+
 
 @dataclass
 class Domain:
     name: str
     command: List[str]
+
+
+class ShellDecoratorProtocol(Protocol):
+
+    @overload
+    def __call__(
+        self,
+        func: F,
+        *,
+        name: Optional[str] = None,
+        postprocess_fn: Optional[Callable] = None,
+        **args_map,
+    ) -> F:
+        ...
+
+    @overload
+    def __call__(
+        self,
+        func: None = None,
+        *,
+        name: Optional[str] = None,
+        postprocess_fn: Optional[Callable] = None,
+        **args_map,
+    ) -> "ShellDecoratorProtocol":
+        ...
+
+    def __call__(
+        self,
+        func: Optional[Callable] = None,
+        *,
+        name: Optional[str] = None,
+        postprocess_fn: Optional[Callable] = None,
+        **args_map,
+    ) -> Any:
+        ...
+
+
+@overload
+def shell_command(
+    f: F,
+    *,
+    domain: Domain,
+    name: Optional[str] = None,
+    postprocess_fn: Optional[Callable] = None,
+    **args_map,
+) -> F:
+    ...
+
+
+@overload
+def shell_command(
+    f: None = None,
+    *,
+    domain: Domain,
+    name: Optional[str] = None,
+    postprocess_fn: Optional[Callable] = None,
+    **args_map,
+) -> ShellDecoratorProtocol:
+    ...
+
+
+def shell_command(
+    f: Optional[Callable] = None,
+    *,
+    domain: Domain,
+    name: Optional[str] = None,
+    postprocess_fn: Optional[Callable] = None,
+    **args_map,
+) -> Any:
+    def _wrap(func: Optional[Callable] = None, **new_args) -> Any:
+        if new_args:
+            merged_name = new_args.pop("name", name)
+            merged_postprocess_fn = new_args.pop("postprocess_fn", postprocess_fn)
+            merged_args_map = {**args_map, **new_args}
+            return shell_command(
+                func,
+                domain=domain,
+                name=merged_name,
+                postprocess_fn=merged_postprocess_fn,
+                **merged_args_map,
+            )
+
+        if func is not None:
+            return _shell_command_wrapper(
+                func,
+                domain,
+                name,
+                postprocess_fn,
+                args_map,
+            )
+        return _wrap
+
+    if f is None:
+        return _wrap
+    return _wrap(f)
 
 
 def _func_is_empty(func):
@@ -130,25 +227,3 @@ def _shell_command_wrapper(
         return __scipion_bridge_runner__(func_name, domain, raw_args, run_args)
 
     return wrapper
-
-
-def shell_command(
-    f: Optional[Callable] = None,
-    *,
-    domain: Domain,
-    name: Optional[str] = None,
-    postprocess_fn: Optional[Callable] = None,
-    **args_map,
-):
-    def _wrap(func: Callable) -> Callable:
-        return _shell_command_wrapper(
-            func,
-            domain,
-            name,
-            postprocess_fn,
-            args_map,
-        )
-
-    if f is None:
-        return _wrap
-    return _wrap(f)

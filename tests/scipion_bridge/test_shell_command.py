@@ -8,7 +8,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 xmipp_domain = B.Domain("XMIPP", ["scipion", "run"])
-xmipp_func = partial(B.shell_command, domain=xmipp_domain)
+xmipp_func = B.shell_command(domain=xmipp_domain)
 
 
 @xmipp_func
@@ -86,11 +86,12 @@ def xmipp_boolean(inputs: str, *, boolean_flag: bool):
 )
 def test_boolean_function(mocker: MockerFixture, flag: bool, rename_flag: bool):
     flag_name = "renamed" if rename_flag else "boolean_flag"
-    args_map = (
-        {"inputs": "i", "boolean_flag": flag_name} if rename_flag else {"inputs": "i"}
+    
+    _xmipp_boolean = xmipp_func(
+        xmipp_boolean,
+        inputs="i",
+        boolean_flag="renamed" if rename_flag else "boolean_flag",
     )
-
-    _xmipp_boolean = xmipp_func(xmipp_boolean, **args_map)
 
     container = Container()
     container.wire(modules=[__name__])
