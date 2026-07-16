@@ -51,6 +51,32 @@ class Protocol(metaclass=abc.ABCMeta):
     def __init__(self) -> None:
         pass
 
+    def __repr__(self) -> str:
+        class_name = self.__class__.__name__
+        obj_id = hex(id(self))
+
+        def _fmt_type(t: Any) -> str:
+            if hasattr(t, "__name__"):
+                return t.__name__
+            
+            return "<Unnamed Type>"
+
+        inputs_lines = []
+        for k, v in self._exec_info.inputs.items():
+            inputs_lines.append(f"    {k} ({_fmt_type(v)}):")
+        for k, v in self._exec_info.configuration.items():
+            inputs_lines.append(f"    {k} ({_fmt_type(v)}):")
+        inputs_str = "\n".join(inputs_lines)
+
+        states_str = ", ".join([f"{k}({_fmt_type(v)})" for k, v in self._exec_info.states.items()])
+
+        return f"""<{class_name} object at {obj_id}>
+
+Inputs:
+{inputs_str}
+
+States: {states_str}"""
+
     @abc.abstractmethod
     def run(self, *args: Any, **kwargs: Any):
         pass

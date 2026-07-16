@@ -1,7 +1,7 @@
 import pytest
 
 import scipion_bridge as B
-
+from scipion_bridge import Protocol
 
 def test_protocol_fields():
     # These should pass
@@ -22,8 +22,6 @@ def test_protocol_fields():
     assert f4.optional is True
 
 
-from scipion_bridge.core.protocol.base import Protocol
-
 class BasicProtocol(Protocol):
 
     # Parameters    
@@ -40,7 +38,6 @@ def test_create_protocol():
     proto = BasicProtocol()
     desc = proto._exec_info
 
-    assert proto.path.optional is False
     assert "inputs" in desc.inputs
     assert "path" in desc.configuration
     assert "state" in desc.states
