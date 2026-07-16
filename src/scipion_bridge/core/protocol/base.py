@@ -8,10 +8,7 @@ from collections import OrderedDict
 from itertools import chain
 from typing import get_type_hints, get_origin, Any
 
-from typing import Generic, TypeVar, Optional, Literal, overload
-from enum import Enum
-
-T = TypeVar("T", str, int, float, Enum)
+from .fields import Field
 
 
 @dataclass
@@ -19,24 +16,6 @@ class _ProtocolInfo:
     inputs: OrderedDict[str, Any]
     states: OrderedDict[str, Any]
     configuration: OrderedDict[str, Any]
-
-
-class Field(Generic[T]):
-
-    @overload
-    def __init__(self, default: T, optional: Literal[False] = False): ...
-
-    @overload
-    def __init__(self, default: Optional[T] = None, optional: Literal[True] = True): ...
-
-    def __init__(self, default: Optional[T] = None, optional: Optional[bool] = None):
-        super().__init__()
-
-        if optional is None:
-            optional = default is None
-
-        self.default: Optional[T] = default
-        self.optional: bool = optional
 
 
 class Protocol(metaclass=abc.ABCMeta):
@@ -76,6 +55,74 @@ Inputs:
 {inputs_str}
 
 States: {states_str}"""
+
+    def _defineParams(self, form: Any) -> None:
+        try:
+            from pyworkflow.protocol.params import (
+                StringParam, IntParam, FloatParam, BooleanParam
+            )
+        except ImportError:
+            raise ImportError(
+                "Defining Scipion parameters requires pyworkflow. "
+                "Install it using: pip install \"scipion-bridge[pyworkflow]\""
+            )
+
+        from typing import get_args, get_origin, Union
+
+        def _get_underlying_type(hint: Any) -> Any:
+            origin = get_origin(hint)
+            if origin == Field:
+                args = get_args(hint)
+                return args[0] if args else Any
+            elif isinstance(hint, type) and issubclass(hint, Field):
+                if hasattr(hint, "__orig_bases__") and hint.__orig_bases__:
+                    args = get_args(hint.__orig_bases__[0])
+                    return args[0] if args else Any
+            return Any
+
+        def _map_type(dtype: Any) -> Any:
+            if get_origin(dtype) is Union:
+                args = [a for a in get_args(dtype) if a is not type(None)]
+                if args:
+                    dtype = args[0]
+
+            if dtype is str:
+                return StringParam
+            elif dtype is int:
+                return IntParam
+            elif dtype is float:
+                return FloatParam
+            elif dtype is bool:
+                return BooleanParam
+            else:
+                return StringParam
+
+        hints = get_type_hints(self.__class__)
+        
+        fields = OrderedDict()
+        for name, hint in hints.items():
+            is_field = False
+            if get_origin(hint) == Field or hint == Field:
+                is_field = True
+            elif isinstance(hint, type) and issubclass(hint, Field):
+                is_field = True
+
+            if is_field:
+                field_obj = getattr(self.__class__, name, None)
+                if isinstance(field_obj, Field):
+                    underlying_type = _get_underlying_type(hint)
+                    fields[name] = (field_obj, underlying_type)
+
+        for name, (field, dtype) in fields.items():
+            param_cls = _map_type(dtype)
+            param_kwargs = {}
+
+            if field.default is not None:
+                param_kwargs["default"] = field.default
+            if field.help is not None:
+                param_kwargs["help"] = field.help
+
+            form.addParam(name, param_cls, **param_kwargs)
 
     @abc.abstractmethod
     def run(self, *args: Any, **kwargs: Any):
@@ -162,7 +209,13 @@ def _find_protocol_info(cls: type[Protocol]) -> _ProtocolInfo:
     for name in typed_assign_ops:
         value = attributes[name]
 
-        if get_origin(value) == Field:
+        is_field = False
+        if get_origin(value) == Field or value == Field:
+            is_field = True
+        elif isinstance(value, type) and issubclass(value, Field):
+            is_field = True
+
+        if is_field:
             if name in inputs:
                 inputs[name] = value
             else:
