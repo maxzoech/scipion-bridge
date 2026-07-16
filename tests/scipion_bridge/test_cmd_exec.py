@@ -2,7 +2,7 @@ import os
 import pytest
 import tempfile
 from scipion_bridge.core.utils.shell import Domain
-from scipion_bridge.core.environment.cmd_exec import ShellExecProvider
+from scipion_bridge.core.environment.cmd_exec import StandaloneExecProvider
 from subprocess import PIPE
 
 PYTHON_DOMAIN = Domain("PY", [])
@@ -10,7 +10,7 @@ PYTHON_DOMAIN = Domain("PY", [])
 
 def test_shell_exec():
 
-    provider = ShellExecProvider()
+    provider = StandaloneExecProvider()
 
     output = provider(
         "python",

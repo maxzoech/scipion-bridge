@@ -1,9 +1,21 @@
+from abc import ABC, abstractmethod
 from typing import List
-from subprocess import Popen, PIPE
+from subprocess import Popen
 
 from .domain import Domain
 
-class ShellExecProvider:
+
+class ShellExecProvider(ABC):
+
+    @abstractmethod
+    def run(self, func_name, domain, args: List[str], run_args):
+        pass
+
+    def __call__(self, *args, **kwds):
+        return self.run(*args, **kwds)
+
+
+class StandaloneExecProvider(ShellExecProvider):
 
     def run(self, func_name, domain, args: List[str], run_args):
 
@@ -21,5 +33,3 @@ class ShellExecProvider:
 
         return proc.returncode
 
-    def __call__(self, *args, **kwds):
-        return self.run(*args, **kwds)
