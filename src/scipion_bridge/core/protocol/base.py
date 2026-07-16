@@ -5,6 +5,7 @@ import abc
 
 from dataclasses import dataclass
 from collections import OrderedDict
+from itertools import chain
 from typing import get_type_hints, get_origin, Any
 
 from typing import Generic, TypeVar, Optional, Literal, overload
@@ -12,12 +13,13 @@ from enum import Enum
 
 T = TypeVar("T", str, int, float, Enum)
 
+
 @dataclass
 class _ProtocolInfo:
     inputs: OrderedDict[str, Any]
     states: OrderedDict[str, Any]
     configuration: OrderedDict[str, Any]
-    
+
 
 class Field(Generic[T]):
 
@@ -84,12 +86,15 @@ def _find_protocol_info(cls: type[Protocol]) -> _ProtocolInfo:
                 f"Method run() in {cls.__qualname__} has variational arguments"
             )
 
-        args = list(zip(arg_def.args[1:], arg_def.defaults))
-        kwargs = list(zip(arg_def.kwonlyargs, arg_def.kw_defaults))
+        padding = len(arg_def.args[1:]) - len(arg_def.defaults)
+        defaults = [None] * padding + list(arg_def.defaults)
+
+        args = zip(arg_def.args[1:], defaults)
+        kwargs = zip(arg_def.kwonlyargs, arg_def.kw_defaults)
 
         input_types = get_type_hints(cls.run)
         invalid_inputs = []
-        for arg, default in [*args, *kwargs]:
+        for arg, default in chain(args, kwargs):
             if arg.annotation is None:
                 invalid_inputs.append(arg.arg)
 
