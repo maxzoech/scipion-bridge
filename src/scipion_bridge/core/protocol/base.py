@@ -1,12 +1,12 @@
+from __future__ import annotations
 import inspect
 import autopep8  # type: ignore
 import ast
 import abc
 
 from dataclasses import dataclass
-from collections import OrderedDict
 from itertools import chain
-from typing import get_type_hints, get_origin, Any
+from typing import get_type_hints, get_origin, Any, OrderedDict
 
 from .fields import Field
 
