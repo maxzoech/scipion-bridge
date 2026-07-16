@@ -5,6 +5,9 @@ from .core.typed.proxy import proxify, Proxy, Output, ResolveProxy, namedproxy
 from .core.environment.domain import Domain
 from .core.utils.shell import shell_command
 
+from .core import protocol
+from .core.protocol import Protocol, Field
+
 from .core.typed import common
 lift_resolvers(common, proxy)
 
@@ -19,5 +22,7 @@ __all__ = [
     "ResolveProxy",
     "namedproxy",
     "shell_command",
-    "Domain"
+    "Domain",
+    "protocol",
+    "Field"
 ]
