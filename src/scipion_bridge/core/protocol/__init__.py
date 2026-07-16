@@ -1,7 +1,6 @@
-from .base import create_protocol, Field, Protocol
+from .base import Field, Protocol
 
 __all__ = [
-    "create_protocol",
     "Field",
     "Protocol",
 ]

@@ -22,10 +22,13 @@ def test_protocol_fields():
     assert f4.optional is True
 
 
-class BasicProtocol(B.Protocol):
+from scipion_bridge.core.protocol.base import Protocol
+
+class BasicProtocol(Protocol):
 
     # Parameters    
     path: B.Field[int] = B.Field(42)
+    inputs: B.Field[int] = B.Field(42)
 
     # Fields
     state: int = 42
@@ -35,9 +38,9 @@ class BasicProtocol(B.Protocol):
 
 def test_create_protocol():
     
-    desc = create_protocol(BasicProtocol())
-
-    print(BasicProtocol().path.optional)
+    desc = BasicProtocol()
+    
+    print(desc.__dict__)
 
 
 

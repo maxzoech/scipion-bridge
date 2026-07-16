@@ -3,9 +3,9 @@ import autopep8  # type: ignore
 import ast
 import abc
 
-from dataclasses import dataclass
+from itertools import zip_longest, chain
 from collections import OrderedDict
-from typing import get_type_hints, get_origin
+from typing import get_type_hints, get_origin, get_args
 
 from typing import Generic, TypeVar, Optional, Literal, overload, Any
 from enum import Enum
@@ -32,21 +32,11 @@ class Field(Generic[T]):
         self.default: Optional[T] = default
         self.optional: bool = optional
 
-class Protocol(metaclass=abc.ABCMeta):
-
-    def __init__(self):
-        pass
-
-    @abc.abstractmethod
-    def run(self, *args: Any, **kwargs: Any):
-        pass
-
-
 class ProtocolExecutionDescription:
 
     def __init__(
         self,
-        protocol: Protocol,
+        protocol: "Protocol",
         *,
         inputs: OrderedDict,
         configuration: OrderedDict,
@@ -57,6 +47,26 @@ class ProtocolExecutionDescription:
         self.inputs = inputs
         self.configuration = configuration
         self.states = states
+
+
+class ProtocolMetaclass(abc.ABCMeta):
+
+    def __call__(cls, *args: Any, **kwargs: Any) -> ProtocolExecutionDescription:
+        instance = super().__call__(*args, **kwargs)
+        return create_protocol(instance)
+
+
+class Protocol(metaclass=ProtocolMetaclass):
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> ProtocolExecutionDescription:  # type: ignore[misc]
+        return super().__new__(cls)  # type: ignore
+
+    def __init__(self):
+        pass
+
+    @abc.abstractmethod
+    def run(self, *args: Any, **kwargs: Any):
+        pass
 
 
 def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
@@ -85,26 +95,24 @@ def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
 
         arg_def = run_method_def.args
         if arg_def.vararg is not None or arg_def.kwarg is not None:
-            raise RuntimeError("Variational arguments are not supported in run method")
+            raise RuntimeError(f"Method run() in {type(protocol).__qualname__} has variational arguments")
 
-        args = list(zip(arg_def.args[1:], arg_def.defaults))
-        kwargs = list(zip(arg_def.kwonlyargs, arg_def.kw_defaults))
+        args = zip_longest(arg_def.args[1:], arg_def.defaults)
+        kwargs = zip_longest(arg_def.kwonlyargs, arg_def.kw_defaults)
 
         input_types = get_type_hints(protocol.run)
         invalid_inputs = []
-        for arg, default in [*args, *kwargs]:
+        for arg, default in chain(args, kwargs):
             if arg.annotation is None:
                 invalid_inputs.append(arg.arg)
-
             elif default is not None:
                 invalid_inputs.append(arg.arg)
-
             else:
                 inputs[arg.arg] = input_types[arg.arg]
 
         if len(invalid_inputs) > 0:
             invalid_inputs_list = ", ".join(invalid_inputs)
-            raise RuntimeError(f"Protocol inputs {invalid_inputs_list} either do not have type annotations or a default value.")
+            raise RuntimeError(f"Protocol inputs {invalid_inputs_list} in {type(protocol).__qualname__} either do not have type annotations or a default value.")
 
 
     # Check if the user has defined state without a type annotation
@@ -118,7 +126,7 @@ def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
     if len(untyped_assign_ops) > 0:
         invalid_state_list = ", ".join([f"'{s}'" for s in untyped_assign_ops])
         raise TypeError(
-            f"The protocol states {invalid_state_list} do not have type annotations."
+            f"The protocol states {invalid_state_list} in {type(protocol).__qualname__} do not have type annotations."
         )
 
     # Configure states
@@ -135,12 +143,19 @@ def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
 
         if get_origin(value) == Field:
             if name in inputs:
+                if not inputs[name] == get_args(value)[0]:
+                    raise TypeError(f"Type of input '{name}' in {type(protocol).__qualname__} must match with declared field")
+
                 inputs[name] = value
             else:
                 configuration[name] = value
         else:
+            if name in inputs:
+                raise TypeError(f"Input '{name}' in {type(protocol).__qualname__} cannot also be declared as a protocol state") 
+
             states[name] = value
 
+    print("Inputs: ", inputs)
     return ProtocolExecutionDescription(
         protocol,
         inputs=inputs,
