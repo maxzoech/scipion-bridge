@@ -1,7 +1,7 @@
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.core.protocol import create_protocol
+
 
 def test_protocol_fields():
     # These should pass
@@ -28,7 +28,6 @@ class BasicProtocol(Protocol):
 
     # Parameters    
     path: B.Field[int] = B.Field(42)
-    inputs: B.Field[int] = B.Field(42)
 
     # Fields
     state: int = 42
@@ -39,8 +38,8 @@ class BasicProtocol(Protocol):
 def test_create_protocol():
     
     desc = BasicProtocol()
-    
-    print(desc.__dict__)
+
+    assert desc.path.optional is False
 
 
 

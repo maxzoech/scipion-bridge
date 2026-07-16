@@ -3,25 +3,29 @@ import autopep8  # type: ignore
 import ast
 import abc
 
-from itertools import zip_longest, chain
+from dataclasses import dataclass
 from collections import OrderedDict
-from typing import get_type_hints, get_origin, get_args
+from typing import get_type_hints, get_origin, Any
 
-from typing import Generic, TypeVar, Optional, Literal, overload, Any
+from typing import Generic, TypeVar, Optional, Literal, overload
 from enum import Enum
 
 T = TypeVar("T", str, int, float, Enum)
 
+@dataclass
+class _ProtocolInfo:
+    inputs: OrderedDict[str, Any]
+    states: OrderedDict[str, Any]
+    configuration: OrderedDict[str, Any]
+    
 
 class Field(Generic[T]):
 
     @overload
-    def __init__(self, default: T, optional: Literal[False] = False):
-        ...
+    def __init__(self, default: T, optional: Literal[False] = False): ...
 
     @overload
-    def __init__(self, default: Optional[T] = None, optional: Literal[True] = True):
-        ...
+    def __init__(self, default: Optional[T] = None, optional: Literal[True] = True): ...
 
     def __init__(self, default: Optional[T] = None, optional: Optional[bool] = None):
         super().__init__()
@@ -32,36 +36,17 @@ class Field(Generic[T]):
         self.default: Optional[T] = default
         self.optional: bool = optional
 
-class ProtocolExecutionDescription:
 
-    def __init__(
-        self,
-        protocol: "Protocol",
-        *,
-        inputs: OrderedDict,
-        configuration: OrderedDict,
-        states: OrderedDict,
-    ):
-        
-        self.protocol = protocol
-        self.inputs = inputs
-        self.configuration = configuration
-        self.states = states
+class Protocol(metaclass=abc.ABCMeta):
 
+    _exec_info: _ProtocolInfo
 
-class ProtocolMetaclass(abc.ABCMeta):
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
 
-    def __call__(cls, *args: Any, **kwargs: Any) -> ProtocolExecutionDescription:
-        instance = super().__call__(*args, **kwargs)
-        return create_protocol(instance)
+        cls._exec_info = _find_protocol_info(cls)
 
-
-class Protocol(metaclass=ProtocolMetaclass):
-
-    def __new__(cls, *args: Any, **kwargs: Any) -> ProtocolExecutionDescription:  # type: ignore[misc]
-        return super().__new__(cls)  # type: ignore
-
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     @abc.abstractmethod
@@ -69,16 +54,16 @@ class Protocol(metaclass=ProtocolMetaclass):
         pass
 
 
-def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
+def _find_protocol_info(cls: type[Protocol]) -> _ProtocolInfo:
     def _is_run_method(el: ast.AST) -> bool:
         if not isinstance(el, ast.FunctionDef):
             return False
-        
-        return el.name == "run"
-        
-    attributes = get_type_hints(type(protocol))
 
-    source = inspect.getsource(type(protocol))
+        return el.name == "run"
+
+    attributes = get_type_hints(cls)
+
+    source = inspect.getsource(cls)
     source = autopep8.fix_code(source)
 
     tree = ast.parse(source)
@@ -95,25 +80,30 @@ def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
 
         arg_def = run_method_def.args
         if arg_def.vararg is not None or arg_def.kwarg is not None:
-            raise RuntimeError(f"Method run() in {type(protocol).__qualname__} has variational arguments")
+            raise RuntimeError(
+                f"Method run() in {cls.__qualname__} has variational arguments"
+            )
 
-        args = zip_longest(arg_def.args[1:], arg_def.defaults)
-        kwargs = zip_longest(arg_def.kwonlyargs, arg_def.kw_defaults)
+        args = list(zip(arg_def.args[1:], arg_def.defaults))
+        kwargs = list(zip(arg_def.kwonlyargs, arg_def.kw_defaults))
 
-        input_types = get_type_hints(protocol.run)
+        input_types = get_type_hints(cls.run)
         invalid_inputs = []
-        for arg, default in chain(args, kwargs):
+        for arg, default in [*args, *kwargs]:
             if arg.annotation is None:
                 invalid_inputs.append(arg.arg)
+
             elif default is not None:
                 invalid_inputs.append(arg.arg)
+
             else:
                 inputs[arg.arg] = input_types[arg.arg]
 
         if len(invalid_inputs) > 0:
             invalid_inputs_list = ", ".join(invalid_inputs)
-            raise RuntimeError(f"Protocol inputs {invalid_inputs_list} in {type(protocol).__qualname__} either do not have type annotations or a default value.")
-
+            raise RuntimeError(
+                f"Protocol inputs {invalid_inputs_list} in {cls.__qualname__} either do not have type annotations or a default value."
+            )
 
     # Check if the user has defined state without a type annotation
     untyped_assign_ops = [
@@ -126,7 +116,7 @@ def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
     if len(untyped_assign_ops) > 0:
         invalid_state_list = ", ".join([f"'{s}'" for s in untyped_assign_ops])
         raise TypeError(
-            f"The protocol states {invalid_state_list} in {type(protocol).__qualname__} do not have type annotations."
+            f"The protocol states {invalid_state_list} in {cls.__qualname__} do not have type annotations."
         )
 
     # Configure states
@@ -143,22 +133,14 @@ def create_protocol(protocol: Protocol) -> ProtocolExecutionDescription:
 
         if get_origin(value) == Field:
             if name in inputs:
-                if not inputs[name] == get_args(value)[0]:
-                    raise TypeError(f"Type of input '{name}' in {type(protocol).__qualname__} must match with declared field")
-
                 inputs[name] = value
             else:
                 configuration[name] = value
         else:
-            if name in inputs:
-                raise TypeError(f"Input '{name}' in {type(protocol).__qualname__} cannot also be declared as a protocol state") 
-
             states[name] = value
 
-    print("Inputs: ", inputs)
-    return ProtocolExecutionDescription(
-        protocol,
+    return _ProtocolInfo(
         inputs=inputs,
-        configuration=configuration,
         states=states,
+        configuration=configuration,
     )
