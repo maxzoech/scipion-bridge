@@ -10,7 +10,7 @@ from scipion_bridge.core.typed.resolve import (
 )
 
 import scipion_bridge as sb
-from scipion_bridge.core.environment.container import Container
+from scipion_bridge.backend.standalone.container import Container
 from scipion_bridge.core.utils.arc import manager as arc_manager
 
 import pytest

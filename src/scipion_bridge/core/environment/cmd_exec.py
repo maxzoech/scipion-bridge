@@ -1,6 +1,7 @@
 from typing import List
 from subprocess import Popen, PIPE
 
+from .domain import Domain
 
 class ShellExecProvider:
 

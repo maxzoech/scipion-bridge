@@ -5,23 +5,22 @@ from pathlib import Path
 import string
 import random
 
-from dependency_injector import containers, providers
-from dependency_injector.wiring import Provide, inject
+from ...core.environment.cmd_exec import ShellExecProvider
+from ...core.environment.temp_files import TemporaryFilesProvider
+from ...core.environment.domain import Domain
 
-from scipion_bridge.core.environment import temp_files
-from scipion_bridge.core.environment.cmd_exec import ShellExecProvider
-from scipion_bridge.core.environment.temp_files import TemporaryFilesProvider
-from scipion_bridge.core.utils.shell import Domain
-
-from scipion_bridge.core.environment.container import Container as CoreContainer
+from ..standalone.container import Container
 from typing import Optional
-
-import pwem # type: ignore
-from pyworkflow import Config # type: ignore
 
 class _PyWorkflowExecProvider(ShellExecProvider):
 
     def __init__(self, backend, conda_env: str):
+        try:
+            import pwem # type: ignore
+            from pyworkflow import Config # type: ignore
+        except ImportError:
+            raise ImportError("Using scipion bridge with scipion requires pyworkflow option. Install it using pip install \"scipion-bridge[pyworkflow]\"")
+
         self.backend = backend
         self.conda_env = conda_env
 
@@ -33,7 +32,7 @@ class _PyWorkflowExecProvider(ShellExecProvider):
 
         self._conda_epilogue = f"{base_env_act_cmd} {act_cmd}"
 
-    def run(self, func_name, domain: Domain, args: List[str], run_args):
+    def run(self, func_name: str, domain: "Domain", args: List[str], run_args):
         del run_args
 
         cmd = " ".join(args)
@@ -63,7 +62,7 @@ class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
 def configure_pyworkflow_env(backend, *, conda_env: str, modules=None, packages=None):
     from dependency_injector import providers
 
-    container = CoreContainer(
+    container = Container(
         shell_exec=providers.Factory(_PyWorkflowExecProvider, backend=backend, conda_env=conda_env),
         temp_file_provider=providers.Factory(_PyWorkflowTempFileProvider, backend=backend),
     )

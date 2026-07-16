@@ -6,8 +6,9 @@ from subprocess import Popen, PIPE
 from dependency_injector import containers, providers
 from dependency_injector.wiring import Provide, inject
 
-from ..environment.container import Container
+from ...backend.standalone.container import Container
 from ..environment.cmd_exec import ShellExecProvider
+from ..environment.domain import Domain
 
 import ast
 import inspect
@@ -21,22 +22,6 @@ from functools import partial
 from .func_params import extract_func_params
 
 F = TypeVar("F", bound=Callable[..., Any])
-
-
-@dataclass
-class Domain:
-    name: str
-    command: List[str]
-    isolated: bool = False
-
-    @classmethod
-    def default(cls) -> "Domain":
-        return Domain(
-            name="Default",
-            command=[],
-            isolated=False
-        )
-
 
 class ShellDecoratorProtocol(Protocol):
 

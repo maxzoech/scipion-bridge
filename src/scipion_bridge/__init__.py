@@ -2,7 +2,8 @@ from .core.typed.resolve import resolver, resolve_params, resolve, lift_resolver
 
 from .core.typed import proxy
 from .core.typed.proxy import proxify, Proxy, Output, ResolveProxy, namedproxy
-from .core.utils.shell import Domain, shell_command
+from .core.environment.domain import Domain
+from .core.utils.shell import shell_command
 
 from .core.typed import common
 lift_resolvers(common, proxy)

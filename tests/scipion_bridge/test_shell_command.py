@@ -2,7 +2,7 @@ import itertools
 from functools import partial
 
 import scipion_bridge as B
-from scipion_bridge.core.environment import Container
+from scipion_bridge.backend import Container
 
 import pytest
 from pytest_mock import MockerFixture

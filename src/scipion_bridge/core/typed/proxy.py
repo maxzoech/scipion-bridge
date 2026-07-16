@@ -8,7 +8,7 @@ from functools import partial, wraps
 import shutil
 
 from dependency_injector.wiring import Provide, inject
-from ..environment.container import Container
+from ...backend.standalone.container import Container
 from ..environment.temp_files import TemporaryFilesProvider
 from ..utils.arc import manager as arc_manager
 from ..utils.func_params import extract_func_params
