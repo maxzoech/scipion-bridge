@@ -3,9 +3,12 @@ import pytest
 import scipion_bridge as B
 from scipion_bridge import Protocol
 
+from typing import Any
+
+
 def test_protocol_fields():
     # These should pass
-    f1 = B.Field(42)
+    f1 = B.Field(default=42)
     assert f1.default == 42
     assert f1.optional is False
 
@@ -13,7 +16,7 @@ def test_protocol_fields():
     assert f2.default is None
     assert f2.optional is True
 
-    f3 = B.Field(42, optional=True)
+    f3 = B.Field(default=42, optional=True)
     assert f3.default == 42
     assert f3.optional is True
 
@@ -24,49 +27,29 @@ def test_protocol_fields():
 
 class BasicProtocol(Protocol):
 
-    # Parameters    
-    path: B.Field[int]
+    # Inputs
+    path: B.Input[str]
+    magic_number: B.Input[int] = B.Input(default=42, optional=True, label="Magic Number")
+
+    # Parameters
+    param: B.Field[float]
+    param_default: B.Field[int] = B.Field(default=42)
 
     # Fields
     state: int = 42
 
-    def run(self, inputs: int):
+    def run(self, path: int):
         pass
 
-from typing import Any
 def test_create_protocol():
     proto = BasicProtocol()
-    desc = proto._exec_info
 
-    assert "inputs" in desc.inputs
-    assert "path" in desc.configuration
-    assert "state" in desc.states
+    config = proto.configuration
+    assert config.inputs["path"] == B.Input[str](optional=False)
+    assert config.inputs["magic_number"] == B.Input[str](default=42, optional=True, label="Magic Number")
 
-
-def test_protocol_variational_args():
-    with pytest.raises(RuntimeError, match="Method run\\(\\) in .* has variational arguments"):
-        class VariationalProtocol(Protocol):
-            def run(self, *args: Any):
-                pass
-
-    with pytest.raises(RuntimeError, match="Method run\\(\\) in .* has variational arguments"):
-        class KwargsProtocol(Protocol):
-            def run(self, **kwargs: Any):
-                pass
-
-
-def test_protocol_missing_annotation():
-    with pytest.raises(RuntimeError, match="Protocol inputs inputs .* either do not have type annotations or a default value"):
-        class MissingAnnotationProtocol(Protocol):
-            def run(self, inputs):
-                pass
-
-
-def test_protocol_input_default_value():
-    with pytest.raises(RuntimeError, match="Protocol inputs inputs .* either do not have type annotations or a default value"):
-        class DefaultValueProtocol(Protocol):
-            def run(self, inputs: int = 42):
-                pass
+    assert config.parameters["param"] == B.Field(optional=False)
+    assert config.parameters["param_default"] == B.Field(default=42)
 
 
 def test_protocol_untyped_state():

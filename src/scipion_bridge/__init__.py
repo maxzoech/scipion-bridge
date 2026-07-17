@@ -6,7 +6,7 @@ from .core.environment.domain import Domain
 from .core.utils.shell import shell_command
 
 from .core import protocol
-from .core.protocol import Protocol, Field
+from .core.protocol import Protocol, Field, Input
 
 from .core.typed import common
 lift_resolvers(common, proxy)
@@ -25,4 +25,6 @@ __all__ = [
     "Domain",
     "protocol",
     "Protocol",
+    "Field",
+    "Input",
 ]

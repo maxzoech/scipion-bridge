@@ -3,24 +3,27 @@ from pathlib import Path
 import pickle
 from functools import partial
 
-import pwem # type: ignore
-from pwem.protocols import ProtProcessParticles, ProtFlexBase # type: ignore
-from pwem.objects import SetOfParticles, SetOfParticlesFlex, ParticleFlex, SetOfVolumes, Volume # type: ignore
-from pyworkflow.constants import BETA, Enum # type: ignore
-from pyworkflow.plugin import Domain # type: ignore
-from pwem.constants import ALIGN_PROJ, ALIGN_NONE # type: ignore
-import pyworkflow.protocol.params as params # type: ignore
-
-from ...core.protocol import Protocol
-from typing import Type
+from ...core.protocol import Protocol, Field
+from typing import Type, get_origin, get_args
 
 
 def convert_protocol_to_scipion3_protocol(
-    protocol: Type[Protocol],
+    protocol: Protocol,
     *,
     label: str,
     conda_env: str,    
 ):
+    try:
+        import pwem # type: ignore
+        from pwem.protocols import ProtProcessParticles, ProtFlexBase # type: ignore
+        from pwem.objects import SetOfParticles, SetOfParticlesFlex, ParticleFlex, SetOfVolumes, Volume # type: ignore
+        from pyworkflow.constants import BETA, Enum # type: ignore
+        from pyworkflow.plugin import Domain # type: ignore
+        from pwem.constants import ALIGN_PROJ, ALIGN_NONE # type: ignore
+        import pyworkflow.protocol.params as params # type: ignore
+    except ImportError:
+        raise ImportError("Using scipion bridge with scipion requires pyworkflow option. Install it using pip install \"scipion-bridge[pyworkflow]\"")
+
     class ScipionProtocolWrapper(ProtProcessParticles, ProtFlexBase):
 
         _label = label
@@ -33,6 +36,23 @@ def convert_protocol_to_scipion3_protocol(
         def _defineParams(self, form):
 
             form.addSection(label="Input")
+            for (name, item) in type(protocol)._exec_info.inputs.items():
+                try:
+                    value = protocol.__getattribute__(name)
+                except AttributeError:
+                    value = item(label=name)
+
+                assert isinstance(value, Field)
+                from typing import get_args
+                print("args: ", get_args(value))
+
+                form.addParam(
+                    name,
+                    params.IntParam,
+                    label=value.label,
+                    default=value.default,
+                    help=value.help,
+                )
             
 
         def _insertAllSteps(self):
