@@ -22,6 +22,11 @@ class ProtocolConfiguration:
     inputs: OrderedDict[str, Input]
     parameters: OrderedDict[str, Field]
 
+
+class ValidationError(Exception):
+    pass
+
+
 class Protocol(metaclass=abc.ABCMeta):
 
     _configuration: _ProtocolTypeConfiguration
@@ -58,51 +63,14 @@ class Protocol(metaclass=abc.ABCMeta):
         pass
 
     def validate_protocol_configuration(self):
-        def _is_run_method(el: ast.AST) -> bool:
-            if not isinstance(el, ast.FunctionDef):
-                return False
+        
+        arg_types = get_type_hints(self.run)
+        input_types = {
+            k: get_args(v)[0] for (k, v) in self._configuration.inputs.items()
+        }
 
-            return el.name == "run"
-    
-        pass
-        # Find inputs in run method
-        # inputs: OrderedDict = OrderedDict()
-        # run_method_defs = [el for el in class_def.body if _is_run_method(el)]
-
-        # if len(run_method_defs) > 0:
-        #     run_method_def = run_method_defs[0]
-        #     assert isinstance(run_method_def, ast.FunctionDef)
-
-        #     arg_def = run_method_def.args
-        #     if arg_def.vararg is not None or arg_def.kwarg is not None:
-        #         raise RuntimeError(
-        #             f"Method run() in {cls.__qualname__} has variational arguments"
-        #         )
-
-        #     padding = len(arg_def.args[1:]) - len(arg_def.defaults)
-        #     defaults = [None] * padding + list(arg_def.defaults)
-
-        #     args = zip(arg_def.args[1:], defaults)
-        #     kwargs = zip(arg_def.kwonlyargs, arg_def.kw_defaults)
-
-        #     input_types = get_type_hints(cls.run)
-        #     invalid_inputs = []
-        #     for arg, default in chain(args, kwargs):
-        #         if arg.annotation is None:
-        #             invalid_inputs.append(arg.arg)
-
-        #         elif default is not None:
-        #             invalid_inputs.append(arg.arg)
-
-        #         else:
-        #             dtype: type = input_types[arg.arg]
-        #             inputs[arg.arg] = Field[dtype] # type: ignore
-
-        #     if len(invalid_inputs) > 0:
-        #         invalid_inputs_list = ", ".join(invalid_inputs)
-        #         raise RuntimeError(
-        #             f"Protocol inputs {invalid_inputs_list} in {cls.__qualname__} either do not have type annotations or a default value."
-        #         )
+        if arg_types != input_types:
+            raise ValidationError("Arguments of method run() do not match declared inputs. This is a bug.")
 
 
 def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:

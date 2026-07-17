@@ -4,6 +4,8 @@ import pickle
 from functools import partial
 
 from ...core.protocol import Protocol, Field
+from .workflow_container import configure_pyworkflow_env
+
 from typing import get_args, Dict, Any
 
 from enum import Enum
@@ -97,19 +99,26 @@ def convert_protocol_to_scipion3_protocol(
                     **args,
                 )
 
+        def _validateProtocolSetup(self):
+            protocol.validate_protocol_configuration()
+
+        def _convertInput(self):
+            print("Validate Protocol")
+
         def _insertAllSteps(self):
             import logging
 
             logging.basicConfig(level=logging.DEBUG)
 
-            print("Start inserting steps here")
+            configure_pyworkflow_env(
+                backend=self,
+                conda_env=conda_env,
+                modules=[__name__],
+                packages=["scipion_bridge"],
+            )
 
-            # configure_pyworkflow_env(
-            #     backend=self,
-            #     conda_env="foundation-models",
-            #     modules=[__name__],
-            #     packages=["scipion_bridge"],
-            # )
+            self._insertFunctionStep(self._validateProtocolSetup)
+            self._insertFunctionStep(self._convertInput)
 
     # Copy the module and class name from the source protocol so Scipion class registration finds it
     ScipionProtocolWrapper.__module__ = protocol.__module__
