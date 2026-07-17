@@ -36,22 +36,23 @@ def convert_protocol_to_scipion3_protocol(
         def _defineParams(self, form):
 
             form.addSection(label="Input")
-            for (name, item) in type(protocol)._exec_info.inputs.items():
-                try:
-                    value = protocol.__getattribute__(name)
-                except AttributeError:
-                    value = item(label=name)
-
-                assert isinstance(value, Field)
-                from typing import get_args
-                print("args: ", get_args(value))
-
+            for key, element in protocol.configuration.inputs.items():
                 form.addParam(
-                    name,
+                    key,
                     params.IntParam,
-                    label=value.label,
-                    default=value.default,
-                    help=value.help,
+                    default=element.default,
+                    label=element.label if element.label is not None else key,
+                    help=element.help,
+                )
+
+            form.addSection(label="Parameters")
+            for key, element in protocol.configuration.parameters.items():
+                form.addParam(
+                    key,
+                    params.IntParam,
+                    default=element.default,
+                    label=element.label if element.label is not None else key,
+                    help=element.help,
                 )
             
 

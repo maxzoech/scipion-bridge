@@ -19,8 +19,8 @@ class _ProtocolTypeConfiguration:
 
 @dataclass
 class ProtocolConfiguration:
-    inputs: OrderedDict[str, Type[Input]]
-    parameters: OrderedDict[str, Type[Field]]
+    inputs: OrderedDict[str, Input]
+    parameters: OrderedDict[str, Field]
 
 class Protocol(metaclass=abc.ABCMeta):
 
