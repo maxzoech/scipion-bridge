@@ -24,6 +24,24 @@ def convert_protocol_to_scipion3_protocol(
     except ImportError:
         raise ImportError("Using scipion bridge with scipion requires pyworkflow option. Install it using pip install \"scipion-bridge[pyworkflow]\"")
 
+    def _get_param_type_and_kwargs(dtype):
+        param_type = params.StringParam
+        kwargs = {}
+
+        if dtype is int:
+            param_type = params.IntParam
+        elif dtype is float:
+            param_type = params.FloatParam
+        elif dtype is bool:
+            param_type = params.BooleanParam
+        elif dtype is str:
+            param_type = params.StringParam
+        else:
+            # Check if it matches or inherits from a Scipion object class
+            raise NotImplementedError
+            
+        return param_type, kwargs
+
     class ScipionProtocolWrapper(ProtProcessParticles, ProtFlexBase):
 
         _label = label
@@ -37,22 +55,30 @@ def convert_protocol_to_scipion3_protocol(
 
             form.addSection(label="Input")
             for key, element in protocol.configuration.inputs.items():
+                dtype = get_args(protocol._configuration.inputs[key])[0]
+                param, args = _get_param_type_and_kwargs(dtype)
+            
                 form.addParam(
                     key,
-                    params.IntParam,
+                    param,
                     default=element.default,
                     label=element.label if element.label is not None else key,
                     help=element.help,
+                    **args
                 )
 
             form.addSection(label="Parameters")
             for key, element in protocol.configuration.parameters.items():
+                dtype = get_args(protocol._configuration.parameters[key])[0]
+                param, args = _get_param_type_and_kwargs(dtype)
+
                 form.addParam(
                     key,
                     params.IntParam,
                     default=element.default,
                     label=element.label if element.label is not None else key,
                     help=element.help,
+                    **args,
                 )
             
 
