@@ -53,7 +53,7 @@ def test_create_protocol():
 
 
 def test_protocol_untyped_state():
-    with pytest.raises(TypeError, match="The protocol states 'state' .* do not have type annotations"):
+    with pytest.raises(TypeError, match="The protocol .* has declared attributes without type annotation."):
         class UntypedStateProtocol(Protocol):
             state = 42
 

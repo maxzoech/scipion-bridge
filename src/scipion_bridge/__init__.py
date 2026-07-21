@@ -8,8 +8,12 @@ from .core.utils.shell import shell_command
 from .core import protocol
 from .core.protocol import Protocol, Field, Input
 
-from .core.typed import common
-lift_resolvers(common, proxy)
+from .core import struct
+from .core.struct import Struct
+
+
+from .core.typed import core_resolvers
+lift_resolvers(core_resolvers, proxy)
 
 __all__ = [
     "resolver",
@@ -27,4 +31,5 @@ __all__ = [
     "Protocol",
     "Field",
     "Input",
+    "struct",
 ]

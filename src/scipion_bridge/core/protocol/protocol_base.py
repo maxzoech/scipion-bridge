@@ -10,6 +10,8 @@ from typing import get_type_hints, get_origin, get_args, Any, Type, OrderedDict
 
 from .fields import Field, Input
 
+from ..utils.ast import parse_ast
+from ..utils.type_annotation import has_untyped_class_definitions
 
 @dataclass
 class _ProtocolTypeConfiguration:
@@ -83,6 +85,11 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
     tree = ast.parse(source)
     class_def = tree.body[0]
     assert isinstance(class_def, ast.ClassDef), "Protocol must be a class"
+
+    if has_untyped_class_definitions(tree):
+        raise TypeError(
+            f"The protocol {cls.__qualname__} has declared attributes without type annotation."
+        )
 
     # Check if the user has defined state without a type annotation
     untyped_assign_ops = [

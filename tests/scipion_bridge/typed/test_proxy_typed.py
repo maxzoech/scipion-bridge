@@ -275,7 +275,7 @@ def test_proxify_with_params():
         modules=[
             __name__,
             "scipion_bridge.core.typed.proxy",
-            "scipion_bridge.core.typed.common",
+            "scipion_bridge.core.typed.core_resolvers",
             "scipion_bridge.core.utils.arc",
         ]
     )
