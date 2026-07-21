@@ -1,6 +1,7 @@
 
-from .schema import Struct
+from .schema import Struct, Array
 
 __all__ = [
-    "Struct"
+    "Struct",
+    "Array",
 ]

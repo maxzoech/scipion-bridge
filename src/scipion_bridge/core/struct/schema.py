@@ -6,11 +6,12 @@ from functools import wraps
 from enum import Enum
 
 import typing
-from typing import Type, Any, Dict, Optional
+from typing import Type, Any, Dict, Optional, TypeVar, Generic, Tuple
 
 from ..utils.type_annotation import has_untyped_class_definitions
 from ..utils.format import format_list
 
+T = TypeVar("T")
 
 class ArrayLocation(Enum):
     AUTOMATIC = "auto"
@@ -23,6 +24,10 @@ class Entry:
 class ArrayEntry(Entry):
     dtype: np.dtype
     storage: ArrayLocation
+    min_shape: Optional[Tuple[int]]
+    max_shape: Optional[Tuple[int]]
+    preferred_shape: Optional[Tuple[int]]
+
 
 @dataclass
 class Schema:
@@ -30,10 +35,20 @@ class Schema:
 
 
 def _supports_array_storage(dtype: Type):
-    if issubclass(dtype, Struct):
+    if isinstance(dtype, type) and issubclass(dtype, Struct):
         return _validate_struct_datatypes(dtype, root=dtype.__qualname__)
+    
+    origin = typing.get_origin(dtype)
+    if dtype == Array or origin is Array:
+        args = typing.get_args(dtype)
+        if args:
+            return _supports_array_storage(args[0])
+        return True
 
-    return not np.dtype(dtype).hasobject
+    try:
+        return not np.dtype(dtype).hasobject
+    except TypeError:
+        return False
 
 
 def _validate_struct_datatypes(cls: Type["Struct"], *, root: Optional[str] = None):
@@ -42,13 +57,21 @@ def _validate_struct_datatypes(cls: Type["Struct"], *, root: Optional[str] = Non
     for k, v in cls._attributes().items():
         key_path = k if root is None else f"{root}.{k}"
         
-        if issubclass(v, Struct):
+        origin = typing.get_origin(v)
+        if v == Array or origin is Array:
+            args = typing.get_args(v)
+            elem_type = args[0] if args else Any
+            is_serializable[key_path] = _supports_array_storage(elem_type) # type: ignore
+        elif isinstance(v, type) and issubclass(v, Struct):
             nested_fields = _validate_struct_datatypes(v, root=key_path)
             is_serializable.update(nested_fields)
         else:
             is_serializable[key_path] = _supports_array_storage(v)
             
     return is_serializable
+
+class Array(Generic[T]):
+    pass
 
 class Struct:
     
@@ -61,10 +84,28 @@ class Struct:
     @classmethod
     def _generate_schema(cls):
         def _convert(dtype: Type):
-            if issubclass(dtype, Struct):
+            origin = typing.get_origin(dtype)
+            if dtype == Array or origin is Array:
+                args = typing.get_args(dtype)
+                elem_type = args[0] if args else float
+                return ArrayEntry(
+                    np.dtype(elem_type),
+                    ArrayLocation.AUTOMATIC,
+                    min_shape=None,
+                    max_shape=None,
+                    preferred_shape=None,
+                )
+
+            if isinstance(dtype, type) and issubclass(dtype, Struct):
                 return dtype._scipion_bridge_schema.tree
 
-            return ArrayEntry(np.dtype(dtype), ArrayLocation.AUTOMATIC)
+            return ArrayEntry(
+                np.dtype(dtype),
+                ArrayLocation.AUTOMATIC,
+                min_shape=(1,),
+                max_shape=(1,),
+                preferred_shape=None,
+            )
 
         return Schema(
             tree={ k: _convert(v) for k, v in cls._attributes().items() }
@@ -122,7 +163,17 @@ class Struct:
                     # Cleanly format the ArrayEntry properties
                     dtype_str = value.dtype.name if hasattr(value.dtype, 'name') else str(value.dtype)
                     loc_str = value.storage.value
-                    print(f"{prefix}{connector}{key}: Array[{dtype_str}](storage: {loc_str})")
+
+                    array_info = [f"storage: {loc_str}"]
+                    if value.min_shape is not None:
+                        array_info += [f"min: {value.min_shape}"]
+
+                    if value.max_shape is not None:
+                        array_info += [f"max: {value.max_shape}"]
+
+                    array_info_str = ", ".join(array_info)
+                    
+                    print(f"{prefix}{connector}{key}: Array[{dtype_str}]({array_info_str})")
                     
                 else:
                     # Fallback for unexpected types

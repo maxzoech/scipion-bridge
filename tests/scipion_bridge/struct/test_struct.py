@@ -98,3 +98,22 @@ def test_incompatible_attribute_single_raises_type_error():
     assert "The attribute 'bad_attr' cannot be declared in struct" in err_msg
     assert "SingleIncompatibleStruct" in err_msg
     assert "because it does not support array serialization." in err_msg
+
+
+class CTF(B.Struct):
+    voltage_kv: float
+    amplitude_contrast: float
+
+
+class Particle(B.Struct):
+    pixels: B.Array[float]
+    ctf: CTF
+
+def test_array_tree_creation():
+    Particle.print_schema()
+
+    particle = Particle()
+
+
+if __name__ == "__main__":
+    test_array_tree_creation()

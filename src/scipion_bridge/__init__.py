@@ -9,7 +9,7 @@ from .core import protocol
 from .core.protocol import Protocol, Field, Input
 
 from .core import struct
-from .core.struct import Struct
+from .core.struct import Struct, Array
 
 
 from .core.typed import core_resolvers
