@@ -16,15 +16,17 @@ class ArrayLocation(Enum):
     AUTOMATIC = "auto"
     HOST_MEMORY = "host_memory"
 
+class Entry:
+    pass # Marker Type
+
+@dataclass
+class ArrayEntry(Entry):
+    dtype: np.dtype
+    storage: ArrayLocation
+
 @dataclass
 class Schema:
-
-    @dataclass
-    class Array:
-        dtype: np.dtype
-        location: ArrayLocation
-
-    tree: Dict[str, Any]
+    tree: Dict[str, Entry]
 
 
 def _supports_array_storage(dtype: Type):
@@ -62,7 +64,7 @@ class Struct:
             if issubclass(dtype, Struct):
                 return dtype._scipion_bridge_schema.tree
 
-            return Schema.Array(np.dtype(dtype), ArrayLocation.AUTOMATIC)
+            return ArrayEntry(np.dtype(dtype), ArrayLocation.AUTOMATIC)
 
         return Schema(
             tree={ k: _convert(v) for k, v in cls._attributes().items() }
@@ -94,3 +96,36 @@ class Struct:
 
     def __init__(self):
         print("Init the zarr storage here...")
+
+    
+    @classmethod
+    def print_schema(cls) -> None:
+        """
+        Prints a Schema object in a hierarchical tree format.
+        """
+        print(cls.__qualname__)
+        
+        def _print_node(node: dict, prefix: str = ""):
+            items = list(node.items())
+            for i, (key, value) in enumerate(items):
+                is_last = (i == len(items) - 1)
+                connector = "└── " if is_last else "├── "
+                
+                if isinstance(value, dict):
+                    # Print the parent node (e.g., 'ctf')
+                    print(f"{prefix}{connector}{key}")
+                    # Extend the prefix for the children
+                    extension = "    " if is_last else "│   "
+                    _print_node(value, prefix + extension)
+                    
+                elif isinstance(value, ArrayEntry):
+                    # Cleanly format the ArrayEntry properties
+                    dtype_str = value.dtype.name if hasattr(value.dtype, 'name') else str(value.dtype)
+                    loc_str = value.storage.value
+                    print(f"{prefix}{connector}{key}: Array[{dtype_str}](storage: {loc_str})")
+                    
+                else:
+                    # Fallback for unexpected types
+                    print(f"{prefix}{connector}{key}: {value}")
+
+        _print_node(cls._scipion_bridge_schema.tree)

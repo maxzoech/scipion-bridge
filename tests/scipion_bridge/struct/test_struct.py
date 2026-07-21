@@ -15,8 +15,10 @@ class Particle(B.Struct):
 
 def test_create_dataclass_schema():
 
-    schema = Particle._scipion_bridge_schema
-    print(schema)
+    Particle.print_schema()
+
+    particle = Particle()
+    print(particle)
 
     # root = zarr.group()
     # foo = root.create_group('foo')
