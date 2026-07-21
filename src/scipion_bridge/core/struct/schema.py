@@ -2,11 +2,11 @@ import numpy as np
 import zarr
 
 from dataclasses import dataclass
-from functools import wraps
+from functools import wraps, cache
 from enum import Enum
 
 import typing
-from typing import Type, Any, Dict, Optional, TypeVar, Generic, Tuple
+from typing import Type, Any, Dict, Optional, TypeVar, Generic, Tuple, Set
 
 from ..utils.type_annotation import has_untyped_class_definitions
 from ..utils.format import format_list
@@ -15,7 +15,7 @@ T = TypeVar("T")
 
 class ArrayLocation(Enum):
     AUTOMATIC = "auto"
-    HOST_MEMORY = "host_memory"
+    # HOST_MEMORY = "host_memory"
 
 class Entry:
     pass # Marker Type
@@ -136,8 +136,67 @@ class Struct:
 
 
     def __init__(self):
-        print("Init the zarr storage here...")
+        
+        self._zarr_root = zarr.group(overwrite=True)
 
+        def build_tree(current_group: zarr.Group, schema_node: dict):
+            for key, value in schema_node.items():
+                
+                if isinstance(value, dict):
+                    sub_group = current_group.create_group(key)
+                    build_tree(sub_group, value)
+                elif isinstance(value, ArrayEntry):
+                    # Determine the safest initial shape to use
+                    initial_shape = (
+                        value.preferred_shape or 
+                        value.min_shape or 
+                        (1,) # Fallback for None, allowing it to be appended to later
+                    )
+                    
+                    current_group.create_array(
+                        name=key,
+                        shape=initial_shape,
+                        dtype=value.dtype,
+                    )
+                else:
+                    raise TypeError(f"Unexpected type in schema at '{key}': {type(value)}")
+
+        build_tree(self._zarr_root, self._scipion_bridge_schema.tree)
+
+    @property
+    @cache
+    def _schema_keys(self) -> Set[str]:
+        return set(self._scipion_bridge_schema.tree.keys())
+
+
+    def __setattr__(self, name, value):
+        if name in self._schema_keys:
+            buffer = self._zarr_root[name]
+
+            try:
+                orig_shape = value.shape
+                value = np.reshape(value, [-1])
+                buffer.resize(value.shape)
+            except AttributeError:
+                orig_shape = (1,)
+
+            buffer.attrs['orig_shape'] = orig_shape
+            buffer[:] = value
+        else:
+            super().__setattr__(name, value)
+
+    def __getattribute__(self, name):
+        if name in set(["_schema_keys", "_scipion_bridge_schema"]):
+            return super().__getattribute__(name)
+
+        if name in self._schema_keys:
+            buffer = self._zarr_root[name]
+            orig_shape = buffer.attrs['orig_shape']
+
+            value = np.array(buffer).reshape(orig_shape)
+            return value
+        else:
+            return super().__getattribute__(name)
     
     @classmethod
     def print_schema(cls) -> None:

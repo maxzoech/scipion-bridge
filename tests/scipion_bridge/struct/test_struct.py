@@ -104,6 +104,7 @@ class CTF(B.Struct):
     voltage_kv: float
     amplitude_contrast: float
 
+    foo: B.Array[float]
 
 class Particle(B.Struct):
     pixels: B.Array[float]
@@ -112,7 +113,12 @@ class Particle(B.Struct):
 def test_array_tree_creation():
     Particle.print_schema()
 
-    particle = Particle()
+    ctf = CTF()
+    ctf.voltage_kv = 300.0
+    
+    # particle = Particle()
+    # particle.ctf = ctf
+    
 
 
 if __name__ == "__main__":
