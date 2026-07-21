@@ -1,5 +1,5 @@
 
-from .struct import Struct
+from .schema import Struct
 
 __all__ = [
     "Struct"
