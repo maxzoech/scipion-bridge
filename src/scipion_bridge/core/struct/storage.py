@@ -6,6 +6,7 @@ from zarr.storage import LocalStore as DiskStore
 
 from .schema import create_schema, Schema, _ArrayEntry
 
+from typing import Any
 
 class Struct:
 
@@ -14,9 +15,13 @@ class Struct:
     def schema(cls) -> Schema:
         return create_schema(cls)
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         store = MemoryStore()
         self._zarr_group: zarr.Group = zarr.group(store=store)
+
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
 
     def __setattr__(self, name, value):
         schema = type(self).schema()

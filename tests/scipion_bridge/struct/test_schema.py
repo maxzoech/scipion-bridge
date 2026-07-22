@@ -152,3 +152,12 @@ def test_array_generic_and_edge_cases():
 
     assert "arr_bad" in str(exc_info.value)
 
+
+def test_supports_array_storage_direct():
+    assert _supports_array_storage(NestedChild) is not None
+    assert _supports_array_storage(B.Array) is True
+    assert _supports_array_storage(B.Array[int]) is True
+    assert _supports_array_storage(int) is True
+    assert _supports_array_storage(object) is False
+    assert _supports_array_storage("invalid_type_obj") is False
+

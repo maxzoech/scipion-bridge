@@ -83,3 +83,38 @@ def test_non_schema_attribute_assignment():
     s = SimpleStruct()
     s.custom_field = "test_value"
     assert s.custom_field == "test_value"
+
+
+def test_init():
+    
+    pixels = np.random.uniform(size=[64, 64])
+    particle = Particle(
+        pixels=pixels,
+        ctf=CTF(
+            voltage_kv=300.0,
+            amplitude_contrast=0.0,
+            foo=Foo(
+                a=np.complex64(1 + 2j),
+                b=42.0,
+            )
+        ),
+        foo_2=Foo(
+            a=np.complex64(1 + 2j),
+            b=12.0,
+        )
+    )
+
+    assert particle.pixels.shape == (64, 64)
+    assert np.allclose(particle.pixels, pixels)
+
+    assert particle.ctf.voltage_kv == 300.0
+    assert particle.ctf.amplitude_contrast == 0.0
+    assert particle.ctf.foo.a == np.complex64(1 + 2j)
+    assert particle.ctf.foo.b == 42.0
+
+    assert particle.foo_2.a == np.complex64(1 + 2j)
+    assert particle.foo_2.b == 12.0
+
+
+if __name__ == "__main__":
+    test_init()
