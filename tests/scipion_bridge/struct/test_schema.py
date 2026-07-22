@@ -1,0 +1,154 @@
+import numpy as np
+import pytest
+import scipion_bridge as B
+from scipion_bridge.core.struct.schema import (
+    _ArrayEntry,
+    _ArrayLocation,
+    Schema,
+    create_schema,
+    _supports_array_storage,
+)
+
+
+class SimpleStruct(B.Struct):
+    val_int: int
+    val_float: float
+    val_bool: bool
+
+
+class NestedChild(B.Struct):
+    x: int
+    y: np.float64
+
+
+class NestedParent(B.Struct):
+    name_id: int
+    child: NestedChild
+
+
+class DeepNested(B.Struct):
+    parent: NestedParent
+    tag: int
+
+
+def test_schema_creation_basic():
+    schema = create_schema(SimpleStruct)
+    assert isinstance(schema, Schema)
+    assert schema.entries() == {"val_int", "val_float", "val_bool"}
+
+    entry_int = schema.fields["val_int"]
+    assert isinstance(entry_int, _ArrayEntry)
+    assert entry_int.dtype == np.dtype(int)
+    assert entry_int.storage == _ArrayLocation.AUTOMATIC
+
+    entry_float = schema.fields["val_float"]
+    assert isinstance(entry_float, _ArrayEntry)
+    assert entry_float.dtype == np.dtype(float)
+    assert entry_float.storage == _ArrayLocation.AUTOMATIC
+
+    entry_bool = schema.fields["val_bool"]
+    assert isinstance(entry_bool, _ArrayEntry)
+    assert entry_bool.dtype == np.dtype(bool)
+    assert entry_bool.storage == _ArrayLocation.AUTOMATIC
+
+
+def test_schema_creation_nested():
+    parent_schema = create_schema(NestedParent)
+    assert isinstance(parent_schema, Schema)
+    assert parent_schema.entries() == {"name_id", "child"}
+
+    assert isinstance(parent_schema.fields["name_id"], _ArrayEntry)
+    assert parent_schema.fields["name_id"].dtype == np.dtype(int)
+
+    child_cls = parent_schema.fields["child"]
+    assert child_cls == NestedChild
+    child_schema = create_schema(child_cls)
+    assert child_schema.entries() == {"x", "y"}
+    assert isinstance(child_schema.fields["x"], _ArrayEntry)
+    assert child_schema.fields["x"].dtype == np.dtype(int)
+    assert isinstance(child_schema.fields["y"], _ArrayEntry)
+    assert child_schema.fields["y"].dtype == np.dtype(np.float64)
+
+
+def test_schema_creation_deep_nested():
+    deep_schema = create_schema(DeepNested)
+    assert isinstance(deep_schema, Schema)
+    assert deep_schema.entries() == {"parent", "tag"}
+    assert isinstance(deep_schema.fields["tag"], _ArrayEntry)
+
+    parent_cls = deep_schema.fields["parent"]
+    assert parent_cls == NestedParent
+    assert create_schema(parent_cls).entries() == {"name_id", "child"}
+
+
+def test_untyped_attribute_raises_type_error():
+    with pytest.raises(TypeError) as exc_info:
+        class UntypedStruct(B.Struct):
+            x = 10
+        create_schema(UntypedStruct)
+
+    err_msg = str(exc_info.value)
+    assert "declares attributes without type annotations." in err_msg
+    assert "UntypedStruct" in err_msg
+
+
+def test_incompatible_attribute_single_raises_type_error():
+    with pytest.raises(TypeError) as exc_info:
+        class SingleIncompatibleStruct(B.Struct):
+            bad_attr: object
+        create_schema(SingleIncompatibleStruct)
+
+    err_msg = str(exc_info.value)
+    assert "The attribute 'bad_attr' cannot be declared in struct" in err_msg
+    assert "SingleIncompatibleStruct" in err_msg
+    assert "because it does not support array serialization." in err_msg
+
+
+def test_incompatible_attribute_multiple_raises_type_error():
+    with pytest.raises(TypeError) as exc_info:
+        class MultiIncompatibleStruct(B.Struct):
+            bad1: object
+            bad2: dict
+        create_schema(MultiIncompatibleStruct)
+
+    err_msg = str(exc_info.value)
+    assert "The attributes 'bad1 and bad2' cannot be declared in struct" in err_msg
+    assert "MultiIncompatibleStruct" in err_msg
+
+
+def test_incompatible_nested_attribute_raises_type_error():
+    class InvalidChild(B.Struct):
+        invalid_field: object
+
+    with pytest.raises(TypeError) as exc_info:
+        class InvalidParent(B.Struct):
+            child: InvalidChild
+        create_schema(InvalidParent)
+
+    err_msg = str(exc_info.value)
+    assert "cannot be declared in struct" in err_msg
+
+
+def test_schema_entries():
+    schema = create_schema(SimpleStruct)
+    entries = schema.entries()
+    assert isinstance(entries, set)
+    assert entries == {"val_int", "val_float", "val_bool"}
+
+
+def test_array_generic_and_edge_cases():
+    class ArrayStruct(B.Struct):
+        arr_bare: B.Array
+        arr_typed: B.Array[int]
+
+    schema = create_schema(ArrayStruct)
+    assert "arr_bare" in schema.entries()
+    assert "arr_typed" in schema.entries()
+
+    with pytest.raises(TypeError) as exc_info:
+        class BadArrayStruct(B.Struct):
+            arr_bad: B.Array[object]
+        create_schema(BadArrayStruct)
+
+    assert "arr_bad" in str(exc_info.value)
+

@@ -1,30 +1,33 @@
 import numpy as np
-import zarr
-from zarr.storage import MemoryStore
-from zarr.storage import LocalStore as DiskStore
-
 import abc
 from dataclasses import dataclass
-from functools import wraps, cache
 from enum import Enum
-
 import typing
-from typing import Type, Any, Dict, Optional, TypeVar, Generic, Tuple, Set, get_type_hints
+from typing import Type, Any, Dict, Optional, TypeVar, Generic, Tuple, Set
 
 from ..utils.type_annotation import has_untyped_class_definitions
 from ..utils.format import format_list
 
 T = TypeVar("T")
 
+
+def _is_struct_type(dtype: Any) -> bool:
+    from .storage import Struct
+    return isinstance(dtype, type) and issubclass(dtype, Struct)
+
+
 class Entry:
-    pass # Marker Type
+    pass  # Marker Type
+
 
 class Array(Generic[T]):
     pass
 
+
 class _ArrayLocation(Enum):
     AUTOMATIC = "auto"
     # HOST_MEMORY = "host_memory"
+
 
 @dataclass
 class _ArrayEntry(Entry):
@@ -33,7 +36,6 @@ class _ArrayEntry(Entry):
     min_shape: Optional[Tuple[int]]
     max_shape: Optional[Tuple[int]]
     preferred_shape: Optional[Tuple[int]]
-
 
 
 @dataclass
@@ -55,7 +57,7 @@ class Schema:
                 is_last = (i == len(items) - 1)
                 connector = "└── " if is_last else "├── "
 
-                if isinstance(value, type) and issubclass(value, Struct):
+                if _is_struct_type(value):
                     schema = create_schema(value)
 
                     print(f"{prefix}{connector}{key}")
@@ -86,7 +88,7 @@ class Schema:
 
 
 def _supports_array_storage(dtype: Type):
-    if isinstance(dtype, type) and issubclass(dtype, Struct):
+    if _is_struct_type(dtype):
         return _validate_struct_datatypes(dtype, root=dtype.__qualname__)
     
     origin = typing.get_origin(dtype)
@@ -102,7 +104,7 @@ def _supports_array_storage(dtype: Type):
         return False
 
 
-def _validate_struct_datatypes(cls: Type["Struct"], *, root: Optional[str] = None):
+def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
 
     is_serializable = {}
     
@@ -114,14 +116,15 @@ def _validate_struct_datatypes(cls: Type["Struct"], *, root: Optional[str] = Non
         if v == Array or origin is Array:
             args = typing.get_args(v)
             elem_type = args[0] if args else float
-            is_serializable[key_path] = _supports_array_storage(elem_type) # type: ignore
-        elif isinstance(v, type) and issubclass(v, Struct):
+            is_serializable[key_path] = _supports_array_storage(elem_type)
+        elif _is_struct_type(v):
             nested_fields = _validate_struct_datatypes(v, root=key_path)
             is_serializable.update(nested_fields)
         else:
             is_serializable[key_path] = _supports_array_storage(v)
             
     return is_serializable
+
 
 def create_schema(cls: Type) -> Schema:
     # Test if the module has attributes without type annotation
@@ -155,7 +158,7 @@ def create_schema(cls: Type) -> Schema:
                 preferred_shape=None,
             )
 
-        if issubclass(dtype, Struct):
+        if _is_struct_type(dtype):
             return dtype
 
         return _ArrayEntry(
@@ -170,72 +173,3 @@ def create_schema(cls: Type) -> Schema:
     return Schema(
         fields={ k: _convert(v) for k, v in attributes.items() }
     )
-
-
-class Struct:
-    
-    @classmethod
-    @cache
-    def schema(cls) -> Schema:
-        return create_schema(cls)
-   
-    def __init__(self) -> None:
-        store = MemoryStore()
-        self._zarr_group: zarr.Group = zarr.group(store=store)
-
-    def __setattr__(self, name, value):
-        schema = type(self).schema()        
-        if name not in schema.entries() or isinstance(value, Struct):
-            super().__setattr__(name, value)
-        else:
-
-            input_has_shape = hasattr(value, "shape") or hasattr(value, "__len__")
-
-            entry = schema.fields[name]
-            value = np.array(value).astype(entry.dtype)
-            orig_shape = value.shape
-
-            value = np.reshape(value, [-1])
-            is_scalar = not input_has_shape and value.size == 1
-
-            buffer = self._zarr_group.create_array(
-                name=name,
-                shape=value.shape,
-                dtype=entry.dtype,
-                overwrite=True
-            )
-
-            buffer.attrs['orig_shape'] = orig_shape
-            buffer.attrs['is_scalar'] = is_scalar
-
-            buffer[:] = value
-
-    def __getattribute__(self, name):
-        schema = type(self).schema()
-        attrs = set(schema.entries())
-
-        if name not in attrs:
-            return super().__getattribute__(name)
-        elif isinstance(schema.fields[name], type) and issubclass(schema.fields[name], Struct):
-            return super().__getattribute__(name)
-        else:
-            try:
-                buffer = self._zarr_group[name]
-            except KeyError:
-                raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-            orig_shape = buffer.attrs['orig_shape']
-            is_scalar = buffer.attrs['is_scalar']
-
-            value = np.array(buffer).reshape(orig_shape)
-            if is_scalar:
-                value = value.item()
-
-            return value
-    
-    @classmethod
-    def print_schema(cls) -> None:  # pragma: no cover
-        schema = create_schema(cls)
-        schema.print_tree(cls.__qualname__)
-
-    def print_storage(self) -> None:  # pragma: no cover
-        print(self._zarr_group.tree())
