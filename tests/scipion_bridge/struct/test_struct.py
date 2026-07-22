@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 import scipion_bridge as B
 from scipion_bridge.core.struct.schema import (
-    ArrayEntry,
-    ArrayLocation,
+    _ArrayEntry,
+    _ArrayLocation,
     Schema
 )
 
@@ -99,25 +99,32 @@ def test_incompatible_attribute_single_raises_type_error():
     assert "SingleIncompatibleStruct" in err_msg
     assert "because it does not support array serialization." in err_msg
 
+class Foo(B.Struct):
+    a: np.complex64
+    b: float
 
 class CTF(B.Struct):
     voltage_kv: float
     amplitude_contrast: float
 
-    foo: B.Array[float]
+    foo: Foo
 
 class Particle(B.Struct):
     pixels: B.Array[float]
     ctf: CTF
+    foo_2: Foo
 
 def test_array_tree_creation():
-    Particle.print_schema()
+    particle = Particle()
 
     ctf = CTF()
     ctf.voltage_kv = 300.0
-    
-    # particle = Particle()
-    # particle.ctf = ctf
+    particle.ctf = ctf
+
+    print(particle.ctf.voltage_kv)
+    particle.print_schema()
+    particle.print_storage()
+
     
 
 
