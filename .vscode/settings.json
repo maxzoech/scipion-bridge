@@ -7,5 +7,6 @@
         "scipion"
     ],
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python.defaultInterpreterPath": "/home/mzoch/miniconda3/envs/ml-utlis/bin/python"
 }

@@ -13,6 +13,7 @@ autopep8 = ">=2.3.0,<3.0.0"
 networkx = ">=3.1.0,<4.0.0"
 tabulate = "^0.9.0"
 xmipp_metadata = "^1.1.5"
+zarr = "^3.0.0"
 
 [tool.poetry.group.test]
 optional = true
@@ -32,3 +33,11 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.extras]
 pyworkflow = ["scipion-pyworkflow"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def print_schema",
+    "def print_storage",
+    "def print_tree",
+]
