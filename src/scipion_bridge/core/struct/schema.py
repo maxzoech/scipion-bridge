@@ -1,6 +1,6 @@
 import numpy as np
 import abc
-from dataclasses import dataclass, InitVar
+from dataclasses import dataclass
 from enum import Enum
 import typing
 from typing import Type, Any, Dict, Optional, TypeVar, Generic, Tuple, Set
@@ -19,12 +19,30 @@ class Entry(metaclass=abc.ABCMeta):
         ...
 
 
+class _ArrayLocation(Enum):
+    AUTOMATIC = "auto"
+
+
+@typing.runtime_checkable
+class PrintableEntry(typing.Protocol):
+    def format_entry(self, name: str) -> str:
+        ...
+
+
 class ArrayEntryBase(Entry):
+    dtype: np.dtype
+    storage: _ArrayLocation
+
+    @property
+    @abc.abstractmethod
+    def entry_name(self) -> str:
+        ...
+
     @property
     @abc.abstractmethod
     def min_shape(self) -> Optional[Tuple[int, ...]]:
         ...
-    
+
     @property
     @abc.abstractmethod
     def max_shape(self) -> Optional[Tuple[int, ...]]:
@@ -34,32 +52,29 @@ class ArrayEntryBase(Entry):
     def is_static(self) -> bool:
         return self.min_shape is not None and self.min_shape == self.max_shape
 
-
-class _ArrayLocation(Enum):
-    AUTOMATIC = "auto"
+    def format_entry(self, name: str) -> str:
+        dtype_str = self.dtype.name if hasattr(self.dtype, 'name') else str(self.dtype)
+        loc_str = self.storage.value
+        array_info = [f"storage: {loc_str}"]
+        if self.min_shape is not None:
+            array_info.append(f"min: {self.min_shape}")
+        if self.max_shape is not None:
+            array_info.append(f"max: {self.max_shape}")
+        array_info_str = ", ".join(array_info)
+        return f"{name}: {self.entry_name}[{dtype_str}]({array_info_str})"
 
 
 @dataclass
 class _ArrayEntry(ArrayEntryBase):
     dtype: np.dtype
     storage: _ArrayLocation
-    preferred_shape: Optional[Tuple[int, ...]]
-    
-    min_shape: InitVar[Optional[Tuple[int, ...]]]
-    max_shape: InitVar[Optional[Tuple[int, ...]]]
-
-    def __post_init__(self, min_shape, max_shape):
-        self._min_shape = min_shape
-        self._max_shape = max_shape
+    preferred_shape: Optional[Tuple[int, ...]] = None
+    min_shape: Optional[Tuple[int, ...]] = None
+    max_shape: Optional[Tuple[int, ...]] = None
 
     @property
-    def min_shape(self) -> Optional[Tuple[int, ...]]:
-        return self._min_shape
-
-    @property
-    def max_shape(self) -> Optional[Tuple[int, ...]]:
-        return self._max_shape
-
+    def entry_name(self):
+        return "Array"
 
 @dataclass
 class _ArraySetEntry(ArrayEntryBase):
@@ -83,32 +98,21 @@ class _ArraySetEntry(ArrayEntryBase):
     def preferred_shape(self) -> Tuple[int, ...]:
         return self.shape
 
+    @property
+    def entry_name(self):
+        return "ArraySet"
 
 @dataclass
 class _RaggedArraySetEntry(ArrayEntryBase):
     dtype: np.dtype
     storage: _ArrayLocation
-    preferred_shape: Optional[Tuple[int, ...]]
-    
-    # Same InitVar trick as _ArrayEntry
-    min_shape: InitVar[Optional[Tuple[int, ...]]]
-    max_shape: InitVar[Optional[Tuple[int, ...]]]
-
-    def __post_init__(self, min_shape, max_shape):
-        self._min_shape = min_shape
-        self._max_shape = max_shape
+    preferred_shape: Optional[Tuple[int, ...]] = None
+    min_shape: Optional[Tuple[int, ...]] = None
+    max_shape: Optional[Tuple[int, ...]] = None
 
     @property
-    def is_static(self) -> bool:
-        return False
-
-    @property
-    def min_shape(self) -> Optional[Tuple[int, ...]]:
-        return self._min_shape
-
-    @property
-    def max_shape(self) -> Optional[Tuple[int, ...]]:
-        return self._max_shape
+    def entry_name(self):
+        return "RaggedArraySet"
 
 @dataclass
 class Schema:
@@ -150,27 +154,15 @@ class Schema:
                 connector = "└── " if is_last else "├── "
 
                 if _is_struct_type(value):
-                    schema = create_schema(value)
+                    print(f"{prefix}{connector}{value.__name__} (opaque struct)")
+                elif isinstance(value, Schema):
 
-                    print(f"{prefix}{connector}{key}")
                     extension = "    " if is_last else "│   "
-                    _print_node(schema.fields, prefix + extension)
-                    
+                    print(f"{prefix}{connector}{key}")
+                    _print_node(value.fields, prefix + extension)
+
                 elif isinstance(value, ArrayEntryBase):
-                    # Cleanly format the ArrayEntry properties
-                    dtype_str = value.dtype.name if hasattr(value.dtype, 'name') else str(value.dtype)
-                    loc_str = value.storage.value
-
-                    array_info = [f"storage: {loc_str}"]
-                    if value.min_shape is not None:
-                        array_info += [f"min: {value.min_shape}"]
-
-                    if value.max_shape is not None:
-                        array_info += [f"max: {value.max_shape}"]
-
-                    array_info_str = ", ".join(array_info)
-                    
-                    print(f"{prefix}{connector}{key}: Array[{dtype_str}]({array_info_str})")
+                    print(f"{prefix}{connector}{value.format_entry(key)}")
                     
                 else:
                     # Fallback for unexpected types
@@ -200,6 +192,7 @@ def _supports_array_storage(dtype: Type):
 
 def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
     from .struct import _is_struct_type
+    from .set import Set
 
     is_serializable = {}
     
@@ -215,6 +208,11 @@ def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
         elif _is_struct_type(v):
             nested_fields = _validate_struct_datatypes(v, root=key_path)
             is_serializable.update(nested_fields)
+        elif issubclass(v, Set):
+            wrapped_type = v.item_type()
+            is_serializable = _validate_struct_datatypes(wrapped_type, root=key_path)
+            
+            is_serializable[key_path] = all(is_serializable.values())
         else:
             is_serializable[key_path] = _supports_array_storage(v)
             
@@ -242,6 +240,11 @@ def create_schema(cls: Type) -> Schema:
 
     def _convert(dtype: Type):
         from .struct import _is_struct_type
+        from .set import Set as BridgeSet
+
+        if issubclass(dtype, BridgeSet):
+            schema = dtype.schema()
+            return schema
         
         origin = typing.get_origin(dtype)
         if dtype == Array or origin is Array:

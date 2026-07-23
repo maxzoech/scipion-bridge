@@ -13,14 +13,20 @@ class Particle(B.Struct):
     pixels: B.Array
     ctf: CTF
 
+class TiltSeries(B.Struct):
+    tilts: B.Set[Particle]
 
 def test_static_size_set():
 
-    set_schema = B.Set[CTF].schema()
-    set_schema.print_tree()
+    # Particle.print_schema()
 
-    CTF.print_schema()
-    
+    # B.Set[Particle].schema().print_tree()
+    # particle_schema.print_tree()
+
+    TiltSeries.print_schema()
+
+    # CTF.print_schema()
+
 
 
 if __name__ == "__main__":

@@ -2,7 +2,10 @@
 
 from functools import cache
 
-from typing import Type, Generic, TypeVar, get_args, Dict
+from typing import Type, Generic, TypeVar, get_origin, Dict
+import typing
+import types
+
 from .struct import Struct, _is_struct_type
 from .schema import Schema, Entry, _ArraySetEntry, _RaggedArraySetEntry, _ArrayEntry
 
@@ -26,8 +29,6 @@ def _convert_array_entry(entry: _ArrayEntry) -> Entry:
             preferred_shape=entry.preferred_shape,
         )
 
-    
-
 
 def generate_set_schema(cls: Type[Struct]):
     
@@ -37,7 +38,7 @@ def generate_set_schema(cls: Type[Struct]):
     fields: Dict[str, Entry] = {}
     for k, v in cls.schema().fields.items():
         if _is_struct_type(v):
-            raise NotImplementedError("Sub-structs are not yet supported")
+            fields[k] = generate_set_schema(v) # type: ignore
         elif isinstance(v, _ArrayEntry):
             fields[k] = _convert_array_entry(entry=v)
         else:
@@ -47,7 +48,7 @@ def generate_set_schema(cls: Type[Struct]):
 
 T = TypeVar("T", bound=Struct)
 
-class Set(Generic[T]):
+class Set:
 
     __runtime_args__ = None
     _generic_cache: Dict = {}
@@ -77,10 +78,14 @@ class Set(Generic[T]):
 
     @classmethod
     @cache
-    def schema(cls):
+    def item_type(cls) -> Type:
         if not cls.__runtime_args__:
             raise TypeError(f"You must subscript {cls.__name__} (e.g., Set[CTF]) before calling schema()")
         
-        item_type = cls.__runtime_args__[0]
+        return cls.__runtime_args__[0]
 
+    @classmethod
+    @cache
+    def schema(cls):
+        item_type = cls.item_type()
         return generate_set_schema(item_type)
