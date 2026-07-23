@@ -1,4 +1,4 @@
-from typing import Type, Generic, TypeVar, Dict
+from typing import Type, Generic, TypeVar, Dict, Union, Any
 
 from ._type_checks import is_struct_type
 from .entries import (
@@ -14,6 +14,7 @@ from .schema import Schema
 import zarr
 from zarr.storage import MemoryStore
 
+import numpy as np
 
 def _convert_array_entry(entry: _ArrayEntry) -> Entry:
     if entry.is_static:
@@ -62,14 +63,62 @@ def generate_set_schema(cls: Type):
 
 T = TypeVar("T")
 
+def _get_element(target: "Set", index: int, prefix: str = "root"):
+    def _get_el(key, entry: Entry) -> Dict[str, zarr.Array]:
+        if isinstance(entry, _ArraySetEntry):
+            storage_key = f"{prefix}.{key}"
+            return target._zarr_group[storage_key][index]
+        else:
+            raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+
+    data_dict = { k: _get_el(k, v) for k, v in target.schema().fields.items() }
+    return target.item_type()(**data_dict)
+
+def _set_element(target: "Set", index: int, value: T, prefix: str = "root"):
+    def _set_el(key: str, entry: Entry, value: Any):
+        if isinstance(entry, _ArraySetEntry):
+            storage_key = f"{prefix}.{key}"
+            target._zarr_group[storage_key][index] = np.array(value)
+            return
+        else:
+            raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+
+    for k, v in target.schema().fields.items():
+        _set_el(k, v, value[k]) # type: ignore
+
 class Set(Generic[T], SchemaConvertible):
 
     __runtime_args__ = None
     _generic_cache: Dict = {}
 
-    def configure_array_storage(self) -> zarr.Group:
+    def configure_array_storage(self, capacity: int) -> zarr.Group:
+
         store = MemoryStore()
-        return zarr.group(store=store)
+        root = zarr.group(store=store)
+
+        for name, entry in self.schema().iter_leaves():
+            # Leaf entries: _ArrayEntry, _ArraySetEntry, _RaggedArraySetEntry
+            if isinstance(entry, _ArrayEntry):
+                assert entry.max_shape == entry.min_shape
+
+                root.create_array(
+                    name,
+                    shape=entry.max_shape,
+                    dtype=entry.dtype,
+                )
+            elif isinstance(entry, _ArraySetEntry) and entry.is_static == True:
+                root.create_array(
+                    name,
+                    shape=[capacity, *entry.max_shape],
+                    dtype=entry.dtype,
+                )
+            else:
+                raise NotImplementedError(f"Cannot create zarr group for entry {entry} at {name}")
+
+        return root
+
+    def __init__(self, capacity: int):
+        super().__init__(capacity)
 
     @classmethod
     def to_schema_entry(cls) -> _SchemaSetEntry:
@@ -118,3 +167,25 @@ class Set(Generic[T], SchemaConvertible):
             item_type = cls.item_type()
             cls._cached_schema = generate_set_schema(item_type)
         return cls._cached_schema
+
+
+    def __getitem__(self, key):
+        try:
+            return _get_element(self, int(key))
+        except ValueError:
+            pass
+
+    def __setitem__(self, key, value):
+        try:
+            _set_element(self, int(key), value)
+            return
+        except ValueError:
+            pass
+        
+
+        # try:
+        #     entry = self.schema().fields[key]
+        # except KeyError:
+        #     raise KeyError(f"The key '{key}' cannot be found in the schema for '{type(self).__qualname__}'")
+
+        # entry

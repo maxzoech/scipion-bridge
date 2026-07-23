@@ -244,3 +244,28 @@ def test_format_entry():
 
 
 
+
+def test_iter_leaves():
+    schema = create_schema(DeepNested)
+    leaves = dict(schema.iter_leaves(prefix="root"))
+    
+    assert "root.parent.name_id" in leaves
+    assert "root.parent.child.x" in leaves
+    assert "root.parent.child.y" in leaves
+    assert "root.tag" in leaves
+    
+    assert isinstance(leaves["root.tag"], _ArrayEntry)
+
+def test_map_leaves():
+    schema = create_schema(DeepNested)
+    
+    # Map leaves to their entry's names
+    mapped = schema.map_leaves(lambda path, entry: entry.entry_name, prefix="root")
+    
+    expected = {
+        "root.parent.name_id": "Array",
+        "root.parent.child.x": "Array",
+        "root.parent.child.y": "Array",
+        "root.tag": "Array",
+    }
+    assert mapped == expected

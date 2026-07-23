@@ -14,7 +14,7 @@ import abc
 import numpy as np
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import Optional, Tuple, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .schema import Schema
@@ -60,15 +60,12 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__post_init__()
-
-    def __post_init__(self) -> None:
-        """Hook called after initialization. Subclasses can override this."""
-        self._zarr_group = self.configure_array_storage()
+        super().__init__()
+        self._zarr_group = self.configure_array_storage(*args, **kwargs)
+     
 
     @abc.abstractmethod
-    def configure_array_storage(self) -> zarr.Group:
+    def configure_array_storage(self, *args: Any, **kwargs: Any) -> zarr.Group:
         """Set up the array storage backend."""
         ...
 
@@ -157,8 +154,8 @@ class _ArrayEntry(_ArrayEntryBase):
     dtype: np.dtype
     storage: _ArrayLocation
     preferred_shape: Optional[Tuple[int, ...]] = None
-    min_shape: Optional[Tuple[int, ...]] = None
-    max_shape: Optional[Tuple[int, ...]] = None
+    min_shape: Optional[Tuple[int]] = None
+    max_shape: Optional[Tuple[int]] = None
 
     @property
     def entry_name(self):

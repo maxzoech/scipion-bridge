@@ -12,12 +12,6 @@ from scipion_bridge.core.struct.set import generate_set_schema
 
 class CTF(B.Struct):
     voltage_kv: float              # Accelerating voltage (typically 300.0 or 200.0 kV)
-    amplitude_contrast: float      # Amplitude contrast fraction (typically 0.07 to 0.10)
-    spherical_aberration_mm: float # Spherical aberration (Cs) of the objective lens in mm (e.g., 2.7)
-    defocus_u: float               # Defocus along the major axis (usually in Angstroms)
-    defocus_v: float               # Defocus along the minor axis (usually in Angstroms)
-    defocus_angle: float           # Astigmatism angle between the U axis and X axis (degrees)
-    phase_shift: float             # Phase shift (in degrees), usually 0.0 unless using a Volta Phase Plate
 
 
 class Particle(B.Struct):
@@ -100,7 +94,21 @@ def test_set_of_tiltseries():
     assert isinstance(tilts_entry, _SchemaSetEntry)
     assert tilts_entry.is_static is False
 
-    B.Set[TiltSeries]().print_schema()
+
+def test_storage_simple_set():
+
+    ctfs = B.Set[CTF](capacity=10)
+    ctf = CTF(voltage_kv=300.0)
+    ctf_2 = CTF(voltage_kv=200.0)
+
+    ctfs[0] = ctf
+    ctfs[2] = ctf_2
+    
+    print(ctfs[0].voltage_kv)
+    print(ctfs[1].voltage_kv)
+    print(ctfs[2].voltage_kv)
+
+
 
 if __name__ == "__main__":
-    test_set_of_tiltseries()
+    test_storage_simple_set()

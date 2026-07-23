@@ -89,3 +89,8 @@ class Struct(SchemaConvertible):
                 value = value.item()
 
             return value
+
+    def __getitem__(self, key):
+        assert key in self.schema().fields
+
+        return self._zarr_group[key]
