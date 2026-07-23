@@ -63,28 +63,7 @@ def generate_set_schema(cls: Type):
 
 T = TypeVar("T")
 
-def _get_element(target: "Set", index: int, prefix: str = "root"):
-    def _get_el(key, entry: Entry) -> Dict[str, zarr.Array]:
-        if isinstance(entry, _ArraySetEntry):
-            storage_key = f"{prefix}.{key}"
-            return target._zarr_group[storage_key][index]
-        else:
-            raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 
-    data_dict = { k: _get_el(k, v) for k, v in target.schema().fields.items() }
-    return target.item_type()(**data_dict)
-
-def _set_element(target: "Set", index: int, value: T, prefix: str = "root"):
-    def _set_el(key: str, entry: Entry, value: Any):
-        if isinstance(entry, _ArraySetEntry):
-            storage_key = f"{prefix}.{key}"
-            target._zarr_group[storage_key][index] = np.array(value)
-            return
-        else:
-            raise NotImplementedError(f"Indexing into {entry} is not supported yet")
-
-    for k, v in target.schema().fields.items():
-        _set_el(k, v, value[k]) # type: ignore
 
 class Set(Generic[T], SchemaConvertible):
 
@@ -169,23 +148,33 @@ class Set(Generic[T], SchemaConvertible):
         return cls._cached_schema
 
 
+    def _get_element(self, index: int, prefix: str = "root"):
+        data_dict = {}
+        for k, entry in self.schema().fields.items():
+            if isinstance(entry, _ArraySetEntry):
+                storage_key = f"{prefix}.{k}"
+                data_dict[k] = self._zarr_group[storage_key][index]
+            else:
+                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+        return self.item_type()(**data_dict)
+
+    def _set_element(self, index: int, value: T, prefix: str = "root"):
+        for k, entry in self.schema().fields.items():
+            if isinstance(entry, _ArraySetEntry):
+                storage_key = f"{prefix}.{k}"
+                self._zarr_group[storage_key][index] = np.array(value[k]) # type: ignore
+            else:
+                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+
     def __getitem__(self, key):
         try:
-            return _get_element(self, int(key))
+            return self._get_element(int(key))
         except ValueError:
             pass
 
     def __setitem__(self, key, value):
         try:
-            _set_element(self, int(key), value)
+            self._set_element(int(key), value)
             return
         except ValueError:
             pass
-        
-
-        # try:
-        #     entry = self.schema().fields[key]
-        # except KeyError:
-        #     raise KeyError(f"The key '{key}' cannot be found in the schema for '{type(self).__qualname__}'")
-
-        # entry
