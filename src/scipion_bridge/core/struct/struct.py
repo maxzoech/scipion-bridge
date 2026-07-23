@@ -13,6 +13,10 @@ class Struct(SchemaConvertible):
 
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
 
+    def configure_array_storage(self) -> zarr.Group:
+        store = MemoryStore()
+        return zarr.group(store=store)
+
     @classmethod
     def to_schema_entry(cls) -> _StructEntry:
         return _StructEntry(struct_cls=cls, schema=cls.schema())
@@ -28,8 +32,7 @@ class Struct(SchemaConvertible):
         return create_schema(cls)
 
     def __init__(self, **kwargs: Any) -> None:
-        store = MemoryStore()
-        self._zarr_group: zarr.Group = zarr.group(store=store)
+        super().__init__()
 
         for key, value in kwargs.items():
             setattr(self, key, value)
@@ -86,12 +89,3 @@ class Struct(SchemaConvertible):
                 value = value.item()
 
             return value
-
-    @classmethod
-    def print_schema(cls) -> None:  # pragma: no cover
-        schema = create_schema(cls)
-        schema.print_tree(cls.__qualname__)
-
-    def print_storage_info(self) -> None:  # pragma: no cover
-        print(self._zarr_group.tree())
-        print(self._zarr_group.info_complete())

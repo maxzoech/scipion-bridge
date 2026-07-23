@@ -19,6 +19,8 @@ from typing import Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from .schema import Schema
 
+import zarr
+
 
 # ---------------------------------------------------------------------------
 # Base types
@@ -56,6 +58,34 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     - ``_validate_as_field(key_path)``: Validate that the type's fields
       support array serialization, returning a ``dict[str, bool]``.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        """Hook called after initialization. Subclasses can override this."""
+        self._zarr_group = self.configure_array_storage()
+
+    @abc.abstractmethod
+    def configure_array_storage(self) -> zarr.Group:
+        """Set up the array storage backend."""
+        ...
+
+    @classmethod
+    @abc.abstractmethod
+    def schema(cls) -> Schema:
+        """Return the schema for this type."""
+        ...
+
+    @classmethod
+    def print_schema(cls) -> None:  # pragma: no cover
+        schema = cls.schema()
+        schema.print_tree(cls.__qualname__)
+
+    def print_storage_info(self) -> None:  # pragma: no cover
+        print(self._zarr_group.tree())
+        print(self._zarr_group.info_complete())
 
     @classmethod
     @abc.abstractmethod
@@ -200,7 +230,7 @@ class _StructEntry(Entry):
         return self.schema.is_static
 
     def format_entry(self, name: str) -> str:
-        return name
+        return f"{name} (struct)"
 
     @property
     def children(self) -> Schema:

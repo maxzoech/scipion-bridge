@@ -11,6 +11,8 @@ from .entries import (
     SchemaConvertible,
 )
 from .schema import Schema
+import zarr
+from zarr.storage import MemoryStore
 
 
 def _convert_array_entry(entry: _ArrayEntry) -> Entry:
@@ -64,6 +66,10 @@ class Set(Generic[T], SchemaConvertible):
 
     __runtime_args__ = None
     _generic_cache: Dict = {}
+
+    def configure_array_storage(self) -> zarr.Group:
+        store = MemoryStore()
+        return zarr.group(store=store)
 
     @classmethod
     def to_schema_entry(cls) -> _SchemaSetEntry:

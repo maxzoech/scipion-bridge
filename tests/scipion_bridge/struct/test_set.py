@@ -91,7 +91,7 @@ def test_tiltseries_set_schema_integration():
     tilts_entry = schema.fields["tilts"]
     assert isinstance(tilts_entry, _SchemaSetEntry)
     assert tilts_entry.is_static is False
-2
+
 def test_set_of_tiltseries():
     schema = B.Set[TiltSeries].schema()
     assert isinstance(schema, Schema)
@@ -100,7 +100,7 @@ def test_set_of_tiltseries():
     assert isinstance(tilts_entry, _SchemaSetEntry)
     assert tilts_entry.is_static is False
 
-    
+    B.Set[TiltSeries]().print_schema()
 
 if __name__ == "__main__":
-    test_tiltseries_set_schema_integration()
+    test_set_of_tiltseries()
