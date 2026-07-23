@@ -63,6 +63,14 @@ class ArrayEntryBase(Entry):
         array_info_str = ", ".join(array_info)
         return f"{name}: {self.entry_name}[{dtype_str}]({array_info_str})"
 
+@dataclass
+class _SchemaSetEntry(Entry):
+    schema: "Schema"
+
+    @property
+    def is_static(self):
+        return self.schema.is_static
+
 
 @dataclass
 class _ArrayEntry(ArrayEntryBase):
@@ -160,6 +168,11 @@ class Schema:
 
                 if _is_struct_type(value):
                     print(f"{prefix}{connector}{value.__name__} (opaque struct)")
+                elif isinstance(value, _SchemaSetEntry):
+                    extension = "    " if is_last else "│   "
+                                        
+                    print(f"{prefix}{connector}{key} (schema set)")
+                    _print_node(value.schema.fields, prefix + extension)
                 elif isinstance(value, Schema):
 
                     extension = "    " if is_last else "│   "

@@ -7,7 +7,7 @@ import typing
 import types
 
 from .struct import Struct, _is_struct_type
-from .schema import Schema, Entry, _ArraySetEntry, _RaggedArraySetEntry, _ArrayEntry
+from .schema import Schema, Entry, _ArraySetEntry, _RaggedArraySetEntry, _ArrayEntry, _SchemaSetEntry
 
 
 def _convert_array_entry(entry: _ArrayEntry) -> Entry:
@@ -41,6 +41,8 @@ def generate_set_schema(cls: Type[Struct]):
             fields[k] = generate_set_schema(v) # type: ignore
         elif isinstance(v, _ArrayEntry):
             fields[k] = _convert_array_entry(entry=v)
+        elif isinstance(v, Schema):
+            fields[k] = _SchemaSetEntry(v)
         else:
             raise NotImplementedError(f"Unkown entry in schema: {v}")
 
@@ -48,7 +50,7 @@ def generate_set_schema(cls: Type[Struct]):
 
 T = TypeVar("T", bound=Struct)
 
-class Set:
+class Set(Generic[T]):
 
     __runtime_args__ = None
     _generic_cache: Dict = {}

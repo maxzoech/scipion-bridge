@@ -3,6 +3,7 @@ import scipion_bridge as B
 from scipion_bridge.core.struct.schema import (
     _ArraySetEntry,
     _RaggedArraySetEntry,
+    _SchemaSetEntry,
     Schema,
 )
 from scipion_bridge.core.struct.set import generate_set_schema
@@ -89,3 +90,16 @@ def test_tiltseries_set_schema_integration():
     tilts_entry = schema.fields["tilts"]
     assert isinstance(tilts_entry, Schema)
     assert tilts_entry.is_static is False
+
+def test_set_of_tiltseries():
+    schema = B.Set[TiltSeries].schema()
+    assert isinstance(schema, Schema)
+    assert "tilts" in schema.fields
+    tilts_entry = schema.fields["tilts"]
+    assert isinstance(tilts_entry, _SchemaSetEntry)
+    assert tilts_entry.is_static is False
+
+    schema.print_tree()
+
+if __name__ == "__main__":
+    test_set_of_tiltseries()
