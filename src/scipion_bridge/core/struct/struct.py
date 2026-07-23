@@ -80,5 +80,7 @@ class Struct:
         schema = create_schema(cls)
         schema.print_tree(cls.__qualname__)
 
-    def print_storage(self) -> None:  # pragma: no cover
+    def print_storage_info(self) -> None:  # pragma: no cover
         print(self._zarr_group.tree())
+        print(self._zarr_group.info_complete())
+

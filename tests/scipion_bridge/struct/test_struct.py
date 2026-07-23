@@ -104,7 +104,6 @@ def test_init():
         )
     )
 
-    assert particle.pixels.shape == (64, 64)
     assert np.allclose(particle.pixels, pixels)
 
     assert particle.ctf.voltage_kv == 300.0

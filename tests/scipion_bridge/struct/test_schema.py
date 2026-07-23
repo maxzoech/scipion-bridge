@@ -161,3 +161,49 @@ def test_supports_array_storage_direct():
     assert _supports_array_storage(object) is False
     assert _supports_array_storage("invalid_type_obj") is False
 
+
+def test_schema_is_static():
+    assert SimpleStruct.schema().is_static is True
+    assert DeepNested.schema().is_static is True
+
+    class DynamicArrayStruct(B.Struct):
+        pixels: B.Array[float]
+
+    assert DynamicArrayStruct.schema().is_static is False
+
+    class ParentWithDynamicChild(B.Struct):
+        child: DynamicArrayStruct
+        x: int
+
+    assert ParentWithDynamicChild.schema().is_static is False
+
+
+def test_array_entry_is_static():
+    static_entry = _ArrayEntry(
+        dtype=np.dtype(float),
+        storage=_ArrayLocation.AUTOMATIC,
+        min_shape=(10, 10),
+        max_shape=(10, 10),
+        preferred_shape=None,
+    )
+    assert static_entry.is_static is True
+
+    dynamic_entry = _ArrayEntry(
+        dtype=np.dtype(float),
+        storage=_ArrayLocation.AUTOMATIC,
+        min_shape=None,
+        max_shape=None,
+        preferred_shape=None,
+    )
+    assert dynamic_entry.is_static is False
+
+    mismatched_entry = _ArrayEntry(
+        dtype=np.dtype(float),
+        storage=_ArrayLocation.AUTOMATIC,
+        min_shape=(5,),
+        max_shape=(10,),
+        preferred_shape=None,
+    )
+    assert mismatched_entry.is_static is False
+
+

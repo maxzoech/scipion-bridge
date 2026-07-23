@@ -12,7 +12,7 @@ T = TypeVar("T")
 
 
 def _is_struct_type(dtype: Any) -> bool:
-    from .storage import Struct
+    from .struct import Struct
     return isinstance(dtype, type) and issubclass(dtype, Struct)
 
 
@@ -37,6 +37,10 @@ class _ArrayEntry(Entry):
     max_shape: Optional[Tuple[int]]
     preferred_shape: Optional[Tuple[int]]
 
+    @property
+    def is_static(self) -> bool:
+        return self.min_shape is not None and self.min_shape == self.max_shape
+
 
 @dataclass
 class Schema:
@@ -44,6 +48,20 @@ class Schema:
 
     def entries(self) -> Set[str]:
         return set(self.fields.keys())
+
+    @property
+    def is_static(self) -> bool:
+        for entry in self.fields.values():
+            if _is_struct_type(entry):
+                if not create_schema(entry).is_static: # type: ignore
+                    return False
+            elif isinstance(entry, _ArrayEntry):
+                if not entry.is_static:
+                    return False
+            else:
+                return False
+        return True
+
 
     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
         """
@@ -76,13 +94,16 @@ class Schema:
                     if value.max_shape is not None:
                         array_info += [f"max: {value.max_shape}"]
 
+                    if value.is_static == True:
+                        array_info += [f"sized"]
+
                     array_info_str = ", ".join(array_info)
                     
                     print(f"{prefix}{connector}{key}: Array[{dtype_str}]({array_info_str})")
                     
                 else:
                     # Fallback for unexpected types
-                    print(f"{prefix}{connector}{key}: {value} (fallback)")
+                    print(f"{prefix}{connector}{key}: {value}")
 
         _print_node(self.fields)
 
