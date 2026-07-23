@@ -1,11 +1,12 @@
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.struct.schema import (
+from scipion_bridge.core.struct.entries import (
     _ArraySetEntry,
     _RaggedArraySetEntry,
     _SchemaSetEntry,
-    Schema,
+    _StructEntry,
 )
+from scipion_bridge.core.struct.schema import Schema
 from scipion_bridge.core.struct.set import generate_set_schema
 
 
@@ -75,11 +76,11 @@ def test_ragged_struct_set_schema():
     assert pixels_entry.min_shape is None
     assert pixels_entry.max_shape is None
 
-    # ctf is nested CTF struct schema -> Schema containing _ArraySetEntry fields
-    ctf_schema = schema.fields["ctf"]
-    assert isinstance(ctf_schema, Schema)
-    assert ctf_schema.is_static is True
-    for _, entry in ctf_schema.fields.items():
+    # ctf is nested CTF struct -> _StructEntry containing set-converted fields
+    ctf_entry = schema.fields["ctf"]
+    assert isinstance(ctf_entry, _StructEntry)
+    assert ctf_entry.is_static is True
+    for _, entry in ctf_entry.schema.fields.items():
         assert isinstance(entry, _ArraySetEntry)
 
 
@@ -88,8 +89,10 @@ def test_tiltseries_set_schema_integration():
     assert isinstance(schema, Schema)
     assert "tilts" in schema.fields
     tilts_entry = schema.fields["tilts"]
-    assert isinstance(tilts_entry, Schema)
+    assert isinstance(tilts_entry, _SchemaSetEntry)
     assert tilts_entry.is_static is False
+
+    schema.print_tree()
 
 def test_set_of_tiltseries():
     schema = B.Set[TiltSeries].schema()
@@ -99,7 +102,7 @@ def test_set_of_tiltseries():
     assert isinstance(tilts_entry, _SchemaSetEntry)
     assert tilts_entry.is_static is False
 
-    schema.print_tree()
+    
 
 if __name__ == "__main__":
-    test_set_of_tiltseries()
+    test_tiltseries_set_schema_integration()

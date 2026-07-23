@@ -1,13 +1,15 @@
+from typing import Type, Generic, TypeVar, Dict
 
-
-from functools import cache
-
-from typing import Type, Generic, TypeVar, get_origin, Dict
-import typing
-import types
-
-from .struct import Struct, _is_struct_type
-from .schema import Schema, Entry, _ArraySetEntry, _RaggedArraySetEntry, _ArrayEntry, _SchemaSetEntry
+from ._type_checks import is_struct_type
+from .entries import (
+    Entry,
+    _ArrayEntry,
+    _ArraySetEntry,
+    _RaggedArraySetEntry,
+    _SchemaSetEntry,
+    _StructEntry,
+)
+from .schema import Schema
 
 
 def _convert_array_entry(entry: _ArrayEntry) -> Entry:
@@ -30,25 +32,32 @@ def _convert_array_entry(entry: _ArrayEntry) -> Entry:
         )
 
 
-def generate_set_schema(cls: Type[Struct]):
-    
-    if not issubclass(cls, Struct):
+def generate_set_schema(cls: Type):
+    """Build a set-context schema from a Struct type.
+
+    Converts ``_ArrayEntry`` fields to their set equivalents
+    (``_ArraySetEntry`` / ``_RaggedArraySetEntry``) and recursively
+    handles nested structs.
+    """
+    if not is_struct_type(cls):
         raise TypeError("Element of a set has to be of type Struct.")
 
     fields: Dict[str, Entry] = {}
     for k, v in cls.schema().fields.items():
-        if _is_struct_type(v):
-            fields[k] = generate_set_schema(v) # type: ignore
+        if isinstance(v, _StructEntry):
+            set_schema = generate_set_schema(v.struct_cls)
+            fields[k] = _StructEntry(struct_cls=v.struct_cls, schema=set_schema)
         elif isinstance(v, _ArrayEntry):
             fields[k] = _convert_array_entry(entry=v)
-        elif isinstance(v, Schema):
-            fields[k] = _SchemaSetEntry(v)
+        elif isinstance(v, _SchemaSetEntry):
+            fields[k] = v
         else:
-            raise NotImplementedError(f"Unkown entry in schema: {v}")
+            raise NotImplementedError(f"Unknown entry in schema: {v}")
 
     return Schema(fields)
 
-T = TypeVar("T", bound=Struct)
+
+T = TypeVar("T")
 
 class Set(Generic[T]):
 
@@ -56,7 +65,6 @@ class Set(Generic[T]):
     _generic_cache: Dict = {}
 
     @classmethod
-    @cache # Caches the class creation so Set[CTF] is only built once
     def __class_getitem__(cls, params):
         cache_key = (cls, params)
         if cache_key in Set._generic_cache:
@@ -68,9 +76,9 @@ class Set(Generic[T]):
 
         new_cls = type(new_cls_name, (cls,), {
             "__runtime_args__": type_args,
-            
-            # Optional: Duck-type as a standard GenericAlias so standard library
-            # tools like `typing.get_args(Set[CTF])` still work beautifully at runtime.
+
+            # Duck-type as a standard GenericAlias so standard library
+            # tools like `typing.get_args(Set[CTF])` still work at runtime.
             "__origin__": cls,
             "__args__": type_args,
         })
@@ -79,15 +87,15 @@ class Set(Generic[T]):
         return new_cls
 
     @classmethod
-    @cache
     def item_type(cls) -> Type:
         if not cls.__runtime_args__:
             raise TypeError(f"You must subscript {cls.__name__} (e.g., Set[CTF]) before calling schema()")
-        
+
         return cls.__runtime_args__[0]
 
     @classmethod
-    @cache
     def schema(cls):
-        item_type = cls.item_type()
-        return generate_set_schema(item_type)
+        if not hasattr(cls, '_cached_schema'):
+            item_type = cls.item_type()
+            cls._cached_schema = generate_set_schema(item_type)
+        return cls._cached_schema

@@ -1,4 +1,5 @@
-from .schema import Schema, Array, Entry, create_schema
+from .entries import Entry
+from .schema import Schema, Array, create_schema
 from .struct import Struct
 from .set import Set
 

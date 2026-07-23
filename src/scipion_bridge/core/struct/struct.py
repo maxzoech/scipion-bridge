@@ -4,11 +4,14 @@ import zarr
 from zarr.storage import MemoryStore
 from zarr.storage import LocalStore as DiskStore
 
-from .schema import create_schema, Schema, _ArrayEntry
+from .schema import create_schema, Schema
+from .entries import _ArrayEntry, _StructEntry
 
 from typing import Any
 
 class Struct:
+
+    _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
 
     @classmethod
     @cache
@@ -59,7 +62,7 @@ class Struct:
 
         if name not in attrs:
             return super().__getattribute__(name)
-        elif isinstance(schema.fields[name], type) and issubclass(schema.fields[name], Struct):
+        elif isinstance(schema.fields[name], _StructEntry):
             return super().__getattribute__(name)
         else:
             try:
@@ -83,7 +86,3 @@ class Struct:
     def print_storage_info(self) -> None:  # pragma: no cover
         print(self._zarr_group.tree())
         print(self._zarr_group.info_complete())
-
-
-def _is_struct_type(dtype: Any) -> bool:
-    return isinstance(dtype, type) and issubclass(dtype, Struct)

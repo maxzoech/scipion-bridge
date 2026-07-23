@@ -1,12 +1,14 @@
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.struct.schema import (
+from scipion_bridge.core.struct.entries import (
     _ArrayEntry,
     _ArraySetEntry,
     _RaggedArraySetEntry,
     _ArrayLocation,
-    PrintableEntry,
+    _StructEntry,
+)
+from scipion_bridge.core.struct.schema import (
     Schema,
     create_schema,
     _supports_array_storage,
@@ -63,9 +65,11 @@ def test_schema_creation_nested():
     assert isinstance(parent_schema.fields["name_id"], _ArrayEntry)
     assert parent_schema.fields["name_id"].dtype == np.dtype(int)
 
-    child_cls = parent_schema.fields["child"]
-    assert child_cls == NestedChild
-    child_schema = create_schema(child_cls)
+    child_entry = parent_schema.fields["child"]
+    assert isinstance(child_entry, _StructEntry)
+    assert child_entry.struct_cls == NestedChild
+
+    child_schema = child_entry.schema
     assert child_schema.entries() == {"x", "y"}
     assert isinstance(child_schema.fields["x"], _ArrayEntry)
     assert child_schema.fields["x"].dtype == np.dtype(int)
@@ -79,9 +83,10 @@ def test_schema_creation_deep_nested():
     assert deep_schema.entries() == {"parent", "tag"}
     assert isinstance(deep_schema.fields["tag"], _ArrayEntry)
 
-    parent_cls = deep_schema.fields["parent"]
-    assert parent_cls == NestedParent
-    assert create_schema(parent_cls).entries() == {"name_id", "child"}
+    parent_entry = deep_schema.fields["parent"]
+    assert isinstance(parent_entry, _StructEntry)
+    assert parent_entry.struct_cls == NestedParent
+    assert parent_entry.schema.entries() == {"name_id", "child"}
 
 
 def test_untyped_attribute_raises_type_error():
@@ -210,7 +215,7 @@ def test_array_entry_is_static():
     assert mismatched_entry.is_static is False
 
 
-def test_printable_entry_protocol():
+def test_format_entry():
     arr_entry = _ArrayEntry(
         dtype=np.dtype(float),
         storage=_ArrayLocation.AUTOMATIC,
@@ -218,7 +223,6 @@ def test_printable_entry_protocol():
         max_shape=(10,),
         preferred_shape=None,
     )
-    assert isinstance(arr_entry, PrintableEntry)
     assert arr_entry.format_entry("my_arr") == "my_arr: Array[float64](storage: auto, min: (10,), max: (10,))"
 
     arr_set_entry = _ArraySetEntry(
@@ -226,7 +230,6 @@ def test_printable_entry_protocol():
         storage=_ArrayLocation.AUTOMATIC,
         shape=(64, 64),
     )
-    assert isinstance(arr_set_entry, PrintableEntry)
     assert arr_set_entry.format_entry("my_set") == "my_set: ArraySet[int64](storage: auto, shape: (64, 64))"
 
     ragged_entry = _RaggedArraySetEntry(
@@ -236,8 +239,8 @@ def test_printable_entry_protocol():
         max_shape=None,
         preferred_shape=None,
     )
-    assert isinstance(ragged_entry, PrintableEntry)
     assert ragged_entry.format_entry("my_ragged") == "my_ragged: RaggedArraySet[float64](storage: auto, min: (1,))"
+
 
 
 
