@@ -102,6 +102,11 @@ class _ArraySetEntry(ArrayEntryBase):
     def entry_name(self):
         return "ArraySet"
 
+    def format_entry(self, name: str) -> str:
+        dtype_str = self.dtype.name if hasattr(self.dtype, 'name') else str(self.dtype)
+        loc_str = self.storage.value
+        return f"{name}: ArraySet[{dtype_str}](storage: {loc_str}, shape: {self.shape})"
+
 @dataclass
 class _RaggedArraySetEntry(ArrayEntryBase):
     dtype: np.dtype
@@ -242,7 +247,7 @@ def create_schema(cls: Type) -> Schema:
         from .struct import _is_struct_type
         from .set import Set as BridgeSet
 
-        if issubclass(dtype, BridgeSet):
+        if isinstance(dtype, type) and issubclass(dtype, BridgeSet):
             schema = dtype.schema()
             return schema
         
