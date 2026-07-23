@@ -3,7 +3,10 @@ import pytest
 import scipion_bridge as B
 from scipion_bridge.core.struct.schema import (
     _ArrayEntry,
+    _ArraySetEntry,
+    _RaggedArraySetEntry,
     _ArrayLocation,
+    PrintableEntry,
     Schema,
     create_schema,
     _supports_array_storage,
@@ -205,5 +208,36 @@ def test_array_entry_is_static():
         preferred_shape=None,
     )
     assert mismatched_entry.is_static is False
+
+
+def test_printable_entry_protocol():
+    arr_entry = _ArrayEntry(
+        dtype=np.dtype(float),
+        storage=_ArrayLocation.AUTOMATIC,
+        min_shape=(10,),
+        max_shape=(10,),
+        preferred_shape=None,
+    )
+    assert isinstance(arr_entry, PrintableEntry)
+    assert arr_entry.format_entry("my_arr") == "my_arr: Array[float64](storage: auto, min: (10,), max: (10,))"
+
+    arr_set_entry = _ArraySetEntry(
+        dtype=np.dtype(int),
+        storage=_ArrayLocation.AUTOMATIC,
+        shape=(64, 64),
+    )
+    assert isinstance(arr_set_entry, PrintableEntry)
+    assert arr_set_entry.format_entry("my_set") == "my_set: ArraySet[int64](storage: auto, shape: (64, 64))"
+
+    ragged_entry = _RaggedArraySetEntry(
+        dtype=np.dtype(float),
+        storage=_ArrayLocation.AUTOMATIC,
+        min_shape=(1,),
+        max_shape=None,
+        preferred_shape=None,
+    )
+    assert isinstance(ragged_entry, PrintableEntry)
+    assert ragged_entry.format_entry("my_ragged") == "my_ragged: RaggedArraySet[float64](storage: auto, min: (1,))"
+
 
 

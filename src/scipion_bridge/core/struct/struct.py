@@ -84,3 +84,6 @@ class Struct:
         print(self._zarr_group.tree())
         print(self._zarr_group.info_complete())
 
+
+def _is_struct_type(dtype: Any) -> bool:
+    return isinstance(dtype, type) and issubclass(dtype, Struct)

@@ -1,6 +1,6 @@
 import numpy as np
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, InitVar
 from enum import Enum
 import typing
 from typing import Type, Any, Dict, Optional, TypeVar, Generic, Tuple, Set
@@ -9,38 +9,106 @@ from ..utils.type_annotation import has_untyped_class_definitions
 from ..utils.format import format_list
 
 T = TypeVar("T")
-
-
-def _is_struct_type(dtype: Any) -> bool:
-    from .struct import Struct
-    return isinstance(dtype, type) and issubclass(dtype, Struct)
-
-
-class Entry:
-    pass  # Marker Type
-
-
 class Array(Generic[T]):
     pass
 
+class Entry(metaclass=abc.ABCMeta):
+    @property
+    @abc.abstractmethod
+    def is_static(self) -> bool:
+        ...
 
-class _ArrayLocation(Enum):
-    AUTOMATIC = "auto"
-    # HOST_MEMORY = "host_memory"
 
-
-@dataclass
-class _ArrayEntry(Entry):
-    dtype: np.dtype
-    storage: _ArrayLocation
-    min_shape: Optional[Tuple[int]]
-    max_shape: Optional[Tuple[int]]
-    preferred_shape: Optional[Tuple[int]]
+class ArrayEntryBase(Entry):
+    @property
+    @abc.abstractmethod
+    def min_shape(self) -> Optional[Tuple[int, ...]]:
+        ...
+    
+    @property
+    @abc.abstractmethod
+    def max_shape(self) -> Optional[Tuple[int, ...]]:
+        ...
 
     @property
     def is_static(self) -> bool:
         return self.min_shape is not None and self.min_shape == self.max_shape
 
+
+class _ArrayLocation(Enum):
+    AUTOMATIC = "auto"
+
+
+@dataclass
+class _ArrayEntry(ArrayEntryBase):
+    dtype: np.dtype
+    storage: _ArrayLocation
+    preferred_shape: Optional[Tuple[int, ...]]
+    
+    min_shape: InitVar[Optional[Tuple[int, ...]]]
+    max_shape: InitVar[Optional[Tuple[int, ...]]]
+
+    def __post_init__(self, min_shape, max_shape):
+        self._min_shape = min_shape
+        self._max_shape = max_shape
+
+    @property
+    def min_shape(self) -> Optional[Tuple[int, ...]]:
+        return self._min_shape
+
+    @property
+    def max_shape(self) -> Optional[Tuple[int, ...]]:
+        return self._max_shape
+
+
+@dataclass
+class _ArraySetEntry(ArrayEntryBase):
+    dtype: np.dtype
+    storage: _ArrayLocation
+    shape: Tuple[int, ...]
+
+    @property
+    def is_static(self) -> bool:
+        return True
+
+    @property
+    def min_shape(self) -> Tuple[int, ...]:
+        return self.shape
+    
+    @property
+    def max_shape(self) -> Tuple[int, ...]:
+        return self.shape
+
+    @property
+    def preferred_shape(self) -> Tuple[int, ...]:
+        return self.shape
+
+
+@dataclass
+class _RaggedArraySetEntry(ArrayEntryBase):
+    dtype: np.dtype
+    storage: _ArrayLocation
+    preferred_shape: Optional[Tuple[int, ...]]
+    
+    # Same InitVar trick as _ArrayEntry
+    min_shape: InitVar[Optional[Tuple[int, ...]]]
+    max_shape: InitVar[Optional[Tuple[int, ...]]]
+
+    def __post_init__(self, min_shape, max_shape):
+        self._min_shape = min_shape
+        self._max_shape = max_shape
+
+    @property
+    def is_static(self) -> bool:
+        return False
+
+    @property
+    def min_shape(self) -> Optional[Tuple[int, ...]]:
+        return self._min_shape
+
+    @property
+    def max_shape(self) -> Optional[Tuple[int, ...]]:
+        return self._max_shape
 
 @dataclass
 class Schema:
@@ -52,12 +120,11 @@ class Schema:
     @property
     def is_static(self) -> bool:
         for entry in self.fields.values():
+            from .struct import _is_struct_type
             if _is_struct_type(entry):
-                if not create_schema(entry).is_static: # type: ignore
-                    return False
-            elif isinstance(entry, _ArrayEntry):
-                if not entry.is_static:
-                    return False
+                return create_schema(entry).is_static # type: ignore
+            elif isinstance(entry, Entry):
+                return entry.is_static
             else:
                 return False
         return True
@@ -67,9 +134,16 @@ class Schema:
         """
         Prints a Schema object in a hierarchical tree format.
         """
-        print(typename if typename is not None else "/")
+
+        header = typename if typename is not None else "/"
+        if self.is_static:
+            header += " (static size)"
+
+        print(header)
         
         def _print_node(node: dict, prefix: str = ""):
+            from .struct import _is_struct_type
+
             items = list(node.items())
             for i, (key, value) in enumerate(items):
                 is_last = (i == len(items) - 1)
@@ -82,7 +156,7 @@ class Schema:
                     extension = "    " if is_last else "│   "
                     _print_node(schema.fields, prefix + extension)
                     
-                elif isinstance(value, _ArrayEntry):
+                elif isinstance(value, ArrayEntryBase):
                     # Cleanly format the ArrayEntry properties
                     dtype_str = value.dtype.name if hasattr(value.dtype, 'name') else str(value.dtype)
                     loc_str = value.storage.value
@@ -93,9 +167,6 @@ class Schema:
 
                     if value.max_shape is not None:
                         array_info += [f"max: {value.max_shape}"]
-
-                    if value.is_static == True:
-                        array_info += [f"sized"]
 
                     array_info_str = ", ".join(array_info)
                     
@@ -109,6 +180,8 @@ class Schema:
 
 
 def _supports_array_storage(dtype: Type):
+    from .struct import _is_struct_type
+
     if _is_struct_type(dtype):
         return _validate_struct_datatypes(dtype, root=dtype.__qualname__)
     
@@ -126,6 +199,7 @@ def _supports_array_storage(dtype: Type):
 
 
 def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
+    from .struct import _is_struct_type
 
     is_serializable = {}
     
@@ -167,6 +241,8 @@ def create_schema(cls: Type) -> Schema:
         )
 
     def _convert(dtype: Type):
+        from .struct import _is_struct_type
+        
         origin = typing.get_origin(dtype)
         if dtype == Array or origin is Array:
             args = typing.get_args(dtype)
