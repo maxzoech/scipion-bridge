@@ -5,13 +5,22 @@ from zarr.storage import MemoryStore
 from zarr.storage import LocalStore as DiskStore
 
 from .schema import create_schema, Schema
-from .entries import _ArrayEntry, _StructEntry
+from .entries import _ArrayEntry, _StructEntry, SchemaConvertible
 
 from typing import Any
 
-class Struct:
+class Struct(SchemaConvertible):
 
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
+
+    @classmethod
+    def to_schema_entry(cls) -> _StructEntry:
+        return _StructEntry(struct_cls=cls, schema=cls.schema())
+
+    @classmethod
+    def _validate_as_field(cls, key_path: str) -> dict:
+        from .schema import _validate_struct_datatypes
+        return _validate_struct_datatypes(cls, root=key_path)
 
     @classmethod
     @cache

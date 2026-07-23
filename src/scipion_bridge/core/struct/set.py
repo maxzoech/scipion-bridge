@@ -8,6 +8,7 @@ from .entries import (
     _RaggedArraySetEntry,
     _SchemaSetEntry,
     _StructEntry,
+    SchemaConvertible,
 )
 from .schema import Schema
 
@@ -59,10 +60,22 @@ def generate_set_schema(cls: Type):
 
 T = TypeVar("T")
 
-class Set(Generic[T]):
+class Set(Generic[T], SchemaConvertible):
 
     __runtime_args__ = None
     _generic_cache: Dict = {}
+
+    @classmethod
+    def to_schema_entry(cls) -> _SchemaSetEntry:
+        return _SchemaSetEntry(schema=cls.schema())
+
+    @classmethod
+    def _validate_as_field(cls, key_path: str) -> dict:
+        from .schema import _validate_struct_datatypes
+        wrapped_type = cls.item_type()
+        is_serializable = _validate_struct_datatypes(wrapped_type, root=key_path)
+        is_serializable[key_path] = all(is_serializable.values())
+        return is_serializable
 
     @classmethod
     def __class_getitem__(cls, params):

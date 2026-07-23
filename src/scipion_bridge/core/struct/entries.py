@@ -44,6 +44,37 @@ class Entry(metaclass=abc.ABCMeta):
         return None
 
 
+class SchemaConvertible(metaclass=abc.ABCMeta):
+    """Base class for types that can be converted into schema entries.
+
+    Both ``Struct`` and ``Set`` inherit from this class, providing a uniform
+    interface that ``create_schema`` dispatches on polymorphically.
+
+    Subclasses must implement:
+
+    - ``to_schema_entry()``: Convert this type into a schema ``Entry``.
+    - ``_validate_as_field(key_path)``: Validate that the type's fields
+      support array serialization, returning a ``dict[str, bool]``.
+    """
+
+    @classmethod
+    @abc.abstractmethod
+    def to_schema_entry(cls) -> Entry:
+        """Convert this type into a schema Entry for use in a parent schema."""
+        ...
+
+    @classmethod
+    @abc.abstractmethod
+    def _validate_as_field(cls, key_path: str) -> dict:
+        """Validate that this type's fields support array serialization.
+
+        Returns a dict mapping field paths to booleans (True if serializable).
+        Called by schema validation when this type appears as a field
+        annotation in a Struct.
+        """
+        ...
+
+
 class _ArrayLocation(Enum):
     AUTOMATIC = "auto"
 

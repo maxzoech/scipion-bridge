@@ -12,15 +12,17 @@ from typing import Type, Any, Dict, Optional, Set, TypeVar, Generic, Tuple
 
 from ..utils.type_annotation import has_untyped_class_definitions
 from ..utils.format import format_list
-from ._type_checks import is_struct_type
 from .entries import (
     Entry,
+    SchemaConvertible,
     _ArrayEntry,
     _ArrayLocation,
-    _SchemaSetEntry,
-    _StructEntry,
 )
 
+
+# ---------------------------------------------------------------------------
+# Array generic marker
+# ---------------------------------------------------------------------------
 
 T = TypeVar("T")
 
@@ -28,6 +30,10 @@ class Array(Generic[T]):
     """Type annotation marker for variable-shape array fields."""
     pass
 
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Schema:
@@ -66,9 +72,13 @@ class Schema:
         _print_node(self)
 
 
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
 def _supports_array_storage(dtype: Type):
     """Return whether *dtype* can be stored in an array backend."""
-    if is_struct_type(dtype):
+    if isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
         return _validate_struct_datatypes(dtype, root=dtype.__qualname__)
 
     origin = typing.get_origin(dtype)
@@ -86,8 +96,6 @@ def _supports_array_storage(dtype: Type):
 
 def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
     """Recursively validate that all fields in *cls* support array storage."""
-    from .set import Set
-
     is_serializable = {}
 
     attributes = {k: v for k, v in typing.get_type_hints(cls).items() if not k.startswith("_")}
@@ -99,18 +107,18 @@ def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
             args = typing.get_args(v)
             elem_type = args[0] if args else float
             is_serializable[key_path] = _supports_array_storage(elem_type)
-        elif is_struct_type(v):
-            nested_fields = _validate_struct_datatypes(v, root=key_path)
-            is_serializable.update(nested_fields)
-        elif issubclass(v, Set):
-            wrapped_type = v.item_type()
-            is_serializable = _validate_struct_datatypes(wrapped_type, root=key_path)
-            is_serializable[key_path] = all(is_serializable.values())
+        elif isinstance(v, type) and issubclass(v, SchemaConvertible):
+            nested = v._validate_as_field(key_path)
+            is_serializable.update(nested)
         else:
             is_serializable[key_path] = _supports_array_storage(v)
 
     return is_serializable
 
+
+# ---------------------------------------------------------------------------
+# Schema construction
+# ---------------------------------------------------------------------------
 
 def create_schema(cls: Type) -> Schema:
     """Build a :class:`Schema` from a Struct class definition.
@@ -138,11 +146,9 @@ def create_schema(cls: Type) -> Schema:
         )
 
     def _convert(dtype: Type) -> Entry:
-        from .set import Set as BridgeSet
-
-        if isinstance(dtype, type) and issubclass(dtype, BridgeSet):
-            schema = dtype.schema()
-            return _SchemaSetEntry(schema)
+        # SchemaConvertible types (Struct, Set) know how to produce their own entry
+        if isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
+            return dtype.to_schema_entry()
 
         origin = typing.get_origin(dtype)
         if dtype == Array or origin is Array:
@@ -154,12 +160,6 @@ def create_schema(cls: Type) -> Schema:
                 min_shape=None,
                 max_shape=None,
                 preferred_shape=None,
-            )
-
-        if is_struct_type(dtype):
-            return _StructEntry(
-                struct_cls=dtype,
-                schema=create_schema(dtype),
             )
 
         return _ArrayEntry(
