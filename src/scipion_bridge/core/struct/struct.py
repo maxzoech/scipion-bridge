@@ -5,7 +5,7 @@ from zarr.storage import MemoryStore
 from zarr.storage import LocalStore as DiskStore
 
 from .schema import create_schema, Schema
-from .entries import _ArrayEntry, _StructEntry, SchemaConvertible
+from .entries import _ArrayEntry, _StructEntry, _SchemaSetEntry, SchemaConvertible
 
 from typing import Any
 
@@ -40,7 +40,7 @@ class Struct(SchemaConvertible):
 
     def __setattr__(self, name, value):
         schema = type(self).schema()
-        if name not in schema.entries() or isinstance(value, Struct):
+        if name not in schema.entries() or isinstance(value, SchemaConvertible):
             super().__setattr__(name, value)
         else:
 
@@ -65,8 +65,8 @@ class Struct(SchemaConvertible):
                 buffer.attrs['is_scalar'] = is_scalar
 
                 buffer[:] = value
-            else:  # pragma: no cover
-                super().__setattr__(name, value)
+            else:
+                raise NotImplementedError(f"Setting entry {entry} not supported")
 
     def __getattribute__(self, name):
         schema = type(self).schema()
@@ -74,7 +74,7 @@ class Struct(SchemaConvertible):
 
         if name not in attrs:
             return super().__getattribute__(name)
-        elif isinstance(schema.fields[name], _StructEntry):
+        elif isinstance(schema.fields[name], (_StructEntry, _SchemaSetEntry)):
             return super().__getattribute__(name)
         else:
             try:

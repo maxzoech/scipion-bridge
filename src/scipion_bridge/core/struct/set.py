@@ -176,6 +176,11 @@ class Set(Generic[T], SchemaConvertible):
                     index=index,
                     target_cls=entry.struct_cls,
                 )
+            elif isinstance(entry, _SchemaSetEntry):
+                print(entry)
+                print(self._zarr_group.tree())
+
+                assert False
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
         return target_cls(**data_dict)
@@ -191,16 +196,27 @@ class Set(Generic[T], SchemaConvertible):
     def _write_entry(self, schema: Schema, prefix: str, index: int, value: Any) -> None:
         for k, entry in schema.fields.items():
             storage_key = f"{prefix}.{k}"
-            field_val = getattr(value, k)
             if isinstance(entry, _ArraySetEntry):
+                field_val = getattr(value, k)
                 self._zarr_group[storage_key][index] = np.array(field_val)
             elif isinstance(entry, _StructEntry):
+                field_val = getattr(value, k)
                 self._write_entry(
                     schema=entry.schema,
                     prefix=storage_key,
                     index=index,
                     value=field_val,
                 )
+            elif isinstance(entry, _SchemaSetEntry):
+                field_val = getattr(value, k)
+                if not isinstance(field_val, Set):
+                    raise TypeError(
+                        f"Expected field '{k}' to be a Set, got '{type(field_val).__name__}'"
+                    )
+                for leaf_path, _ in entry.schema.iter_leaves(prefix=""):
+                    target_key = f"{storage_key}.{leaf_path}"
+                    source_key = f"root.{leaf_path}"
+                    self._zarr_group[target_key][index] = field_val._zarr_group[source_key][:]
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 
