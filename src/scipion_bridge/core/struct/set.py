@@ -1,4 +1,4 @@
-from typing import Type, Generic, TypeVar, Dict, Union, Any
+from typing import Type, Generic, TypeVar, Dict, Union, Any, ForwardRef
 
 from ._type_checks import is_struct_type
 from .entries import (
@@ -113,19 +113,26 @@ class Set(Generic[T], SchemaConvertible):
 
     @classmethod
     def __class_getitem__(cls, params):
+        type_args = params if isinstance(params, tuple) else (params,)
+
+        # Use Generic[T] behavior for TypeVars for type checkers
+        if any(isinstance(t, TypeVar) for t in type_args):
+            return super().__class_getitem__(params)
+
+        # TODO: Correctly handle forward-declared references
+        if any(isinstance(t, (str, ForwardRef)) for t in type_args):
+            return super().__class_getitem__(params)
+
         cache_key = (cls, params)
         if cache_key in Set._generic_cache:
             return Set._generic_cache[cache_key]
 
-        type_args = params if isinstance(params, tuple) else (params,)
         param_names = ",".join(getattr(t, '__name__', str(t)) for t in type_args)
         new_cls_name = f"{cls.__name__}[{param_names}]"
 
         new_cls = type(new_cls_name, (cls,), {
+            "__module__": cls.__module__,
             "__runtime_args__": type_args,
-
-            # Duck-type as a standard GenericAlias so standard library
-            # tools like `typing.get_args(Set[CTF])` still work at runtime.
             "__origin__": cls,
             "__args__": type_args,
         })

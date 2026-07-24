@@ -102,18 +102,27 @@ def test_set_of_tiltseries():
 
 
 def test_storage_simple_set():
-
     ctfs = B.Set[CTF](capacity=10)
-    ctf = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
-    ctf_2 = CTF(voltage_kv=200.0, amplitude_contrast=0.07)
+    print(type(ctfs))
+    
+    ctf1 = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
+    ctf2 = CTF(voltage_kv=200.0, amplitude_contrast=0.10)
 
-    ctfs[0] = ctf
-    ctfs[2] = ctf_2
+    # Assign elements to specific indices
+    ctfs[0] = ctf1
+    ctfs[2] = ctf2
     
-    print(ctfs[0].voltage_kv)
-    print(ctfs[1].voltage_kv)
-    print(ctfs[2].amplitude_contrast)
+    # Assert values for assigned index 0
+    assert ctfs[0].voltage_kv == 300.0
+    assert ctfs[0].amplitude_contrast == 0.07
     
+    # Assert values for unassigned index 1 (should default to 0.0 for float)
+    assert ctfs[1].voltage_kv == 0.0
+    assert ctfs[1].amplitude_contrast == 0.0
+    
+    # Assert values for assigned index 2
+    assert ctfs[2].voltage_kv == 200.0
+    assert ctfs[2].amplitude_contrast == 0.10
 
 
 if __name__ == "__main__":
