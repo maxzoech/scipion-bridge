@@ -103,7 +103,6 @@ def test_set_of_tiltseries():
 
 def test_storage_simple_set():
     ctfs = B.Set[CTF](capacity=10)
-    print(type(ctfs))
     
     ctf1 = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
     ctf2 = CTF(voltage_kv=200.0, amplitude_contrast=0.10)
@@ -124,6 +123,23 @@ def test_storage_simple_set():
     assert ctfs[2].voltage_kv == 200.0
     assert ctfs[2].amplitude_contrast == 0.10
 
+def test_storage_slicing():
+    ctfs = B.Set[CTF](capacity=10)
+
+    subset = B.Set[CTF](capacity=5)
+    ctf1 = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
+    ctf2 = CTF(voltage_kv=200.0, amplitude_contrast=0.10)
+
+    ctfs[-6:-3] = subset[3:6]
+
+    # # Assign elements to specific indices
+    # ctfs[0] = ctf1
+    # ctfs[2] = ctf2
+
+    # ctf_slice = ctfs[1:3]
+    # print(ctf_slice[1].amplitude_contrast)
+    
+
 
 if __name__ == "__main__":
-    test_storage_simple_set()
+    test_storage_slicing()

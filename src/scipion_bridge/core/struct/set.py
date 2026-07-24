@@ -1,4 +1,5 @@
-from typing import Type, Generic, TypeVar, Dict, Union, Any, ForwardRef
+from __future__ import annotations
+from typing import Type, Generic, TypeVar, Dict, Union, Any, ForwardRef, Self
 
 from ._type_checks import is_struct_type
 from .entries import (
@@ -98,6 +99,7 @@ class Set(Generic[T], SchemaConvertible):
 
     def __init__(self, capacity: int):
         super().__init__(capacity)
+        self.capacity = capacity
 
     @classmethod
     def to_schema_entry(cls) -> _SchemaSetEntry:
@@ -154,8 +156,7 @@ class Set(Generic[T], SchemaConvertible):
             cls._cached_schema = generate_set_schema(item_type)
         return cls._cached_schema
 
-
-    def _get_element(self, index: int, prefix: str = "root"):
+    def _get_element(self, index: int, prefix: str = "root") -> T:
         data_dict = {}
         for k, entry in self.schema().fields.items():
             if isinstance(entry, _ArraySetEntry):
@@ -173,15 +174,73 @@ class Set(Generic[T], SchemaConvertible):
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 
+    def _compute_slice_bounds(self, index: slice):
+        start = index.start if index.start is not None else 0
+        stop = index.stop if index.stop is not None else self.capacity
+
+        if start < 0:
+            start = self.capacity + start
+
+        if stop < 0:
+            stop = self.capacity + stop
+
+
+        assert index.step is None, "Slicing with stride is not supported yet"
+        assert stop > start
+
+        return start, stop
+
+    def _get_slice(self, index: slice) -> Self:
+        start, stop = self._compute_slice_bounds(index)
+
+        cls = type(self)
+        new_set = cls(capacity=stop - start)
+
+        for k, entry in self.schema().iter_leaves():
+            if isinstance(entry, _ArraySetEntry):
+                new_set._zarr_group[k] = self._zarr_group[k][index]
+            else:
+                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+
+        return new_set
+
+    def _set_slice(self, index: slice, value: Set[T]) -> None:
+        start, stop = self._compute_slice_bounds(index)
+        if not (isinstance(value, Set) and value.item_type() == self.item_type()):
+            provided = f"Set of '{value.item_type()}'" if isinstance(value, Set) else f"'{type(value).__name__}'"
+            raise TypeError(
+                f"Cannot assign {provided} to a slice of Set of '{self.item_type()}'"
+            )
+
+        slice_length = stop - start
+        if slice_length != value.capacity:
+            raise ValueError(
+                f"Cannot assign a Set of capacity {value.capacity} to a slice of length {slice_length}"
+            )
+
+        for k, entry in self.schema().iter_leaves():
+            if isinstance(entry, _ArraySetEntry):
+                self._zarr_group[k] = value._zarr_group[k][index]
+            else:
+                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+
     def __getitem__(self, key):
+        if isinstance(key, slice):
+            return self._get_slice(key)
+        
         try:
             return self._get_element(int(key))
-        except ValueError:
+        except TypeError:
             pass
 
+        raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
+
     def __setitem__(self, key, value):
+        if isinstance(key, slice):
+            return self._set_slice(key, value)
         try:
-            self._set_element(int(key), value)
-            return
-        except ValueError:
+            return self._set_element(int(key), value)
+        except TypeError:
             pass
+
+        raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
