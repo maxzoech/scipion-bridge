@@ -184,8 +184,8 @@ class Set(Generic[T], SchemaConvertible):
         if stop < 0:
             stop = self.capacity + stop
 
-
-        assert index.step is None, "Slicing with stride is not supported yet"
+        if index.step is not None and index.step != 1:
+            raise NotImplementedError("Slicing with stride is not supported yet")
         assert stop > start
 
         return start, stop
@@ -198,7 +198,7 @@ class Set(Generic[T], SchemaConvertible):
 
         for k, entry in self.schema().iter_leaves():
             if isinstance(entry, _ArraySetEntry):
-                new_set._zarr_group[k] = self._zarr_group[k][index]
+                new_set._zarr_group[k][:] = self._zarr_group[k][start:stop]
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 
@@ -220,7 +220,7 @@ class Set(Generic[T], SchemaConvertible):
 
         for k, entry in self.schema().iter_leaves():
             if isinstance(entry, _ArraySetEntry):
-                self._zarr_group[k] = value._zarr_group[k][index]
+                self._zarr_group[k][start:stop] = value._zarr_group[k][:]
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 

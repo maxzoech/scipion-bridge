@@ -123,23 +123,87 @@ def test_storage_simple_set():
     assert ctfs[2].voltage_kv == 200.0
     assert ctfs[2].amplitude_contrast == 0.10
 
-def test_storage_slicing():
-    ctfs = B.Set[CTF](capacity=10)
+def test_get_slice_basic():
+    ctfs = B.Set[CTF](capacity=5)
+    for i in range(5):
+        ctfs[i] = CTF(voltage_kv=100.0 + i * 10, amplitude_contrast=0.01 * (i + 1))
 
-    subset = B.Set[CTF](capacity=5)
-    ctf1 = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
-    ctf2 = CTF(voltage_kv=200.0, amplitude_contrast=0.10)
-
-    ctfs[-6:-3] = subset[3:6]
-
-    # # Assign elements to specific indices
-    # ctfs[0] = ctf1
-    # ctfs[2] = ctf2
-
-    # ctf_slice = ctfs[1:3]
-    # print(ctf_slice[1].amplitude_contrast)
-    
+    sliced = ctfs[1:4]
+    assert isinstance(sliced, B.Set)
+    assert sliced.capacity == 3
+    assert sliced[0].voltage_kv == 110.0
+    assert sliced[1].voltage_kv == 120.0
+    assert sliced[2].voltage_kv == 130.0
+    assert pytest.approx(sliced[0].amplitude_contrast) == 0.02
+    assert pytest.approx(sliced[2].amplitude_contrast) == 0.04
 
 
-if __name__ == "__main__":
-    test_storage_slicing()
+def test_get_slice_defaults_and_negative_indices():
+    ctfs = B.Set[CTF](capacity=5)
+    for i in range(5):
+        ctfs[i] = CTF(voltage_kv=200.0 + i, amplitude_contrast=0.1)
+
+    # Implicit start
+    start_slice = ctfs[:2]
+    assert start_slice.capacity == 2
+    assert start_slice[0].voltage_kv == 200.0
+    assert start_slice[1].voltage_kv == 201.0
+
+    # Implicit stop
+    stop_slice = ctfs[3:]
+    assert stop_slice.capacity == 2
+    assert stop_slice[0].voltage_kv == 203.0
+    assert stop_slice[1].voltage_kv == 204.0
+
+    # Negative indices (-4 to -1 -> indices 1 to 4)
+    neg_slice = ctfs[-4:-1]
+    assert neg_slice.capacity == 3
+    assert neg_slice[0].voltage_kv == 201.0
+    assert neg_slice[1].voltage_kv == 202.0
+    assert neg_slice[2].voltage_kv == 203.0
+
+
+def test_set_slice_basic():
+    ctfs = B.Set[CTF](capacity=5)
+    for i in range(5):
+        ctfs[i] = CTF(voltage_kv=100.0, amplitude_contrast=0.05)
+
+    replacement = B.Set[CTF](capacity=2)
+    replacement[0] = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
+    replacement[1] = CTF(voltage_kv=400.0, amplitude_contrast=0.08)
+
+    ctfs[1:3] = replacement
+
+    assert ctfs[0].voltage_kv == 100.0
+    assert ctfs[1].voltage_kv == 300.0
+    assert ctfs[2].voltage_kv == 400.0
+    assert ctfs[3].voltage_kv == 100.0
+    assert ctfs[4].voltage_kv == 100.0
+
+
+def test_set_slice_from_get_slice():
+    source = B.Set[CTF](capacity=5)
+    for i in range(5):
+        source[i] = CTF(voltage_kv=10.0 * i, amplitude_contrast=0.01 * i)
+
+    target = B.Set[CTF](capacity=5)
+
+    # Assign a slice of source to a slice of target
+    target[1:4] = source[2:5]
+
+    assert target[1].voltage_kv == 20.0
+    assert target[2].voltage_kv == 30.0
+    assert target[3].voltage_kv == 40.0
+
+
+def test_set_slice_type_and_capacity_mismatch_errors():
+    ctfs = B.Set[CTF](capacity=5)
+
+    # Capacity mismatch error
+    replacement_wrong_cap = B.Set[CTF](capacity=3)
+    with pytest.raises(ValueError, match="Cannot assign a Set of capacity 3 to a slice of length 2"):
+        ctfs[1:3] = replacement_wrong_cap
+
+    # Type mismatch error
+    with pytest.raises(TypeError, match="Cannot assign 'list' to a slice of Set"):
+        ctfs[1:3] = [1, 2]  # type: ignore
