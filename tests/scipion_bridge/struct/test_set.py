@@ -207,3 +207,29 @@ def test_set_slice_type_and_capacity_mismatch_errors():
     # Type mismatch error
     with pytest.raises(TypeError, match="Cannot assign 'list' to a slice of Set"):
         ctfs[1:3] = [1, 2]  # type: ignore
+
+
+def test_set_iter():
+    ctfs = B.Set[CTF](capacity=3)
+    ctfs[0] = CTF(voltage_kv=100.0, amplitude_contrast=0.01)
+    ctfs[1] = CTF(voltage_kv=200.0, amplitude_contrast=0.02)
+    ctfs[2] = CTF(voltage_kv=300.0, amplitude_contrast=0.03)
+
+    items = list(ctfs)
+    assert len(items) == 3
+    assert [item.voltage_kv for item in items] == [100.0, 200.0, 300.0]
+
+
+def test_set_indexing_out_of_bounds():
+    ctfs = B.Set[CTF](capacity=3)
+
+    assert ctfs[-1].voltage_kv == 0.0
+
+    with pytest.raises(IndexError, match="out of range"):
+        _ = ctfs[3]
+
+    with pytest.raises(IndexError, match="out of range"):
+        _ = ctfs[-4]
+
+    with pytest.raises(IndexError, match="out of range"):
+        ctfs[3] = CTF(voltage_kv=100.0, amplitude_contrast=0.01)

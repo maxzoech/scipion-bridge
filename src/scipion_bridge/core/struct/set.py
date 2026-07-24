@@ -17,15 +17,14 @@ from zarr.storage import MemoryStore
 
 import numpy as np
 
+
 def _convert_array_entry(entry: _ArrayEntry) -> Entry:
     if entry.is_static:
         assert entry.min_shape == entry.max_shape
         assert entry.min_shape is not None
 
         return _ArraySetEntry(
-            dtype=entry.dtype,
-            storage=entry.storage,
-            shape=entry.min_shape
+            dtype=entry.dtype, storage=entry.storage, shape=entry.min_shape
         )
     else:
         return _RaggedArraySetEntry(
@@ -65,7 +64,6 @@ def generate_set_schema(cls: Type):
 T = TypeVar("T")
 
 
-
 class Set(Generic[T], SchemaConvertible):
 
     __runtime_args__ = None
@@ -93,7 +91,9 @@ class Set(Generic[T], SchemaConvertible):
                     dtype=entry.dtype,
                 )
             else:
-                raise NotImplementedError(f"Cannot create zarr group for entry {entry} at {name}")
+                raise NotImplementedError(
+                    f"Cannot create zarr group for entry {entry} at {name}"
+                )
 
         return root
 
@@ -108,6 +108,7 @@ class Set(Generic[T], SchemaConvertible):
     @classmethod
     def _validate_as_field(cls, key_path: str) -> dict:
         from .schema import _validate_struct_datatypes
+
         wrapped_type = cls.item_type()
         is_serializable = _validate_struct_datatypes(wrapped_type, root=key_path)
         is_serializable[key_path] = all(is_serializable.values())
@@ -129,15 +130,19 @@ class Set(Generic[T], SchemaConvertible):
         if cache_key in Set._generic_cache:
             return Set._generic_cache[cache_key]
 
-        param_names = ",".join(getattr(t, '__name__', str(t)) for t in type_args)
+        param_names = ",".join(getattr(t, "__name__", str(t)) for t in type_args)
         new_cls_name = f"{cls.__name__}[{param_names}]"
 
-        new_cls = type(new_cls_name, (cls,), {
-            "__module__": cls.__module__,
-            "__runtime_args__": type_args,
-            "__origin__": cls,
-            "__args__": type_args,
-        })
+        new_cls = type(
+            new_cls_name,
+            (cls,),
+            {
+                "__module__": cls.__module__,
+                "__runtime_args__": type_args,
+                "__origin__": cls,
+                "__args__": type_args,
+            },
+        )
 
         Set._generic_cache[cache_key] = new_cls
         return new_cls
@@ -145,13 +150,15 @@ class Set(Generic[T], SchemaConvertible):
     @classmethod
     def item_type(cls) -> Type:
         if not cls.__runtime_args__:
-            raise TypeError(f"You must subscript {cls.__name__} (e.g., Set[CTF]) before calling schema()")
+            raise TypeError(
+                f"You must subscript {cls.__name__} (e.g., Set[CTF]) before calling schema()"
+            )
 
         return cls.__runtime_args__[0]
 
     @classmethod
     def schema(cls):
-        if not hasattr(cls, '_cached_schema'):
+        if not hasattr(cls, "_cached_schema"):
             item_type = cls.item_type()
             cls._cached_schema = generate_set_schema(item_type)
         return cls._cached_schema
@@ -170,7 +177,7 @@ class Set(Generic[T], SchemaConvertible):
         for k, entry in self.schema().fields.items():
             if isinstance(entry, _ArraySetEntry):
                 storage_key = f"{prefix}.{k}"
-                self._zarr_group[storage_key][index] = np.array(value[k]) # type: ignore
+                self._zarr_group[storage_key][index] = np.array(value[k])  # type: ignore
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 
@@ -207,7 +214,11 @@ class Set(Generic[T], SchemaConvertible):
     def _set_slice(self, index: slice, value: Set[T]) -> None:
         start, stop = self._compute_slice_bounds(index)
         if not (isinstance(value, Set) and value.item_type() == self.item_type()):
-            provided = f"Set of '{value.item_type()}'" if isinstance(value, Set) else f"'{type(value).__name__}'"
+            provided = (
+                f"Set of '{value.item_type()}'"
+                if isinstance(value, Set)
+                else f"'{type(value).__name__}'"
+            )
             raise TypeError(
                 f"Cannot assign {provided} to a slice of Set of '{self.item_type()}'"
             )
@@ -224,23 +235,47 @@ class Set(Generic[T], SchemaConvertible):
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 
+    def __len__(self):
+        return self.capacity
+
+    def __iter__(self):
+        for i in range(self.capacity):
+            yield self[i]
+
     def __getitem__(self, key):
         if isinstance(key, slice):
             return self._get_slice(key)
-        
-        try:
-            return self._get_element(int(key))
-        except TypeError:
-            pass
 
-        raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
+        try:
+            idx = int(key)
+
+            if idx < 0:
+                idx = self.capacity + idx
+            if idx < 0 or idx >= self.capacity:
+                raise IndexError(
+                    f"Index {key} out of range for Set of capacity {self.capacity}"
+                )
+
+            return self._get_element(idx)
+
+        except (TypeError, ValueError):
+            raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
 
     def __setitem__(self, key, value):
         if isinstance(key, slice):
             return self._set_slice(key, value)
-        try:
-            return self._set_element(int(key), value)
-        except TypeError:
-            pass
 
-        raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
+        try:
+            idx = int(key)
+
+            if idx < 0:
+                idx = self.capacity + idx
+            if idx < 0 or idx >= self.capacity:
+                raise IndexError(
+                    f"Index {key} out of range for Set of capacity {self.capacity}"
+                )
+
+            return self._set_element(idx, value)
+
+        except (TypeError, ValueError):
+            raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
