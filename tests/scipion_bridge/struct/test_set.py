@@ -233,3 +233,118 @@ def test_set_indexing_out_of_bounds():
 
     with pytest.raises(IndexError, match="out of range"):
         ctfs[3] = CTF(voltage_kv=100.0, amplitude_contrast=0.01)
+
+
+class Camera(B.Struct):
+    gain: float
+    pixel_size_A: float
+
+
+class StaticParticle(B.Struct):
+    ctf: CTF
+    camera: Camera
+
+
+def test_nested_struct_get_set_element():
+    particles = B.Set[StaticParticle](capacity=3)
+    p0 = StaticParticle(
+        ctf=CTF(voltage_kv=300.0, amplitude_contrast=0.07),
+        camera=Camera(gain=1.5, pixel_size_A=0.85),
+    )
+    p1 = StaticParticle(
+        ctf=CTF(voltage_kv=200.0, amplitude_contrast=0.10),
+        camera=Camera(gain=2.0, pixel_size_A=1.05),
+    )
+
+    particles[0] = p0
+    particles[1] = p1
+
+    res0 = particles[0]
+    assert isinstance(res0, StaticParticle)
+    assert isinstance(res0.ctf, CTF)
+    assert res0.ctf.voltage_kv == 300.0
+    assert pytest.approx(res0.ctf.amplitude_contrast) == 0.07
+    assert res0.camera.gain == 1.5
+    assert res0.camera.pixel_size_A == 0.85
+
+    res1 = particles[1]
+    assert res1.ctf.voltage_kv == 200.0
+    assert res1.camera.gain == 2.0
+
+
+class InnerStruct(B.Struct):
+    val: float
+
+
+class MiddleStruct(B.Struct):
+    inner: InnerStruct
+
+
+class OuterStruct(B.Struct):
+    middle: MiddleStruct
+
+
+def test_multilevel_nested_struct_get_set():
+    outer_set = B.Set[OuterStruct](capacity=2)
+    elem = OuterStruct(middle=MiddleStruct(inner=InnerStruct(val=42.0)))
+
+    outer_set[0] = elem
+
+    res = outer_set[0]
+    assert isinstance(res, OuterStruct)
+    assert isinstance(res.middle, MiddleStruct)
+    assert isinstance(res.middle.inner, InnerStruct)
+    assert res.middle.inner.val == 42.0
+
+
+class SimpleParticle(B.Struct):
+    voltage_kv: float
+
+
+class TiltSeriesStatic(B.Struct):
+    tilts: B.Set[SimpleParticle]
+
+
+def test_nested_struct_slicing():
+    particles = B.Set[StaticParticle](capacity=4)
+    for i in range(4):
+        particles[i] = StaticParticle(
+            ctf=CTF(voltage_kv=100.0 * (i + 1), amplitude_contrast=0.01 * (i + 1)),
+            camera=Camera(gain=1.0 + i, pixel_size_A=0.5 + i),
+        )
+
+    # 1. Getting a slice of nested struct Set
+    sliced = particles[1:3]
+    assert sliced.capacity == 2
+    assert isinstance(sliced[0], StaticParticle)
+    assert sliced[0].ctf.voltage_kv == 200.0
+    assert pytest.approx(sliced[0].ctf.amplitude_contrast) == 0.02
+    assert sliced[0].camera.gain == 2.0
+
+    assert sliced[1].ctf.voltage_kv == 300.0
+    assert sliced[1].camera.gain == 3.0
+
+    # 2. Setting a slice of nested struct Set
+    replacement = B.Set[StaticParticle](capacity=2)
+    replacement[0] = StaticParticle(
+        ctf=CTF(voltage_kv=500.0, amplitude_contrast=0.05),
+        camera=Camera(gain=5.0, pixel_size_A=5.5),
+    )
+    replacement[1] = StaticParticle(
+        ctf=CTF(voltage_kv=600.0, amplitude_contrast=0.06),
+        camera=Camera(gain=6.0, pixel_size_A=6.5),
+    )
+
+    particles[1:3] = replacement
+    assert particles[0].ctf.voltage_kv == 100.0
+    assert particles[1].ctf.voltage_kv == 500.0
+    assert particles[2].ctf.voltage_kv == 600.0
+    assert particles[3].ctf.voltage_kv == 400.0
+
+    # 3. Assigning sliced source to sliced target
+    target = B.Set[StaticParticle](capacity=4)
+    target[0:2] = particles[1:3]
+    assert target[0].ctf.voltage_kv == 500.0
+    assert target[1].ctf.voltage_kv == 600.0
+
+

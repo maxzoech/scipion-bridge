@@ -163,23 +163,54 @@ class Set(Generic[T], SchemaConvertible):
             cls._cached_schema = generate_set_schema(item_type)
         return cls._cached_schema
 
-    def _get_element(self, index: int, prefix: str = "root") -> T:
+    def _read_entry(self, schema: Schema, prefix: str, index: int, target_cls: Type) -> Any:
         data_dict = {}
-        for k, entry in self.schema().fields.items():
+        for k, entry in schema.fields.items():
+            storage_key = f"{prefix}.{k}"
             if isinstance(entry, _ArraySetEntry):
-                storage_key = f"{prefix}.{k}"
                 data_dict[k] = self._zarr_group[storage_key][index]
+            elif isinstance(entry, _StructEntry):
+                data_dict[k] = self._read_entry(
+                    schema=entry.schema,
+                    prefix=storage_key,
+                    index=index,
+                    target_cls=entry.struct_cls,
+                )
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
-        return self.item_type()(**data_dict)
+        return target_cls(**data_dict)
 
-    def _set_element(self, index: int, value: T, prefix: str = "root"):
-        for k, entry in self.schema().fields.items():
+    def _get_element(self, index: int) -> T:
+        return self._read_entry(
+            schema=self.schema(),
+            prefix="root",
+            index=index,
+            target_cls=self.item_type(),
+        )
+
+    def _write_entry(self, schema: Schema, prefix: str, index: int, value: Any) -> None:
+        for k, entry in schema.fields.items():
+            storage_key = f"{prefix}.{k}"
+            field_val = getattr(value, k)
             if isinstance(entry, _ArraySetEntry):
-                storage_key = f"{prefix}.{k}"
-                self._zarr_group[storage_key][index] = np.array(value[k])  # type: ignore
+                self._zarr_group[storage_key][index] = np.array(field_val)
+            elif isinstance(entry, _StructEntry):
+                self._write_entry(
+                    schema=entry.schema,
+                    prefix=storage_key,
+                    index=index,
+                    value=field_val,
+                )
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+
+    def _set_element(self, index: int, value: T) -> None:
+        self._write_entry(
+            schema=self.schema(),
+            prefix="root",
+            index=index,
+            value=value,
+        )
 
     def _compute_slice_bounds(self, index: slice):
         start = index.start if index.start is not None else 0
