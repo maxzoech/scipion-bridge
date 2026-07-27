@@ -73,9 +73,10 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         store = MemoryStore()
         group = zarr.group(store=store)
         
-        def _create_storage(schema: Schema, *, root = "root", shape_prefix: tuple = tuple()):
+        def _create_storage(schema: Schema, *, root: str = "", shape_prefix: tuple = tuple()):
         
             for name, field in schema.fields.items():
+                path = f"{root}.{name}" if root else name
                 if isinstance(field, _SchemaSetEntry):
                     if not field.capacity:
                         raise ValueError(
@@ -84,18 +85,18 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
 
                     _create_storage(
                         field.schema,
-                        root=f"{root}.{name}",
+                        root=path,
                         shape_prefix=(*shape_prefix, field.capacity)
                     )
                 elif isinstance(field, _StructEntry):
                     _create_storage(
                         field.schema,
-                        root=f"{root}.{name}",
+                        root=path,
                         shape_prefix=shape_prefix
                     )
                 elif isinstance(field, _ArraySetEntry) or (isinstance(field, _ArrayEntry) and field.is_static):
                     group.create_array(
-                        name=f"{root}.{name}",
+                        name=path,
                         shape=(*shape_prefix, *field.min_shape),
                         dtype=field.dtype,
                     )

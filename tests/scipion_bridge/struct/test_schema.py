@@ -247,37 +247,37 @@ def test_format_entry():
 
 def test_tree_iter():
     schema = create_schema(DeepNested)
-    leaves = dict(schema.tree_iter(root="root"))
+    leaves = dict(schema.tree_iter())
 
-    assert "root.parent.name_id" in leaves
-    assert "root.parent.child.x" in leaves
-    assert "root.parent.child.y" in leaves
-    assert "root.tag" in leaves
+    assert "parent.name_id" in leaves
+    assert "parent.child.x" in leaves
+    assert "parent.child.y" in leaves
+    assert "tag" in leaves
 
-    assert isinstance(leaves["root.tag"], _ArrayEntry)
+    assert isinstance(leaves["tag"], _ArrayEntry)
 
 
 def test_iter_leaves():
     schema = create_schema(DeepNested)
-    leaves = dict(schema.leaves_iter(prefix="root"))
+    leaves = dict(schema.iter_leaves())
     
-    assert "root.parent.name_id" in leaves
-    assert "root.parent.child.x" in leaves
-    assert "root.parent.child.y" in leaves
-    assert "root.tag" in leaves
+    assert "parent.name_id" in leaves
+    assert "parent.child.x" in leaves
+    assert "parent.child.y" in leaves
+    assert "tag" in leaves
     
-    assert isinstance(leaves["root.tag"], _ArrayEntry)
+    assert isinstance(leaves["tag"], _ArrayEntry)
 
 def test_map_leaves():
     schema = create_schema(DeepNested)
     
     # Map leaves to their entry's names
-    mapped = schema.map_leaves(lambda path, entry: entry.entry_name, prefix="root")
+    mapped = schema.map_leaves(lambda path, entry: entry.entry_name)
     
     expected = {
-        "root.parent.name_id": "Array",
-        "root.parent.child.x": "Array",
-        "root.parent.child.y": "Array",
-        "root.tag": "Array",
+        "parent.name_id": "Array",
+        "parent.child.x": "Array",
+        "parent.child.y": "Array",
+        "tag": "Array",
     }
     assert mapped == expected

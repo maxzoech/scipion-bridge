@@ -414,4 +414,4 @@ def test_deeply_nested_sets():
 
 
 if __name__ == "__main__":
-    test_storage_simple_set()
+    test_nested_struct_get_set_element()

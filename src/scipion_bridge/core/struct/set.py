@@ -181,12 +181,27 @@ class Set(Generic[T], SchemaConvertible):
         return start, stop
 
     def _get_el(self, index: int) -> T:
-        cls: Type[T] = type(self).item_type()
-        new_el: T = cls()
+        cls = self.item_type()
+        new_el = cls()
 
-        for path, _ in self.schema().tree_iter(root="root"):
+        for path, _ in self.schema().tree_iter():
             new_el._zarr_group[path] = self._zarr_group[path][index]
 
+        def _attach_child_structs(struct_obj: Struct, prefix: str):
+            for name, field in type(struct_obj).schema().fields.items():
+                if isinstance(field, _StructEntry):
+                    child = field.struct_cls()
+                    child_prefix = f"{prefix}.{name}" if prefix else name
+
+                    for leaf_path, _ in field.schema.tree_iter():
+                        full_key = f"{child_prefix}.{leaf_path}"
+                        if full_key in new_el._zarr_group:
+                            child._zarr_group[leaf_path] = np.array(new_el._zarr_group[full_key])
+                            
+                    setattr(struct_obj, name, child)
+                    _attach_child_structs(child, child_prefix)
+
+        _attach_child_structs(new_el, "")
         return new_el
 
     def _get_slice(self, index: slice) -> Self:
@@ -195,7 +210,7 @@ class Set(Generic[T], SchemaConvertible):
         cls = type(self)
         new_set = cls(capacity=stop - start)
 
-        for path, _ in self.schema().tree_iter(root="root"):
+        for path, _ in self.schema().tree_iter():
             new_set._zarr_group[path][:] = self._zarr_group[path][start:stop]
 
         return new_set
@@ -211,9 +226,12 @@ class Set(Generic[T], SchemaConvertible):
                 f"Cannot assign {provided} to element of Set of '{self.item_type().__name__}'"
             )
 
-        for k in self.schema().fields:
-            field_val = getattr(value, k)
-            self._zarr_group[f"root.{k}"][index] = np.array(field_val)
+        for path, _ in self.schema().tree_iter():
+            obj = value
+            for part in path.split("."):
+                obj = getattr(obj, part)
+
+            self._zarr_group[path][index] = np.array(obj)
 
     def _set_slice(self, index: slice, value: Set[T]) -> None:
         start, stop = self._compute_slice_bounds(index)
@@ -233,7 +251,7 @@ class Set(Generic[T], SchemaConvertible):
                 f"Cannot assign a Set of capacity {len(value)} to a slice of length {slice_length}"
             )
 
-        for path, _ in self.schema().tree_iter(root="root"):
+        for path, _ in self.schema().tree_iter():
             self._zarr_group[path][start:stop] = value._zarr_group[path][:]
 
     def __len__(self):

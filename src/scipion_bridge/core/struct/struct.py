@@ -13,6 +13,10 @@ class Struct(SchemaConvertible):
 
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
 
+    def configure_array_storage(self) -> zarr.Group:
+        store = MemoryStore()
+        return zarr.group(store=store)
+
     @classmethod
     def to_schema_entry(cls) -> _StructEntry:
         return _StructEntry(struct_cls=cls, schema=cls.schema())
@@ -51,7 +55,7 @@ class Struct(SchemaConvertible):
                 is_scalar = not input_has_shape and value.size == 1
 
                 buffer = self._zarr_group.create_array(
-                    name=f"root.{name}",
+                    name=name,
                     shape=value.shape,
                     dtype=entry.dtype,
                     overwrite=True
@@ -74,7 +78,7 @@ class Struct(SchemaConvertible):
             return super().__getattribute__(name)
         else:
             try:
-                buffer = self._zarr_group[f"root.{name}"]
+                buffer = self._zarr_group[name]
             except KeyError:
                 raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
             
