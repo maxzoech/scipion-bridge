@@ -87,14 +87,22 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
                         root=f"{root}.{name}",
                         shape_prefix=(*shape_prefix, field.capacity)
                     )
-                elif isinstance(field, _ArraySetEntry) or isinstance(field, _ArrayEntry) and field.is_static:
+                elif isinstance(field, _StructEntry):
+                    _create_storage(
+                        field.schema,
+                        root=f"{root}.{name}",
+                        shape_prefix=shape_prefix
+                    )
+                elif isinstance(field, _ArraySetEntry) or (isinstance(field, _ArrayEntry) and field.is_static):
                     group.create_array(
                         name=f"{root}.{name}",
                         shape=(*shape_prefix, *field.min_shape),
                         dtype=field.dtype,
                     )
+                elif isinstance(field, _ArrayEntry):
+                    pass
                 else:
-                    raise NotImplementedError(f"Storage allocation not implement for entry type {type(field)}")
+                    raise NotImplementedError(f"Storage allocation not implemented for entry type {type(field)}")
 
         _create_storage(
             self.schema(),
@@ -274,6 +282,7 @@ class _SchemaSetEntry(Entry):
 
     schema: Schema
     capacity: Optional[int]
+    item_type: Optional[Type] = None
 
     @property
     def is_static(self):

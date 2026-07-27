@@ -91,7 +91,11 @@ class Set(Generic[T], SchemaConvertible):
 
     @classmethod
     def to_schema_entry(cls) -> _SchemaSetEntry:
-        return _SchemaSetEntry(schema=cls.schema(), capacity=cls.capacity())
+        return _SchemaSetEntry(
+            schema=cls.schema(),
+            capacity=cls.capacity(),
+            item_type=cls.item_type()
+        )
 
     @classmethod
     def _validate_as_field(cls, key_path: str) -> dict:
@@ -197,14 +201,14 @@ class Set(Generic[T], SchemaConvertible):
         return new_set
 
     def _set_el(self, index: int, value: T) -> None:
-        if not type(value) == self.item_type():
+        if not isinstance(value, self.item_type()):
             provided = (
                 f"Set of '{type(value)}'"
                 if isinstance(value, Set)
                 else f"'{type(value).__name__}'"
             )
             raise TypeError(
-                f"Cannot assign {provided} to a slice of Set of '{self.item_type()}'"
+                f"Cannot assign {provided} to element of Set of '{self.item_type()}'"
             )
 
         for path, _ in self.schema().tree_iter(root="root"):
