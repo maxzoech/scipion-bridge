@@ -51,7 +51,7 @@ class Struct(SchemaConvertible):
                 is_scalar = not input_has_shape and value.size == 1
 
                 buffer = self._zarr_group.create_array(
-                    name=name,
+                    name=f"root.{name}",
                     shape=value.shape,
                     dtype=entry.dtype,
                     overwrite=True
@@ -74,14 +74,19 @@ class Struct(SchemaConvertible):
             return super().__getattribute__(name)
         else:
             try:
-                buffer = self._zarr_group[name]
+                buffer = self._zarr_group[f"root.{name}"]
             except KeyError:
                 raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-            orig_shape = buffer.attrs['orig_shape']
-            is_scalar = buffer.attrs['is_scalar']
+            
+            value = np.array(buffer)
 
-            value = np.array(buffer).reshape(orig_shape)
-            if is_scalar:
-                value = value.item()
+            if "orig_shape" in buffer.attrs and "is_scalar" in buffer.attrs:
+                orig_shape = buffer.attrs['orig_shape']
+                is_scalar = buffer.attrs['is_scalar']
+
+                value = value.reshape(orig_shape)
+                
+                if is_scalar:
+                    value = value.item()
 
             return value

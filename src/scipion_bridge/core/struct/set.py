@@ -208,11 +208,12 @@ class Set(Generic[T], SchemaConvertible):
                 else f"'{type(value).__name__}'"
             )
             raise TypeError(
-                f"Cannot assign {provided} to element of Set of '{self.item_type()}'"
+                f"Cannot assign {provided} to element of Set of '{self.item_type().__name__}'"
             )
 
-        for path, _ in self.schema().tree_iter(root="root"):
-            self._zarr_group[path][index] = np.array(value._zarr_group[path]) # TODO: Make this async
+        for k in self.schema().fields:
+            field_val = getattr(value, k)
+            self._zarr_group[f"root.{k}"][index] = np.array(field_val)
 
     def _set_slice(self, index: slice, value: Set[T]) -> None:
         start, stop = self._compute_slice_bounds(index)
