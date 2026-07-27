@@ -1,3 +1,9 @@
+"""Set container implementation.
+
+A Set is a fixed-capacity sequence container for Struct items, stored as flattened
+N-dimensional Zarr arrays across the outer capacity dimension.
+"""
+
 from __future__ import annotations
 from typing import (
     Type,
@@ -23,7 +29,6 @@ from .entries import (
     SchemaConvertible,
 )
 from .schema import Schema
-from .struct import Struct
 import zarr
 from zarr.storage import MemoryStore
 
@@ -31,6 +36,7 @@ import numpy as np
 
 
 def _convert_array_entry(entry: _ArrayEntry) -> Entry:
+    """Convert a standard _ArrayEntry into its Set counterpart (_ArraySetEntry or _RaggedArraySetEntry)."""
     if entry.is_static:
         assert entry.min_shape == entry.max_shape
         assert entry.min_shape is not None
@@ -48,7 +54,7 @@ def _convert_array_entry(entry: _ArrayEntry) -> Entry:
         )
 
 
-def generate_set_schema(cls: Type):
+def generate_set_schema(cls: Type) -> Schema:
     """Build a set-context schema from a Struct type.
 
     Converts ``_ArrayEntry`` fields to their set equivalents
@@ -73,15 +79,21 @@ def generate_set_schema(cls: Type):
     return Schema(fields)
 
 
-T = TypeVar("T", bound=Struct)
+T = TypeVar("T")
 
 
 class Set(Generic[T], SchemaConvertible):
+    """Generic fixed-capacity sequence container of Struct items backed by Zarr arrays.
+
+    Parameters:
+        capacity (int): The total maximum capacity (length) of the set.
+    """
 
     __runtime_args__ = None
     _generic_cache: Dict = {}
 
     def configure_array_storage(self) -> zarr.Group:
+        """Pre-allocate array storage in Zarr for the configured set capacity."""
         return super().configure_array_storage(shape_prefix=(self._capacity,))
 
     def __init__(self, capacity: int):
@@ -264,10 +276,7 @@ class Set(Generic[T], SchemaConvertible):
         for i in range(self._capacity):
             yield self[i]
 
-    def __getitem__(self, key):
-        if isinstance(key, slice):
-            return self._get_slice(key)
-
+    def _normalize_index(self, key: Any) -> int:
         try:
             idx = int(key)
         except (TypeError, ValueError):
@@ -279,23 +288,14 @@ class Set(Generic[T], SchemaConvertible):
             raise IndexError(
                 f"Index {key} out of range for Set of capacity {self._capacity}"
             )
+        return idx
 
-        return self._get_el(idx)
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return self._get_slice(key)
+        return self._get_el(self._normalize_index(key))
 
     def __setitem__(self, key, value):
         if isinstance(key, slice):
             return self._set_slice(key, value)
-
-        try:
-            idx = int(key)
-        except (TypeError, ValueError):
-            raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
-
-        if idx < 0:
-            idx = self._capacity + idx
-        if idx < 0 or idx >= self._capacity:
-            raise IndexError(
-                f"Index {key} out of range for Set of capacity {self._capacity}"
-            )
-
-        self._set_el(idx, value)
+        self._set_el(self._normalize_index(key), value)

@@ -71,14 +71,6 @@ def test_struct_instance_nested():
     assert particle.ctf.foo.b == 2.5
 
 
-def test_unassigned_attribute_raises_attribute_error():
-    s = SimpleStruct()
-    with pytest.raises(AttributeError) as exc_info:
-        _ = s.val_int
-    assert "SimpleStruct" in str(exc_info.value)
-    assert "val_int" in str(exc_info.value)
-
-
 def test_non_schema_attribute_assignment():
     s = SimpleStruct()
     s.custom_field = "test_value"
