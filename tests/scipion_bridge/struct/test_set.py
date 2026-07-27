@@ -506,22 +506,54 @@ def test_nested_set_missing_capacity_raises_value_error():
         _ = B.Set[InvalidNestedStruct](capacity=5)
 
 
-class Particle(B.Struct):
+class StaticParticle2D(B.Struct):
     pixels: B.Array[float, 256, 256]
     ctf: CTF
 
 
 def test_struct_instance_static_arrays():
-    B.Set[Particle].print_schema()
+    B.Set[StaticParticle2D].print_schema()
 
-    particles = B.Set[Particle](capacity=10)
+    particles = B.Set[StaticParticle2D](capacity=10)
     data = np.random.uniform(size=[256, 256])
-    p = particles[0]
-    p.pixels = data
-    particles[0] = p
+    particles[0].pixels = data
 
     assert particles[0].pixels.shape == (256, 256)
     assert np.allclose(particles[0].pixels, data)
+
+
+class DeepTiltSeries(B.Struct):
+    tilts: B.Set[StaticParticle, 10]
+
+
+def test_deeply_nested_multi_level_attribute_mutation():
+    # Set -> DeepTiltSeries -> Set[StaticParticle, 10] -> StaticParticle -> CTF -> voltage_kv
+    series_set = B.Set[DeepTiltSeries](capacity=2)
+
+    p_set = B.Set[StaticParticle](capacity=3)
+    p_set[0] = StaticParticle(
+        ctf=CTF(voltage_kv=300.0, amplitude_contrast=0.07),
+        camera=Camera(gain=1.5, pixel_size_A=0.85),
+    )
+    p_set[1] = StaticParticle(
+        ctf=CTF(voltage_kv=200.0, amplitude_contrast=0.10),
+        camera=Camera(gain=2.0, pixel_size_A=1.00),
+    )
+
+    ts0 = DeepTiltSeries(tilts=p_set)
+    series_set[0] = ts0
+
+    # 1. Verify initial deep nested values
+    assert series_set[0].tilts[1].ctf.voltage_kv == 200.0
+    assert series_set[0].tilts[1].camera.gain == 2.0
+
+    # 2. Mutate deeply nested attribute directly on retrieved proxy view
+    series_set[0].tilts[1].ctf.voltage_kv = 400.0
+    series_set[0].tilts[1].camera.gain = 3.5
+
+    # 3. Verify in-place storage update
+    assert series_set[0].tilts[1].ctf.voltage_kv == 400.0
+    assert series_set[0].tilts[1].camera.gain == 3.5
 
 
 if __name__ == "__main__":

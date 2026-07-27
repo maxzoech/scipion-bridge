@@ -48,21 +48,28 @@ class Struct(SchemaConvertible):
         """Initialize a Struct instance, setting initial field values from keyword arguments."""
         super().__init__()
 
+        self._parent_set = None
+        self._parent_indices = tuple()
+        self._parent_prefix = ""
+
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Intercept field assignment to write values into the underlying Zarr storage."""
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+
         schema = type(self).schema()
         if name not in schema.entries() or isinstance(value, SchemaConvertible):
             super().__setattr__(name, value)
         else:
-
             input_has_shape = hasattr(value, "shape") or hasattr(value, "__len__")
 
             entry = schema.fields[name]
             if isinstance(entry, _ArrayEntry):
+                orig_val = np.array(value).astype(entry.dtype)
                 value = np.array(value).astype(entry.dtype)
                 orig_shape = value.shape
 
@@ -80,6 +87,10 @@ class Struct(SchemaConvertible):
                 buffer.attrs['is_scalar'] = is_scalar
 
                 buffer[:] = value
+
+                if self._parent_set is not None and self._parent_indices:
+                    storage_key = f"{self._parent_prefix}{name}"
+                    self._parent_set._zarr_group[storage_key][self._parent_indices] = orig_val
             else:
                 raise NotImplementedError(f"Setting entry {entry} not supported")
 
@@ -92,6 +103,11 @@ class Struct(SchemaConvertible):
         else:
             raise NotImplementedError(f"Cannot instantiate nested field for entry type {entry}")
 
+        if self._parent_set is not None and self._parent_indices:
+            child._parent_set = self._parent_set
+            child._parent_indices = self._parent_indices
+            child._parent_prefix = f"{self._parent_prefix}{name}."
+
         prefix = f"{name}."
         for leaf_path, _ in entry.schema.tree_iter():
             full_key = f"{prefix}{leaf_path}"
@@ -103,6 +119,9 @@ class Struct(SchemaConvertible):
 
     def __getattribute__(self, name: str) -> Any:
         """Intercept attribute access to read values lazily from underlying Zarr storage."""
+        if name.startswith("_"):
+            return super().__getattribute__(name)
+
         schema = type(self).schema()
         attrs = set(schema.entries())
 
@@ -116,14 +135,18 @@ class Struct(SchemaConvertible):
             except AttributeError:
                 return self._instantiate_nested_field(name, entry)
 
-        try:
-            buffer = self._zarr_group[name]
-        except KeyError:
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        if self._parent_set is not None and self._parent_indices:
+            storage_key = f"{self._parent_prefix}{name}"
+            buffer = self._parent_set._zarr_group[storage_key][self._parent_indices]
+        else:
+            try:
+                buffer = self._zarr_group[name]
+            except KeyError:
+                raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
         
         value = np.array(buffer)
 
-        if "orig_shape" in buffer.attrs and "is_scalar" in buffer.attrs:
+        if hasattr(buffer, "attrs") and "orig_shape" in buffer.attrs and "is_scalar" in buffer.attrs:
             orig_shape = buffer.attrs['orig_shape']
             is_scalar = buffer.attrs['is_scalar']
 

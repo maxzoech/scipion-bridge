@@ -30,7 +30,6 @@ from .entries import (
 )
 from .schema import Schema
 import zarr
-from zarr.storage import MemoryStore
 
 import numpy as np
 
@@ -98,6 +97,9 @@ class Set(Generic[T], SchemaConvertible):
 
     def __init__(self, capacity: int):
         self._capacity = capacity
+        self._parent_set = None
+        self._parent_indices = tuple()
+        self._parent_prefix = ""
 
         super().__init__()
 
@@ -192,9 +194,34 @@ class Set(Generic[T], SchemaConvertible):
 
         return start, stop
 
+    def _write_array(self, path: str, index: int, arr: np.ndarray) -> None:
+        """Write an array value to Zarr slice at path and index."""
+
+        self._zarr_group[path][index] = np.asarray(arr)
+        if self._parent_set is not None and self._parent_indices:
+            full_key = f"{self._parent_prefix}{path}"
+            full_indices = (*self._parent_indices, index)
+            self._parent_set._zarr_group[full_key][full_indices] = np.asarray(arr)
+
+
+    def _write_nested_set(self, path: str, index: int, nested_set: Set) -> None:
+        """Write all leaf array fields of a nested Set into storage at the given index, with padding if needed."""
+        for leaf_path, _ in nested_set.schema().tree_iter():
+            full_path = f"{path}.{leaf_path}"
+
+            arr = nested_set._zarr_group[leaf_path][:]
+
+            z_arr = self._zarr_group[full_path]
+            z_arr[index, :arr.shape[0]] = arr
+
     def _get_el(self, index: int) -> T:
         item_type = self.item_type()
         new_el: T = item_type()
+
+        new_el._parent_set = self._parent_set or self
+        new_el._parent_indices = (*self._parent_indices, index)
+        new_el._parent_prefix = self._parent_prefix
+
         for path, _ in self.schema().tree_iter():
             new_el._zarr_group[path] = self._zarr_group[path][index]
         return new_el
@@ -221,28 +248,17 @@ class Set(Generic[T], SchemaConvertible):
                 f"Cannot assign {provided} to element of Set of '{self.item_type().__name__}'"
             )
 
-        def _write_array(path: str, arr: np.ndarray):
-            z_arr = self._zarr_group[path]
-            arr = np.asarray(arr)
-            if arr.ndim > 0 and z_arr.ndim > 1 and arr.shape[0] < z_arr.shape[1]:
-                z_arr[index, : arr.shape[0]] = arr
-            else:
-                z_arr[index] = arr
-
         def _write_node(schema: Schema, obj: Any, *, prefix: str = ""):
             for name, entry in schema.fields.items():
                 path = f"{prefix}.{name}" if prefix else name
                 val = getattr(obj, name)
 
                 if isinstance(entry, (_ArraySetEntry, _ArrayEntry)):
-                    _write_array(path, np.array(val))
+                    self._write_array(path, index, np.array(val))
                 elif isinstance(entry, _StructEntry):
                     _write_node(entry.schema, val, prefix=path)
                 elif isinstance(entry, _SchemaSetEntry):
-                    for leaf_path, _ in entry.schema.tree_iter():
-                        full_path = f"{path}.{leaf_path}"
-                        arr = val._zarr_group[leaf_path][:]
-                        _write_array(full_path, arr)
+                    self._write_nested_set(path, index, val)
                 else:
                     raise NotImplementedError(f"Cannot write element for schema type {type(entry)}")
 
