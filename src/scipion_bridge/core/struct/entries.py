@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Any, TYPE_CHECKING
 
+from zarr.storage import MemoryStore
+
 if TYPE_CHECKING:
     from .schema import Schema
 
@@ -59,15 +61,47 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
       support array serialization, returning a ``dict[str, bool]``.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any):
         super().__init__()
-        self._zarr_group = self.configure_array_storage(*args, **kwargs)
+
+        self._zarr_group = self.configure_array_storage()
      
 
-    @abc.abstractmethod
-    def configure_array_storage(self, *args: Any, **kwargs: Any) -> zarr.Group:
+    def configure_array_storage(self, shape_prefix = tuple()) -> zarr.Group:
         """Set up the array storage backend."""
-        ...
+
+        store = MemoryStore()
+        group = zarr.group(store=store)
+        
+        def _create_storage(schema: Schema, *, root = "root", shape_prefix: tuple = tuple()):
+        
+            for name, field in schema.fields.items():
+                if isinstance(field, _SchemaSetEntry):
+                    if not field.capacity:
+                        raise ValueError(
+                            f"Field '{name}' in schema '{schema.__class__.__name__}' requires an explicit capacity (e.g., Set[{field.schema.__class__.__name__}, 5])."
+                        )
+
+                    _create_storage(
+                        field.schema,
+                        root=f"{root}.{name}",
+                        shape_prefix=(*shape_prefix, field.capacity)
+                    )
+                elif isinstance(field, _ArraySetEntry) or isinstance(field, _ArrayEntry) and field.is_static:
+                    group.create_array(
+                        name=f"{root}.{name}",
+                        shape=(*shape_prefix, *field.min_shape),
+                        dtype=field.dtype,
+                    )
+                else:
+                    raise NotImplementedError(f"Storage allocation not implement for entry type {type(field)}")
+
+        _create_storage(
+            self.schema(),
+            shape_prefix=shape_prefix,
+        )
+
+        return group
 
     @classmethod
     @abc.abstractmethod

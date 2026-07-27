@@ -385,22 +385,18 @@ class RootStruct(B.Struct):
 
 
 def test_deeply_nested_sets():
-    
     # 3 levels of sets: Set[RootStruct] -> NodeStruct (Set[LeafStruct])
     root_set = B.Set[RootStruct](capacity=10)
+
+    s = RootStruct()
     root_set.print_schema()
-    root_set.print_storage_info()
+    root_set[0].print_schema()
 
-    # leaf_set0 = B.Set[LeafStruct, 3]()
-    # leaf_set0[0] = LeafStruct(val=1.0)
+    node_structs = B.Set[NodeStruct](capacity=5)
+    struct = node_structs[0]
+    struct.bar = 42
 
-
-    # # leaf_set0[1] = LeafStruct(val=2.0)
-
-    # node_set0 = B.Set[NodeStruct, 2]()
-
-    # # node_set0[0] = NodeStruct(leaves=leaf_set0, bar=10)
-    # root_set[0] = RootStruct(nodes=node_set0, foo=4.2)
+    node_structs[0] = struct
 
 if __name__ == "__main__":
     test_deeply_nested_sets()

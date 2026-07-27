@@ -245,9 +245,21 @@ def test_format_entry():
 
 
 
+def test_tree_iter():
+    schema = create_schema(DeepNested)
+    leaves = dict(schema.tree_iter(root="root"))
+
+    assert "root.parent.name_id" in leaves
+    assert "root.parent.child.x" in leaves
+    assert "root.parent.child.y" in leaves
+    assert "root.tag" in leaves
+
+    assert isinstance(leaves["root.tag"], _ArrayEntry)
+
+
 def test_iter_leaves():
     schema = create_schema(DeepNested)
-    leaves = dict(schema.iter_leaves(prefix="root"))
+    leaves = dict(schema.leaves_iter(prefix="root"))
     
     assert "root.parent.name_id" in leaves
     assert "root.parent.child.x" in leaves

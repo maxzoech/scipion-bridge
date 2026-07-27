@@ -23,6 +23,7 @@ from .entries import (
     SchemaConvertible,
 )
 from .schema import Schema
+from .struct import Struct
 import zarr
 from zarr.storage import MemoryStore
 
@@ -72,7 +73,7 @@ def generate_set_schema(cls: Type):
     return Schema(fields)
 
 
-T = TypeVar("T")
+T = TypeVar("T", bound=Struct)
 
 
 class Set(Generic[T], SchemaConvertible):
@@ -80,40 +81,13 @@ class Set(Generic[T], SchemaConvertible):
     __runtime_args__ = None
     _generic_cache: Dict = {}
 
-    def configure_array_storage(self, capacity: int) -> zarr.Group:
-
-        store = MemoryStore()
-        group = zarr.group(store=store)
-
-        def _create_storage(schema: Schema, *, root = "root", shape_prefix: tuple = tuple()):
-
-            for name, field in schema.fields.items():
-                if isinstance(field, _SchemaSetEntry):
-                    if not field.capacity:
-                        raise ValueError(
-                            f"Field '{name}' in schema '{schema.__class__.__name__}' requires an explicit capacity (e.g., Set[{field.schema.__class__.__name__}, 5])."
-                        )
-
-                    _create_storage(
-                        field.schema,
-                        root=f"{root}.{name}",
-                        shape_prefix=(*shape_prefix, field.capacity)
-                    )
-                elif isinstance(field, _ArraySetEntry):
-                    group.create_array(
-                        name=f"{root}.{name}",
-                        shape=(*shape_prefix, *field.shape),
-                        dtype=field.dtype,
-                    )
-                else:
-                    raise NotImplementedError
-
-        _create_storage(schema=self.schema(), shape_prefix=(capacity,))
-
-        return group
+    def configure_array_storage(self) -> zarr.Group:
+        return super().configure_array_storage(shape_prefix=(self._capacity,))
 
     def __init__(self, capacity: int):
-        super().__init__(capacity=capacity)
+        self._capacity = capacity
+
+        super().__init__()
 
     @classmethod
     def to_schema_entry(cls) -> _SchemaSetEntry:
@@ -185,149 +159,16 @@ class Set(Generic[T], SchemaConvertible):
             item_type = cls.item_type()
             cls._cached_schema = generate_set_schema(item_type)
         return cls._cached_schema
-
-    def _create_or_retrieve_array(
-        self,
-        storage_key,
-        *,
-        shape: Tuple,
-        dtype,
-        **kwargs,
-    ):
-        if storage_key in self._zarr_group:
-            return self._zarr_group[storage_key]
-        else:
-            return self._zarr_group.create_array(
-                storage_key,
-                shape=shape,
-                dtype=dtype,
-                **kwargs,
-            )
-
-    def _read_entry(
-        self,
-        schema: Schema,
-        prefix: str,
-        index: int,
-        target_cls: Type,
-        root="root",
-        shape_prefix=tuple(),
-    ) -> Any:
-
-        data_dict = {}
-        for k, entry in schema.fields.items():
-            storage_key = f"{prefix}.{k}"
-
-            if isinstance(entry, _ArraySetEntry):
-                assert entry.is_static
-
-                storage = self._create_or_retrieve_array(
-                    storage_key,
-                    shape=tuple([self.capacity, *entry.max_shape]),
-                    dtype=entry.dtype,
-                )
-
-                data_dict[k] = storage[index]
-
-        # data_dict = {}
-        # for k, entry in schema.fields.items():
-        #     storage_key = f"{prefix}.{k}"
-        #     if isinstance(entry, _ArraySetEntry):
-        #         data_dict[k] = self._zarr_group[storage_key][index]
-        #     elif isinstance(entry, _StructEntry):
-        #         data_dict[k] = self._read_entry(
-        #             schema=entry.schema,
-        #             prefix=storage_key,
-        #             index=index,
-        #             target_cls=entry.struct_cls,
-        #         )
-        #     elif isinstance(entry, _SchemaSetEntry):
-        #         print(entry)
-        #         print(self._zarr_group.tree())
-
-        #         assert False
-        #     else:
-        #         raise NotImplementedError(f"Indexing into {entry} is not supported yet")
-
-        return target_cls(**data_dict)
-
-    def _get_element(self, index: int) -> T:
-        return self._read_entry(
-            schema=self.schema(),
-            prefix="root",
-            index=index,
-            target_cls=self.item_type(),
-        )
-
-    def _write_entry(self, schema: Schema, prefix: str, index: int, value: Any) -> None:
-        for k, entry in schema.fields.items():
-            storage_key = f"{prefix}.{k}"
-            if isinstance(entry, _ArraySetEntry):
-                assert entry.is_static
-                print("get key: ", storage_key)
-
-                field_val = getattr(value, k)
-                storage = self._create_or_retrieve_array(
-                    storage_key,
-                    shape=tuple([self.capacity, *entry.max_shape]),
-                    dtype=entry.dtype,
-                )
-
-                storage[index] = np.array(field_val)
-            elif isinstance(entry, _SchemaSetEntry):
-                field_val = getattr(value, k)
-                assert isinstance(field_val, Set)
-                print(f"Write in schema: {field_val.capacity}")
-
-                print("target: ", k, field_val, value)
-                entry.schema.print_tree()
-
-                assert False
-                self._write_entry(
-                    entry.schema,
-                    prefix=f"{prefix}.{k}",
-                    index=index,
-                    value=field_val,
-                )
-
-            #     elif isinstance(entry, _StructEntry):
-            #         field_val = getattr(value, k)
-            #         self._write_entry(
-            #             schema=entry.schema,
-            #             prefix=storage_key,
-            #             index=index,
-            #             value=field_val,
-            #         )
-            #     elif isinstance(entry, _SchemaSetEntry):
-            #         field_val = getattr(value, k)
-            #         if not isinstance(field_val, Set):
-            #             raise TypeError(
-            #                 f"Expected field '{k}' to be a Set, got '{type(field_val).__name__}'"
-            #             )
-            #         for leaf_path, _ in entry.schema.iter_leaves(prefix=""):
-            #             target_key = f"{storage_key}.{leaf_path}"
-            #             source_key = f"root.{leaf_path}"
-            #             self._zarr_group[target_key][index] = field_val._zarr_group[source_key][:]
-            else:
-                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
-
-    def _set_element(self, index: int, value: T) -> None:
-        self._write_entry(
-            schema=self.schema(),
-            prefix="root",
-            index=index,
-            value=value,
-        )
-
+    
     def _compute_slice_bounds(self, index: slice):
         start = index.start if index.start is not None else 0
-        stop = index.stop if index.stop is not None else self.capacity
+        stop = index.stop if index.stop is not None else self._capacity
 
         if start < 0:
-            start = self.capacity + start
+            start = self._capacity + start
 
         if stop < 0:
-            stop = self.capacity + stop
+            stop = self._capacity + stop
 
         if index.step is not None and index.step != 1:
             raise NotImplementedError("Slicing with stride is not supported yet")
@@ -335,19 +176,39 @@ class Set(Generic[T], SchemaConvertible):
 
         return start, stop
 
+    def _get_el(self, index: int) -> T:
+        cls: Type[T] = type(self).item_type()
+        new_el: T = cls()
+
+        for path, _ in self.schema().tree_iter(root="root"):
+            new_el._zarr_group[path] = self._zarr_group[path][index]
+
+        return new_el
+
     def _get_slice(self, index: slice) -> Self:
         start, stop = self._compute_slice_bounds(index)
 
         cls = type(self)
         new_set = cls(capacity=stop - start)
 
-        for k, entry in self.schema().iter_leaves():
-            if isinstance(entry, _ArraySetEntry):
-                new_set._zarr_group[k][:] = self._zarr_group[k][start:stop]
-            else:
-                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+        for path, _ in self.schema().tree_iter(root="root"):
+            new_set._zarr_group[path][:] = self._zarr_group[path][start:stop]
 
         return new_set
+
+    def _set_el(self, index: int, value: T) -> None:
+        if not type(value) == self.item_type():
+            provided = (
+                f"Set of '{type(value)}'"
+                if isinstance(value, Set)
+                else f"'{type(value).__name__}'"
+            )
+            raise TypeError(
+                f"Cannot assign {provided} to a slice of Set of '{self.item_type()}'"
+            )
+
+        for path, _ in self.schema().tree_iter(root="root"):
+            self._zarr_group[path][index] = np.array(value._zarr_group[path]) # TODO: Make this async
 
     def _set_slice(self, index: slice, value: Set[T]) -> None:
         start, stop = self._compute_slice_bounds(index)
@@ -362,22 +223,19 @@ class Set(Generic[T], SchemaConvertible):
             )
 
         slice_length = stop - start
-        if slice_length != value.capacity:
+        if slice_length != len(value):
             raise ValueError(
-                f"Cannot assign a Set of capacity {value.capacity} to a slice of length {slice_length}"
+                f"Cannot assign a Set of capacity {len(value)} to a slice of length {slice_length}"
             )
 
-        for k, entry in self.schema().iter_leaves():
-            if isinstance(entry, _ArraySetEntry):
-                self._zarr_group[k][start:stop] = value._zarr_group[k][:]
-            else:
-                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+        for path, _ in self.schema().tree_iter(root="root"):
+            self._zarr_group[path][start:stop] = value._zarr_group[path][:]
 
     def __len__(self):
-        return self.capacity
+        return self._capacity
 
     def __iter__(self):
-        for i in range(self.capacity):
+        for i in range(self._capacity):
             yield self[i]
 
     def __getitem__(self, key):
@@ -388,13 +246,13 @@ class Set(Generic[T], SchemaConvertible):
             idx = int(key)
 
             if idx < 0:
-                idx = self.capacity + idx
-            if idx < 0 or idx >= self.capacity:
+                idx = self._capacity + idx
+            if idx < 0 or idx >= self._capacity:
                 raise IndexError(
-                    f"Index {key} out of range for Set of capacity {self.capacity}"
+                    f"Index {key} out of range for Set of capacity {self._capacity}"
                 )
 
-            return self._get_element(idx)
+            return self._get_el(idx)
 
         except (TypeError, ValueError):
             raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
@@ -407,13 +265,13 @@ class Set(Generic[T], SchemaConvertible):
             idx = int(key)
 
             if idx < 0:
-                idx = self.capacity + idx
-            if idx < 0 or idx >= self.capacity:
+                idx = self._capacity + idx
+            if idx < 0 or idx >= self._capacity:
                 raise IndexError(
-                    f"Index {key} out of range for Set of capacity {self.capacity}"
+                    f"Index {key} out of range for Set of capacity {self._capacity}"
                 )
 
-            return self._set_element(idx, value)
+            self._set_el(idx, value)
 
         except (TypeError, ValueError):
             raise TypeError(f"Indexing with {type(key).__name__} is not supported.")

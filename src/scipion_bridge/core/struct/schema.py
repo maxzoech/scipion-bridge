@@ -49,20 +49,24 @@ class Schema:
         """True when every field in the schema has a fixed shape."""
         return all(entry.is_static for entry in self.fields.values())
 
-    def iter_leaves(self, prefix: str = "root") -> Iterator[Tuple[str, Entry]]:
+    def tree_iter(self, root: str = "root") -> Iterator[Tuple[str, Entry]]:
         """Yield (path, entry) for all leaf entries in the schema."""
         for key, entry in self.fields.items():
-            path = f"{prefix}.{key}" if prefix else key
+            path = f"{root}.{key}" if root else key
             if entry.children is not None:
-                yield from entry.children.iter_leaves(prefix=path)
+                yield from entry.children.tree_iter(root=path)
             else:
                 yield path, entry
+
+    def leaves_iter(self, prefix: str = "root") -> Iterator[Tuple[str, Entry]]:
+        """Yield (path, entry) for all leaf entries in the schema."""
+        yield from self.tree_iter(root=prefix)
 
     def map_leaves(self, func: Callable[[str, Entry], Any], prefix: str = "root") -> Dict[str, Any]:
         """Apply func to all leaf entries, returning a dictionary mapping path -> result."""
         return {
             path: func(path, entry)
-            for path, entry in self.iter_leaves(prefix=prefix)
+            for path, entry in self.leaves_iter(prefix=prefix)
         }
 
     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover

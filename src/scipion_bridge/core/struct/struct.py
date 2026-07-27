@@ -13,10 +13,6 @@ class Struct(SchemaConvertible):
 
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
 
-    def configure_array_storage(self) -> zarr.Group:
-        store = MemoryStore()
-        return zarr.group(store=store)
-
     @classmethod
     def to_schema_entry(cls) -> _StructEntry:
         return _StructEntry(struct_cls=cls, schema=cls.schema())
@@ -89,8 +85,3 @@ class Struct(SchemaConvertible):
                 value = value.item()
 
             return value
-
-    def __getitem__(self, key):
-        assert key in self.schema().fields
-
-        return self._zarr_group[key]
