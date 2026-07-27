@@ -12,10 +12,10 @@ from zarr.storage import MemoryStore
 from zarr.storage import LocalStore as DiskStore
 
 from .schema import create_schema, Schema
-from .entries import Entry, _ArrayEntry, _StructEntry, _SchemaSetEntry, SchemaConvertible
+from .entries import Entry, _ArrayEntry, _StructEntry, _SchemaSetEntry, SchemaConvertible, _StorageView
 from .set import Set
 
-from typing import Any
+from typing import Any, Optional
 
 
 class Struct(SchemaConvertible):
@@ -26,6 +26,11 @@ class Struct(SchemaConvertible):
     """
 
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
+
+    def configure_array_storage(self) -> zarr.Group:
+        """Initialize a blank Zarr storage group for standalone Struct instances."""
+        store = MemoryStore()
+        return zarr.group(store=store)
 
     @classmethod
     def to_schema_entry(cls) -> _StructEntry:
@@ -47,10 +52,7 @@ class Struct(SchemaConvertible):
     def __init__(self, **kwargs: Any) -> None:
         """Initialize a Struct instance, setting initial field values from keyword arguments."""
         super().__init__()
-
-        self._parent_set = None
-        self._parent_indices = tuple()
-        self._parent_prefix = ""
+        self._view: Optional[_StorageView] = None
 
         for key, value in kwargs.items():
             setattr(self, key, value)
@@ -68,7 +70,7 @@ class Struct(SchemaConvertible):
             input_has_shape = hasattr(value, "shape") or hasattr(value, "__len__")
 
             entry = schema.fields[name]
-            if isinstance(entry, _ArrayEntry):
+            if isinstance(entry, _ArrayEntry) and entry.is_static:
                 orig_val = np.array(value).astype(entry.dtype)
                 value = np.array(value).astype(entry.dtype)
                 orig_shape = value.shape
@@ -88,9 +90,9 @@ class Struct(SchemaConvertible):
 
                 buffer[:] = value
 
-                if self._parent_set is not None and self._parent_indices:
-                    storage_key = f"{self._parent_prefix}{name}"
-                    self._parent_set._zarr_group[storage_key][self._parent_indices] = orig_val
+                if self._view is not None:
+                    storage_key = f"{self._view.prefix}{name}"
+                    self._view.owner._zarr_group[storage_key][self._view.indices] = orig_val
             else:
                 raise NotImplementedError(f"Setting entry {entry} not supported")
 
@@ -103,10 +105,8 @@ class Struct(SchemaConvertible):
         else:
             raise NotImplementedError(f"Cannot instantiate nested field for entry type {entry}")
 
-        if self._parent_set is not None and self._parent_indices:
-            child._parent_set = self._parent_set
-            child._parent_indices = self._parent_indices
-            child._parent_prefix = f"{self._parent_prefix}{name}."
+        if self._view is not None:
+            child._view = self._view.child_view(name)
 
         prefix = f"{name}."
         for leaf_path, _ in entry.schema.tree_iter():
@@ -135,9 +135,9 @@ class Struct(SchemaConvertible):
             except AttributeError:
                 return self._instantiate_nested_field(name, entry)
 
-        if self._parent_set is not None and self._parent_indices:
-            storage_key = f"{self._parent_prefix}{name}"
-            buffer = self._parent_set._zarr_group[storage_key][self._parent_indices]
+        if self._view is not None:
+            storage_key = f"{self._view.prefix}{name}"
+            buffer = self._view.owner._zarr_group[storage_key][self._view.indices]
         else:
             try:
                 buffer = self._zarr_group[name]

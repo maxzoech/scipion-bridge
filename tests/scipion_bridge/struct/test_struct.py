@@ -21,7 +21,7 @@ class CTF(B.Struct):
 
 
 class Particle(B.Struct):
-    pixels: B.Array[float]
+    pixels: B.Array[float, 224, 224]
     ctf: CTF
     foo_2: Foo
 

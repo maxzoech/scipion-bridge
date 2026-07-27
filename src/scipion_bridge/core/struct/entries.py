@@ -13,6 +13,7 @@ from __future__ import annotations
 import abc
 import numpy as np
 from dataclasses import dataclass
+from functools import reduce
 from enum import Enum
 from typing import Optional, Tuple, Any, TYPE_CHECKING, Type
 
@@ -27,6 +28,30 @@ import zarr
 # ---------------------------------------------------------------------------
 # Base types
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _StorageView:
+    """Encapsulates proxy view metadata for indexed Struct/Set instances."""
+
+    owner: Any
+    indices: Tuple[int, ...]
+    prefix: str = ""
+
+    def child_view(self, name: str) -> _StorageView:
+        """Create a child view with an appended path prefix."""
+        return _StorageView(
+            owner=self.owner,
+            indices=self.indices,
+            prefix=f"{self.prefix}{name}.",
+        )
+
+    def sub_index_view(self, index: int) -> _StorageView:
+        """Create a nested index view with an appended index dimension."""
+        return _StorageView(
+            owner=self.owner,
+            indices=(*self.indices, index),
+            prefix=self.prefix,
+        )
 
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""

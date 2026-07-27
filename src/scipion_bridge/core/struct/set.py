@@ -27,9 +27,11 @@ from .entries import (
     _SchemaSetEntry,
     _StructEntry,
     SchemaConvertible,
+    _StorageView,
 )
 from .schema import Schema
 import zarr
+from zarr.storage import MemoryStore
 
 import numpy as np
 
@@ -97,9 +99,7 @@ class Set(Generic[T], SchemaConvertible):
 
     def __init__(self, capacity: int):
         self._capacity = capacity
-        self._parent_set = None
-        self._parent_indices = tuple()
-        self._parent_prefix = ""
+        self._view: Optional[_StorageView] = None
 
         super().__init__()
 
@@ -197,33 +197,44 @@ class Set(Generic[T], SchemaConvertible):
     def _write_array(self, path: str, index: int, arr: np.ndarray) -> None:
         """Write an array value to Zarr slice at path and index."""
 
-        self._zarr_group[path][index] = np.asarray(arr)
-        if self._parent_set is not None and self._parent_indices:
-            full_key = f"{self._parent_prefix}{path}"
-            full_indices = (*self._parent_indices, index)
-            self._parent_set._zarr_group[full_key][full_indices] = np.asarray(arr)
-
+        if self._view is not None:
+            full_key = f"{self._view.prefix}{path}"
+            full_indices = (*self._view.indices, index)
+            self._view.owner._zarr_group[full_key][full_indices] = np.asarray(arr)
+        else:
+            self._zarr_group[path][index] = np.asarray(arr)
 
     def _write_nested_set(self, path: str, index: int, nested_set: Set) -> None:
         """Write all leaf array fields of a nested Set into storage at the given index, with padding if needed."""
+        target_set = self._view.owner if self._view is not None else self
+        target_prefix = f"{self._view.prefix}{path}." if self._view is not None else f"{path}."
+        target_indices = (*self._view.indices, index) if self._view is not None else (index,)
+
         for leaf_path, _ in nested_set.schema().tree_iter():
-            full_path = f"{path}.{leaf_path}"
+            full_path = f"{target_prefix}{leaf_path}"
+            arr = nested_set._get_leaf_array(leaf_path)
+            z_arr = target_set._zarr_group[full_path]
+            if arr.ndim > 0 and z_arr.ndim > 1 and arr.shape[0] < z_arr.shape[1]:
+                z_arr[target_indices + (slice(0, arr.shape[0]),)] = arr
+            else:
+                z_arr[target_indices] = arr
 
-            arr = nested_set._zarr_group[leaf_path][:]
-
-            z_arr = self._zarr_group[full_path]
-            z_arr[index, :arr.shape[0]] = arr
+    def _get_leaf_array(self, path: str) -> np.ndarray:
+        """Get the numpy array for a leaf path, delegating to owner set if this is a proxy view."""
+        if self._view is not None:
+            full_key = f"{self._view.prefix}{path}"
+            return np.array(self._view.owner._zarr_group[full_key][self._view.indices])
+        return np.array(self._zarr_group[path])
 
     def _get_el(self, index: int) -> T:
         item_type = self.item_type()
         new_el: T = item_type()
 
-        new_el._parent_set = self._parent_set or self
-        new_el._parent_indices = (*self._parent_indices, index)
-        new_el._parent_prefix = self._parent_prefix
-
-        for path, _ in self.schema().tree_iter():
-            new_el._zarr_group[path] = self._zarr_group[path][index]
+        if self._view is not None:
+            new_el._view = self._view.sub_index_view(index)
+        else:
+            new_el._view = _StorageView(owner=self, indices=(index,), prefix="")
+        
         return new_el
 
     def _get_slice(self, index: slice) -> Self:
