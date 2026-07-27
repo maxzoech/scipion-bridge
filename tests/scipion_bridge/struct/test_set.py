@@ -411,5 +411,98 @@ def test_deeply_nested_sets():
         _ = root_set[10]
 
 
+def test_nested_struct_attribute_mutation():
+    particles = B.Set[StaticParticle](capacity=3)
+    p0 = StaticParticle(
+        ctf=CTF(voltage_kv=300.0, amplitude_contrast=0.07),
+        camera=Camera(gain=1.5, pixel_size_A=0.85),
+    )
+    particles[0] = p0
+
+    # Retrieve element and verify initial attribute value
+    res0 = particles[0]
+    assert res0.ctf.voltage_kv == 300.0
+
+    # Mutate attribute on nested child struct
+    res0.ctf.voltage_kv = 400.0
+    assert res0.ctf.voltage_kv == 400.0
+
+    # Re-assign mutated struct back into Set and verify updated storage
+    particles[0] = res0
+    retrieved = particles[0]
+    assert retrieved.ctf.voltage_kv == 400.0
+
+
+def test_nested_set_attribute_mutation():
+    series_set = B.Set[TiltSeriesStatic](capacity=2)
+
+    p_set0 = B.Set[SimpleParticle](capacity=3)
+    p_set0[0] = SimpleParticle(voltage_kv=300.0)
+    p_set0[1] = SimpleParticle(voltage_kv=200.0)
+    p_set0[2] = SimpleParticle(voltage_kv=100.0)
+
+    ts0 = TiltSeriesStatic(tilts=p_set0)
+    series_set[0] = ts0
+
+    # Retrieve ts0 from series_set and verify initial element value in nested Set
+    retrieved_ts0 = series_set[0]
+    assert retrieved_ts0.tilts[0].voltage_kv == 300.0
+
+    # Mutate element inside nested Set
+    retrieved_ts0.tilts[0] = SimpleParticle(voltage_kv=450.0)
+    assert retrieved_ts0.tilts[0].voltage_kv == 450.0
+
+    # Re-assign mutated struct back into series_set and verify updated storage
+    series_set[0] = retrieved_ts0
+    updated_ts0 = series_set[0]
+    assert updated_ts0.tilts[0].voltage_kv == 450.0
+
+
+def test_unsubscripted_set_raises_type_error():
+    with pytest.raises(TypeError, match="subscript Set"):
+        _ = B.Set.item_type()
+
+    with pytest.raises(TypeError, match="subscript Set"):
+        _ = B.Set.capacity()
+
+
+def test_set_stride_slicing_raises_not_implemented():
+    ctfs = B.Set[CTF](capacity=5)
+    with pytest.raises(NotImplementedError, match="stride"):
+        _ = ctfs[0:5:2]
+
+
+def test_set_element_assignment_type_errors():
+    ctfs = B.Set[CTF](capacity=3)
+
+    # 1. Assigning a Set object to an element
+    with pytest.raises(TypeError, match="Cannot assign Set of"):
+        ctfs[0] = B.Set[CTF](capacity=2)
+
+    # 2. Assigning an incompatible struct type to an element
+    with pytest.raises(TypeError, match="Cannot assign 'Camera'"):
+        ctfs[0] = Camera(gain=1.5, pixel_size_A=0.85)
+
+
+def test_set_slice_assignment_type_errors():
+    ctfs = B.Set[CTF](capacity=3)
+
+    # 1. Assigning a non-Set object to slice
+    with pytest.raises(TypeError, match="Cannot assign"):
+        ctfs[0:2] = "invalid_value"
+
+    # 2. Assigning incompatible Set type to slice
+    with pytest.raises(TypeError, match="Cannot assign"):
+        ctfs[0:2] = B.Set[Camera](capacity=2)
+
+
+def test_nested_set_missing_capacity_raises_value_error():
+    class InvalidNestedStruct(B.Struct):
+        nodes: B.Set[SimpleParticle]  # Missing capacity parameter
+
+    with pytest.raises(ValueError, match="requires an explicit capacity"):
+        _ = B.Set[InvalidNestedStruct](capacity=5)
+
+
 if __name__ == "__main__":
     test_nested_struct_get_set_element()

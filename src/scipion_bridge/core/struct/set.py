@@ -270,18 +270,17 @@ class Set(Generic[T], SchemaConvertible):
 
         try:
             idx = int(key)
-
-            if idx < 0:
-                idx = self._capacity + idx
-            if idx < 0 or idx >= self._capacity:
-                raise IndexError(
-                    f"Index {key} out of range for Set of capacity {self._capacity}"
-                )
-
-            return self._get_el(idx)
-
         except (TypeError, ValueError):
             raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
+
+        if idx < 0:
+            idx = self._capacity + idx
+        if idx < 0 or idx >= self._capacity:
+            raise IndexError(
+                f"Index {key} out of range for Set of capacity {self._capacity}"
+            )
+
+        return self._get_el(idx)
 
     def __setitem__(self, key, value):
         if isinstance(key, slice):
@@ -289,15 +288,14 @@ class Set(Generic[T], SchemaConvertible):
 
         try:
             idx = int(key)
-
-            if idx < 0:
-                idx = self._capacity + idx
-            if idx < 0 or idx >= self._capacity:
-                raise IndexError(
-                    f"Index {key} out of range for Set of capacity {self._capacity}"
-                )
-
-            self._set_el(idx, value)
-
         except (TypeError, ValueError):
             raise TypeError(f"Indexing with {type(key).__name__} is not supported.")
+
+        if idx < 0:
+            idx = self._capacity + idx
+        if idx < 0 or idx >= self._capacity:
+            raise IndexError(
+                f"Index {key} out of range for Set of capacity {self._capacity}"
+            )
+
+        self._set_el(idx, value)
