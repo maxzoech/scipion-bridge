@@ -181,27 +181,10 @@ class Set(Generic[T], SchemaConvertible):
         return start, stop
 
     def _get_el(self, index: int) -> T:
-        cls = self.item_type()
-        new_el = cls()
-
+        item_type = self.item_type()
+        new_el: T = item_type()
         for path, _ in self.schema().tree_iter():
             new_el._zarr_group[path] = self._zarr_group[path][index]
-
-        def _attach_child_structs(struct_obj: Struct, prefix: str):
-            for name, field in type(struct_obj).schema().fields.items():
-                if isinstance(field, _StructEntry):
-                    child = field.struct_cls()
-                    child_prefix = f"{prefix}.{name}" if prefix else name
-
-                    for leaf_path, _ in field.schema.tree_iter():
-                        full_key = f"{child_prefix}.{leaf_path}"
-                        if full_key in new_el._zarr_group:
-                            child._zarr_group[leaf_path] = np.array(new_el._zarr_group[full_key])
-                            
-                    setattr(struct_obj, name, child)
-                    _attach_child_structs(child, child_prefix)
-
-        _attach_child_structs(new_el, "")
         return new_el
 
     def _get_slice(self, index: slice) -> Self:
@@ -226,12 +209,32 @@ class Set(Generic[T], SchemaConvertible):
                 f"Cannot assign {provided} to element of Set of '{self.item_type().__name__}'"
             )
 
-        for path, _ in self.schema().tree_iter():
-            obj = value
-            for part in path.split("."):
-                obj = getattr(obj, part)
+        def _write_array(path: str, arr: np.ndarray):
+            z_arr = self._zarr_group[path]
+            arr = np.asarray(arr)
+            if arr.ndim > 0 and z_arr.ndim > 1 and arr.shape[0] < z_arr.shape[1]:
+                z_arr[index, : arr.shape[0]] = arr
+            else:
+                z_arr[index] = arr
 
-            self._zarr_group[path][index] = np.array(obj)
+        def _write_node(schema: Schema, obj: Any, *, prefix: str = ""):
+            for name, entry in schema.fields.items():
+                path = f"{prefix}.{name}" if prefix else name
+                val = getattr(obj, name)
+
+                if isinstance(entry, (_ArraySetEntry, _ArrayEntry)):
+                    _write_array(path, np.array(val))
+                elif isinstance(entry, _StructEntry):
+                    _write_node(entry.schema, val, prefix=path)
+                elif isinstance(entry, _SchemaSetEntry):
+                    for leaf_path, _ in entry.schema.tree_iter():
+                        full_path = f"{path}.{leaf_path}"
+                        arr = val._zarr_group[leaf_path][:]
+                        _write_array(full_path, arr)
+                else:
+                    raise NotImplementedError(f"Cannot write element for schema type {type(entry)}")
+
+        _write_node(self.schema(), value)
 
     def _set_slice(self, index: slice, value: Set[T]) -> None:
         start, stop = self._compute_slice_bounds(index)

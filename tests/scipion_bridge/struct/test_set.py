@@ -302,7 +302,7 @@ class SimpleParticle(B.Struct):
 
 
 class TiltSeriesStatic(B.Struct):
-    tilts: B.Set[SimpleParticle]
+    tilts: B.Set[SimpleParticle, 10]
 
 
 def test_nested_struct_slicing():
@@ -348,27 +348,25 @@ def test_nested_struct_slicing():
     assert target[1].ctf.voltage_kv == 600.0
 
 
-# def test_nested_set_field_get_set_element():
-#     series_set = B.Set[TiltSeriesStatic](capacity=2)
+def test_nested_set_field_get_set_element():
+    series_set = B.Set[TiltSeriesStatic](capacity=2)
 
-#     p_set0 = B.Set[SimpleParticle](capacity=3)
-#     p_set0[0] = SimpleParticle(voltage_kv=300.0)
-#     p_set0[1] = SimpleParticle(voltage_kv=200.0)
-#     p_set0[2] = SimpleParticle(voltage_kv=100.0)
+    p_set0 = B.Set[SimpleParticle](capacity=3)
+    p_set0[0] = SimpleParticle(voltage_kv=300.0)
+    p_set0[1] = SimpleParticle(voltage_kv=200.0)
+    p_set0[2] = SimpleParticle(voltage_kv=100.0)
 
-#     series_set.print_schema()
+    ts0 = TiltSeriesStatic(tilts=p_set0)
+    series_set[0] = ts0
 
-#     ts0 = TiltSeriesStatic(tilts=p_set0)
-#     series_set[0] = ts0
-
-#     # Retrieve single element ts0 from series_set
-#     retrieved_ts0 = series_set[0]
-#     assert isinstance(retrieved_ts0, TiltSeriesStatic)
-#     assert isinstance(retrieved_ts0.tilts, B.Set)
-#     assert retrieved_ts0.tilts.capacity == 3
-#     assert retrieved_ts0.tilts[0].voltage_kv == 300.0
-#     assert retrieved_ts0.tilts[1].voltage_kv == 200.0
-#     assert retrieved_ts0.tilts[2].voltage_kv == 100.0
+    # Retrieve single element ts0 from series_set
+    retrieved_ts0 = series_set[0]
+    assert isinstance(retrieved_ts0, TiltSeriesStatic)
+    assert isinstance(retrieved_ts0.tilts, B.Set)
+    assert len(retrieved_ts0.tilts) == 10
+    assert retrieved_ts0.tilts[0].voltage_kv == 300.0
+    assert retrieved_ts0.tilts[1].voltage_kv == 200.0
+    assert retrieved_ts0.tilts[2].voltage_kv == 100.0
 
 
 class LeafStruct(B.Struct):

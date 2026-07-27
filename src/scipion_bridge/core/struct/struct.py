@@ -74,8 +74,36 @@ class Struct(SchemaConvertible):
 
         if name not in attrs:
             return super().__getattribute__(name)
-        elif isinstance(schema.fields[name], (_StructEntry, _SchemaSetEntry)):
-            return super().__getattribute__(name)
+        elif isinstance(schema.fields[name], _StructEntry):
+            try:
+                return super().__getattribute__(name)
+            except AttributeError:
+                entry = schema.fields[name]
+                child = entry.struct_cls()
+                prefix = f"{name}."
+                for leaf_path, _ in entry.schema.tree_iter():
+                    full_key = f"{prefix}{leaf_path}"
+                    if full_key in self._zarr_group:
+                        child._zarr_group[leaf_path] = np.array(self._zarr_group[full_key])
+                super().__setattr__(name, child)
+                return child
+        elif isinstance(schema.fields[name], _SchemaSetEntry):
+            try:
+                return super().__getattribute__(name)
+            except AttributeError:
+                from .set import Set
+                entry = schema.fields[name]
+                item_type = getattr(entry, "item_type", None) or entry.schema
+                nested_set = Set[item_type](capacity=entry.capacity)
+
+                prefix = f"{name}."
+                for leaf_path, _ in entry.schema.tree_iter():
+                    full_key = f"{prefix}{leaf_path}"
+                    if full_key in self._zarr_group:
+                        nested_set._zarr_group[leaf_path] = np.array(self._zarr_group[full_key])
+
+                super().__setattr__(name, nested_set)
+                return nested_set
         else:
             try:
                 buffer = self._zarr_group[name]
