@@ -1,5 +1,16 @@
 from __future__ import annotations
-from typing import Type, Generic, TypeVar, Dict, Union, Any, ForwardRef, Self
+from typing import (
+    Type,
+    Generic,
+    TypeVar,
+    Dict,
+    Union,
+    Any,
+    ForwardRef,
+    Self,
+    Tuple,
+    Optional,
+)
 
 from ._type_checks import is_struct_type
 from .entries import (
@@ -72,38 +83,41 @@ class Set(Generic[T], SchemaConvertible):
     def configure_array_storage(self, capacity: int) -> zarr.Group:
 
         store = MemoryStore()
-        root = zarr.group(store=store)
+        group = zarr.group(store=store)
 
-        for name, entry in self.schema().iter_leaves():
-            # Leaf entries: _ArrayEntry, _ArraySetEntry, _RaggedArraySetEntry
-            if isinstance(entry, _ArrayEntry):
-                assert entry.max_shape == entry.min_shape
+        def _create_storage(schema: Schema, *, root = "root", shape_prefix: tuple = tuple()):
 
-                root.create_array(
-                    name,
-                    shape=entry.max_shape,
-                    dtype=entry.dtype,
-                )
-            elif isinstance(entry, _ArraySetEntry) and entry.is_static == True:
-                root.create_array(
-                    name,
-                    shape=[capacity, *entry.max_shape],
-                    dtype=entry.dtype,
-                )
-            else:
-                raise NotImplementedError(
-                    f"Cannot create zarr group for entry {entry} at {name}"
-                )
+            for name, field in schema.fields.items():
+                if isinstance(field, _SchemaSetEntry):
+                    if not field.capacity:
+                        raise ValueError(
+                            f"Field '{name}' in schema '{schema.__class__.__name__}' requires an explicit capacity (e.g., Set[{field.schema.__class__.__name__}, 5])."
+                        )
 
-        return root
+                    _create_storage(
+                        field.schema,
+                        root=f"{root}.{name}",
+                        shape_prefix=(*shape_prefix, field.capacity)
+                    )
+                elif isinstance(field, _ArraySetEntry):
+                    group.create_array(
+                        name=f"{root}.{name}",
+                        shape=(*shape_prefix, *field.shape),
+                        dtype=field.dtype,
+                    )
+                else:
+                    raise NotImplementedError
+
+        _create_storage(schema=self.schema(), shape_prefix=(capacity,))
+
+        return group
 
     def __init__(self, capacity: int):
-        super().__init__(capacity)
-        self.capacity = capacity
+        super().__init__(capacity=capacity)
 
     @classmethod
     def to_schema_entry(cls) -> _SchemaSetEntry:
-        return _SchemaSetEntry(schema=cls.schema())
+        return _SchemaSetEntry(schema=cls.schema(), capacity=cls.capacity())
 
     @classmethod
     def _validate_as_field(cls, key_path: str) -> dict:
@@ -120,11 +134,11 @@ class Set(Generic[T], SchemaConvertible):
 
         # Use Generic[T] behavior for TypeVars for type checkers
         if any(isinstance(t, TypeVar) for t in type_args):
-            return super().__class_getitem__(params)
+            return super().__class_getitem__((params[0],))
 
         # TODO: Correctly handle forward-declared references
         if any(isinstance(t, (str, ForwardRef)) for t in type_args):
-            return super().__class_getitem__(params)
+            return super().__class_getitem__((params[0],))
 
         cache_key = (cls, params)
         if cache_key in Set._generic_cache:
@@ -157,32 +171,84 @@ class Set(Generic[T], SchemaConvertible):
         return cls.__runtime_args__[0]
 
     @classmethod
+    def capacity(cls) -> Optional[int]:
+        if not cls.__runtime_args__:
+            raise TypeError(
+                f"You must subscript {cls.__name__} (e.g., Set[CTF]) before calling schema()"
+            )
+
+        return cls.__runtime_args__[1] if len(cls.__runtime_args__) > 1 else None
+
+    @classmethod
     def schema(cls):
         if not hasattr(cls, "_cached_schema"):
             item_type = cls.item_type()
             cls._cached_schema = generate_set_schema(item_type)
         return cls._cached_schema
 
-    def _read_entry(self, schema: Schema, prefix: str, index: int, target_cls: Type) -> Any:
+    def _create_or_retrieve_array(
+        self,
+        storage_key,
+        *,
+        shape: Tuple,
+        dtype,
+        **kwargs,
+    ):
+        if storage_key in self._zarr_group:
+            return self._zarr_group[storage_key]
+        else:
+            return self._zarr_group.create_array(
+                storage_key,
+                shape=shape,
+                dtype=dtype,
+                **kwargs,
+            )
+
+    def _read_entry(
+        self,
+        schema: Schema,
+        prefix: str,
+        index: int,
+        target_cls: Type,
+        root="root",
+        shape_prefix=tuple(),
+    ) -> Any:
+
         data_dict = {}
         for k, entry in schema.fields.items():
             storage_key = f"{prefix}.{k}"
-            if isinstance(entry, _ArraySetEntry):
-                data_dict[k] = self._zarr_group[storage_key][index]
-            elif isinstance(entry, _StructEntry):
-                data_dict[k] = self._read_entry(
-                    schema=entry.schema,
-                    prefix=storage_key,
-                    index=index,
-                    target_cls=entry.struct_cls,
-                )
-            elif isinstance(entry, _SchemaSetEntry):
-                print(entry)
-                print(self._zarr_group.tree())
 
-                assert False
-            else:
-                raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+            if isinstance(entry, _ArraySetEntry):
+                assert entry.is_static
+
+                storage = self._create_or_retrieve_array(
+                    storage_key,
+                    shape=tuple([self.capacity, *entry.max_shape]),
+                    dtype=entry.dtype,
+                )
+
+                data_dict[k] = storage[index]
+
+        # data_dict = {}
+        # for k, entry in schema.fields.items():
+        #     storage_key = f"{prefix}.{k}"
+        #     if isinstance(entry, _ArraySetEntry):
+        #         data_dict[k] = self._zarr_group[storage_key][index]
+        #     elif isinstance(entry, _StructEntry):
+        #         data_dict[k] = self._read_entry(
+        #             schema=entry.schema,
+        #             prefix=storage_key,
+        #             index=index,
+        #             target_cls=entry.struct_cls,
+        #         )
+        #     elif isinstance(entry, _SchemaSetEntry):
+        #         print(entry)
+        #         print(self._zarr_group.tree())
+
+        #         assert False
+        #     else:
+        #         raise NotImplementedError(f"Indexing into {entry} is not supported yet")
+
         return target_cls(**data_dict)
 
     def _get_element(self, index: int) -> T:
@@ -197,26 +263,51 @@ class Set(Generic[T], SchemaConvertible):
         for k, entry in schema.fields.items():
             storage_key = f"{prefix}.{k}"
             if isinstance(entry, _ArraySetEntry):
+                assert entry.is_static
+                print("get key: ", storage_key)
+
                 field_val = getattr(value, k)
-                self._zarr_group[storage_key][index] = np.array(field_val)
-            elif isinstance(entry, _StructEntry):
+                storage = self._create_or_retrieve_array(
+                    storage_key,
+                    shape=tuple([self.capacity, *entry.max_shape]),
+                    dtype=entry.dtype,
+                )
+
+                storage[index] = np.array(field_val)
+            elif isinstance(entry, _SchemaSetEntry):
                 field_val = getattr(value, k)
+                assert isinstance(field_val, Set)
+                print(f"Write in schema: {field_val.capacity}")
+
+                print("target: ", k, field_val, value)
+                entry.schema.print_tree()
+
+                assert False
                 self._write_entry(
-                    schema=entry.schema,
-                    prefix=storage_key,
+                    entry.schema,
+                    prefix=f"{prefix}.{k}",
                     index=index,
                     value=field_val,
                 )
-            elif isinstance(entry, _SchemaSetEntry):
-                field_val = getattr(value, k)
-                if not isinstance(field_val, Set):
-                    raise TypeError(
-                        f"Expected field '{k}' to be a Set, got '{type(field_val).__name__}'"
-                    )
-                for leaf_path, _ in entry.schema.iter_leaves(prefix=""):
-                    target_key = f"{storage_key}.{leaf_path}"
-                    source_key = f"root.{leaf_path}"
-                    self._zarr_group[target_key][index] = field_val._zarr_group[source_key][:]
+
+            #     elif isinstance(entry, _StructEntry):
+            #         field_val = getattr(value, k)
+            #         self._write_entry(
+            #             schema=entry.schema,
+            #             prefix=storage_key,
+            #             index=index,
+            #             value=field_val,
+            #         )
+            #     elif isinstance(entry, _SchemaSetEntry):
+            #         field_val = getattr(value, k)
+            #         if not isinstance(field_val, Set):
+            #             raise TypeError(
+            #                 f"Expected field '{k}' to be a Set, got '{type(field_val).__name__}'"
+            #             )
+            #         for leaf_path, _ in entry.schema.iter_leaves(prefix=""):
+            #             target_key = f"{storage_key}.{leaf_path}"
+            #             source_key = f"root.{leaf_path}"
+            #             self._zarr_group[target_key][index] = field_val._zarr_group[source_key][:]
             else:
                 raise NotImplementedError(f"Indexing into {entry} is not supported yet")
 

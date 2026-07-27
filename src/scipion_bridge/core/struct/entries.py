@@ -239,13 +239,14 @@ class _SchemaSetEntry(Entry):
     """Wraps a schema produced by a ``Set[X]`` field annotation."""
 
     schema: Schema
+    capacity: Optional[int]
 
     @property
     def is_static(self):
         return self.schema.is_static
 
     def format_entry(self, name: str) -> str:
-        return f"{name} (schema set)"
+        return f"{name} (schema set, size: {self.capacity})"
 
     @property
     def children(self) -> Schema:
