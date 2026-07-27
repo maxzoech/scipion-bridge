@@ -20,3 +20,11 @@ def is_struct_type(dtype: Any) -> bool:
     check against Struct, to avoid circular imports.
     """
     return isinstance(dtype, type) and getattr(dtype, '_bridge_struct_marker', False) is True
+
+def is_array_marker(dtype: Any) -> bool:
+    """Check if a type is a Bridge array type.
+
+    Uses a structural marker attribute rather than an isinstance/issubclass
+    check against Struct, to avoid circular imports.
+    """
+    return isinstance(dtype, type) and getattr(dtype, '_bridge_array_marker', False) is True

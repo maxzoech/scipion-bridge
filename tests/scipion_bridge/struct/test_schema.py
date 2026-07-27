@@ -146,7 +146,7 @@ def test_schema_entries():
 
 def test_array_generic_and_edge_cases():
     class ArrayStruct(B.Struct):
-        arr_bare: B.Array
+        arr_bare: B.Array[float]
         arr_typed: B.Array[int]
 
     schema = create_schema(ArrayStruct)
@@ -163,8 +163,6 @@ def test_array_generic_and_edge_cases():
 
 def test_supports_array_storage_direct():
     assert _supports_array_storage(NestedChild) is not None
-    assert _supports_array_storage(B.Array) is True
-    assert _supports_array_storage(B.Array[int]) is True
     assert _supports_array_storage(int) is True
     assert _supports_array_storage(object) is False
     assert _supports_array_storage("invalid_type_obj") is False

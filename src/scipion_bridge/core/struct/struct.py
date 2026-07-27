@@ -27,11 +27,6 @@ class Struct(SchemaConvertible):
 
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
 
-    # def configure_array_storage(self) -> zarr.Group:
-    #     """Initialize a blank Zarr storage group for standalone Struct instances."""
-    #     store = MemoryStore()
-    #     return zarr.group(store=store)
-
     @classmethod
     def to_schema_entry(cls) -> _StructEntry:
         """Convert this Struct class into a ``_StructEntry`` for parent schemas."""

@@ -8,7 +8,7 @@ factory that builds a Schema from a Struct type.
 import numpy as np
 import typing
 from dataclasses import dataclass
-from typing import Type, Any, Dict, Optional, Set, TypeVar, Generic, Tuple, Iterator, Callable
+from typing import Type, Any, Dict, Optional, Set, TypeVar, Generic, Tuple, Iterator, Callable, ForwardRef
 
 from ..utils.type_annotation import has_untyped_class_definitions
 from ..utils.format import format_list
@@ -19,6 +19,7 @@ from .entries import (
     _ArrayLocation,
 )
 
+from ._type_checks import is_array_marker
 
 # ---------------------------------------------------------------------------
 # Array generic marker
@@ -28,7 +29,58 @@ T = TypeVar("T")
 
 class Array(Generic[T]):
     """Type annotation marker for variable-shape array fields."""
-    pass
+
+    _bridge_array_marker = True
+
+    __runtime_args__ = tuple()
+    _generic_cache: Dict = {}
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        type_args = params if isinstance(params, tuple) else (params,)
+
+        # Use Generic[T] behavior for TypeVars for type checkers
+        if any(isinstance(t, TypeVar) for t in type_args):
+            return super().__class_getitem__((params[0],))
+
+        # TODO: Correctly handle forward-declared references
+        if any(isinstance(t, (str, ForwardRef)) for t in type_args):
+            return super().__class_getitem__((params[0],))
+
+        cache_key = (cls, params)
+        if cache_key in Array._generic_cache:
+            return Array._generic_cache[cache_key]
+
+        param_names = ",".join(getattr(t, "__name__", str(t)) for t in type_args)
+        new_cls_name = f"{cls.__name__}[{param_names}]"
+
+        new_cls = type(
+            new_cls_name,
+            (cls,),
+            {
+                "__module__": cls.__module__,
+                "__runtime_args__": type_args,
+                "__origin__": cls,
+                "__args__": type_args,
+            },
+        )
+
+        Array._generic_cache[cache_key] = new_cls
+        return new_cls
+
+    @classmethod
+    def dtype(cls) -> Type:
+        if len(cls.__runtime_args__) == 0:
+            raise TypeError(
+            f"Missing data type parameter for {cls.__name__}. "
+            f"Please specify it explicitly (e.g., {cls.__name__}[int] or {cls.__name__}[float])."
+        )
+
+        return cls.__runtime_args__[0]
+
+    @classmethod
+    def shape(cls) -> Tuple[int, ...]:
+        return cls.__runtime_args__[1:]
 
 
 # ---------------------------------------------------------------------------
@@ -101,13 +153,6 @@ def _supports_array_storage(dtype: Type):
     if isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
         return _validate_struct_datatypes(dtype, root=dtype.__qualname__)
 
-    origin = typing.get_origin(dtype)
-    if dtype == Array or origin is Array:
-        args = typing.get_args(dtype)
-        if args:
-            return _supports_array_storage(args[0])
-        return True
-
     try:
         return not np.dtype(dtype).hasobject
     except TypeError:
@@ -122,10 +167,9 @@ def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
     for k, v in attributes.items():
         key_path = k if root is None else f"{root}.{k}"
 
-        origin = typing.get_origin(v)
-        if v == Array or origin is Array:
-            args = typing.get_args(v)
-            elem_type = args[0] if args else float
+        if is_array_marker(v):
+            v: Array = v
+            elem_type = v.dtype()
             is_serializable[key_path] = _supports_array_storage(elem_type)
         elif isinstance(v, type) and issubclass(v, SchemaConvertible):
             nested = v._validate_as_field(key_path)
@@ -165,25 +209,34 @@ def create_schema(cls: Type) -> Schema:
             f"'{cls.__qualname__}' because it does not support array serialization."
         )
 
-    def _convert(dtype: Type) -> Entry:
+    def _convert(field: Type) -> Entry:
         # SchemaConvertible types (Struct, Set) know how to produce their own entry
-        if isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
-            return dtype.to_schema_entry()
+        if isinstance(field, type) and issubclass(field, SchemaConvertible):
+            return field.to_schema_entry()
 
-        origin = typing.get_origin(dtype)
-        if dtype == Array or origin is Array:
-            args = typing.get_args(dtype)
-            elem_type = args[0] if args else float
+        # origin = typing.get_origin(dtype)
+        if is_array_marker(field):
+            v: Array = field
+            elem_type = v.dtype()
+
+            if (
+                all(isinstance(x, int) for x in v.shape()) and 
+                len(v.shape()) > 0
+            ):
+                static_shape = v.shape()
+            else:
+                static_shape = None
+
             return _ArrayEntry(
                 np.dtype(elem_type),
                 _ArrayLocation.AUTOMATIC,
-                min_shape=None,
-                max_shape=None,
+                min_shape=static_shape,
+                max_shape=static_shape,
                 preferred_shape=None,
             )
-
+        
         return _ArrayEntry(
-            np.dtype(dtype),
+            np.dtype(field),
             _ArrayLocation.AUTOMATIC,
             min_shape=(1,),
             max_shape=(1,),

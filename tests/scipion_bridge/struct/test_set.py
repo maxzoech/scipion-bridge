@@ -1,4 +1,6 @@
 import pytest
+import numpy as np
+
 import scipion_bridge as B
 from scipion_bridge.core.struct.entries import (
     _ArraySetEntry,
@@ -21,7 +23,7 @@ class CTF(B.Struct):
 
 
 class Particle(B.Struct):
-    pixels: B.Array
+    pixels: B.Array[float]
     ctf: CTF
 
 
@@ -504,5 +506,23 @@ def test_nested_set_missing_capacity_raises_value_error():
         _ = B.Set[InvalidNestedStruct](capacity=5)
 
 
+class Particle(B.Struct):
+    pixels: B.Array[float, 256, 256]
+    ctf: CTF
+
+
+def test_struct_instance_static_arrays():
+    B.Set[Particle].print_schema()
+
+    particles = B.Set[Particle](capacity=10)
+    data = np.random.uniform(size=[256, 256])
+    p = particles[0]
+    p.pixels = data
+    particles[0] = p
+
+    assert particles[0].pixels.shape == (256, 256)
+    assert np.allclose(particles[0].pixels, data)
+
+
 if __name__ == "__main__":
-    test_nested_struct_get_set_element()
+    test_struct_instance_static_arrays()
