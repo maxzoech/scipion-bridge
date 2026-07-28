@@ -12,7 +12,6 @@ dependency-injector = ">=4.48.1,<5.0.0"
 autopep8 = ">=2.3.0,<3.0.0"
 networkx = ">=3.0.0,<4.0.0"
 tabulate = "^0.9.0"
-xmipp_metadata = "^1.1.5"
 scipion-pyworkflow = { version = "^3.11", optional = true }
 scipion-em = { version = "^3.11", optional = true }
 zarr = { version = "^2.16.1", optional = true }
@@ -24,7 +23,10 @@ optional = true
 pytest = "^8.3.5"
 pytest-mock = "*"
 pytest-cov = "*"
-numpy = "*"
+numpy = [
+    { version = "^1.24.4", python = "3.8" },
+    { version = ">=1.26.0", python = ">=3.9" }
+]
 
 [build-system]
 requires = ["poetry-core>=1.0.0,<2.0.0"]
