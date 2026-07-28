@@ -7,7 +7,7 @@ from ....core.typed.resolve import current_registry
 
 
 
-def find_pointer_class(self, target_type: type) -> Optional[str]:
+def find_pointer_class(target_type: type) -> Optional[str]:
     """Inspect the type resolution graph to find the appropriate Scipion
     container class (e.g. 'SetOfParticles') for a given target type.
     """

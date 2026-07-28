@@ -2,15 +2,18 @@ import os
 from pathlib import Path
 import pickle
 from functools import partial
+from collections import Counter, defaultdict
+import time
 
 from ...core.protocol import Protocol, Field
 from .workflow_container import configure_pyworkflow_env
 
-from typing import Optional, get_args, Dict, Any
+from typing import Optional, get_args, Dict, List, Any, get_type_hints
 
 from enum import Enum
 
 from ...core.struct import Set
+
 
 def convert_protocol_to_scipion3_protocol(
     protocol: Protocol,
@@ -20,8 +23,10 @@ def convert_protocol_to_scipion3_protocol(
 ):
     try:
         import pwem  # type: ignore
-        from pwem.protocols import ProtProcessParticles, ProtFlexBase  # type: ignore
+        from pwem.protocols import ProtProcessParticles  # type: ignore
+        from pyworkflow.protocol import ProtStreamingBase
         from pwem.objects import SetOfParticles, SetOfParticlesFlex, ParticleFlex, SetOfVolumes, Volume  # type: ignore
+        import pyworkflow.protocol.constants as cons
         from pyworkflow.constants import BETA  # type: ignore
         from pyworkflow.plugin import Domain  # type: ignore
         from pwem.constants import ALIGN_PROJ, ALIGN_NONE  # type: ignore
@@ -29,6 +34,7 @@ def convert_protocol_to_scipion3_protocol(
         import pyworkflow.object as pywfobj  # type: ignore
         from .resolvers import register_pyworkflow_resolvers
         from .utils.resolve_graph import find_pointer_class
+
         register_pyworkflow_resolvers()
     except ImportError:
         raise ImportError(
@@ -87,7 +93,7 @@ def convert_protocol_to_scipion3_protocol(
 
         return param_type, kwargs
 
-    class ScipionProtocolWrapper(ProtProcessParticles, ProtFlexBase):
+    class ScipionProtocolWrapper(ProtProcessParticles, ProtStreamingBase):
 
         _label = label
         _devStatus = BETA
@@ -95,6 +101,8 @@ def convert_protocol_to_scipion3_protocol(
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
+
+            self.itemIdReadList = defaultdict(list)
 
         def _defineParams(self, form):
 
@@ -124,16 +132,35 @@ def convert_protocol_to_scipion3_protocol(
                     **args,
                 )
 
+            form.addSection(label="Streaming")
+            form.addParam(
+                "_ScipionProtocolWrapper__scipion_bridge_param_polling_freq",  # Weird bug because we are mangaling the __module__ of the class
+                params.IntParam,
+                label="Polling frequency (s)",
+                default=10,
+                # expertLevel=cons.LEVEL_ADVANCED,
+                help="Time in seconds to wait between checking for new incoming movies or data "
+                "streams from the microscope/bridge.\n\n"
+                "Lower values check more frequently but increase CPU/disk activity. "
+                "Higher values reduce system overhead during continuous data acquisition.",
+            )
+
+            form.addParallelSection(threads=2, mpi=0)
+
         def _validateProtocolSetup(self):
             protocol.validate_protocol_configuration()
+
+        def _emitDataToPipelineStep(self, argname: str, inputData: Any):
+            pass
+            # bridgeType 
 
         def _convertInput(self):
             print("Validate Protocol")
 
-        def _insertAllSteps(self):
+        def stepsGeneratorStep(self) -> None:
             import logging
 
-            logging.basicConfig(level=logging.DEBUG)
+            # logging.basicConfig(level=logging.DEBUG)
 
             configure_pyworkflow_env(
                 backend=self,
@@ -145,7 +172,60 @@ def convert_protocol_to_scipion3_protocol(
             self._insertFunctionStep(self._validateProtocolSetup)
             self._insertFunctionStep(self._convertInput)
 
-                 
+            def _isFinished(key: str, *, inputs, inputIDs) -> bool:
+                inputSet = inputs[key]
+                readIDs = self.itemIdReadList[key]
+
+                return not inputSet.isStreamOpen() and Counter(readIDs) == Counter(
+                    inputIDs[key]
+                )
+
+            idx = 0
+
+            while True:
+                idx += 1
+                assert idx < 5, "Infinite loop"
+
+                inputs = {
+                    k: getattr(self, k).get()
+                    for k in get_type_hints(protocol.run).keys()
+                }
+
+                with self._lock:
+                    inputIDs = {
+                        k: set(v.getUniqueValues("id")) for k, v in inputs.items()
+                    }
+
+                inputsAreFinished = {
+                    k: _isFinished(k, inputs=inputs, inputIDs=inputIDs)
+                    for k in inputs.keys()
+                }
+                nonProcessedElements = defaultdict(list)
+
+                if all(inputsAreFinished.values()):
+                    # Enqueue the output step here
+                    break
+
+                for k, inputSet in inputs.items():
+                    nonProcessedIds = inputIDs[k] - set(self.itemIdReadList[k])
+                    items = []
+
+                    for item in inputSet.iterItems():
+                        obj_id = item.getObjId()
+
+                        if obj_id in nonProcessedIds:
+                            items.append(item.clone())
+                            self.itemIdReadList[k].append(obj_id)
+
+                    nonProcessedElements[k] = items
+
+                for name, inputSet in nonProcessedElements.items():
+                    print(f"Process {len(inputSet)} elements for {name}")
+
+                for inputSet in inputs.values():
+                    if inputSet.isStreamOpen():
+                        with self._lock:
+                            inputSet.loadAllProperties()  # Refresh stream status
 
     # Copy the module and class name from the source protocol so Scipion class registration finds it
     ScipionProtocolWrapper.__module__ = protocol.__module__
