@@ -5,14 +5,15 @@ from typing import Optional
 from ....core.struct import Set
 from ....core.typed.resolve import current_registry
 
-import pwem.objects as emobj  # type: ignore
-import pyworkflow.object as pywfobj  # type: ignore
 
 
 def find_pointer_class(self, target_type: type) -> Optional[str]:
     """Inspect the type resolution graph to find the appropriate Scipion
     container class (e.g. 'SetOfParticles') for a given target type.
     """
+
+    import pwem.objects as emobj  # type: ignore
+    import pyworkflow.object as pywfobj  # type: ignore
     
     graph = current_registry().graph
 
