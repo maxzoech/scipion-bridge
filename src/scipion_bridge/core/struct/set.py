@@ -13,10 +13,13 @@ from typing import (
     Union,
     Any,
     ForwardRef,
-    Self,
     Tuple,
     Optional,
 )
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 from ._type_checks import is_struct_type
 from .entries import (

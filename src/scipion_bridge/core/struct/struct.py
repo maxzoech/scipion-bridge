@@ -5,7 +5,10 @@ define their field layouts via type annotations. Fields are stored internally
 in a Zarr group and can be accessed or mutated via standard Python attribute access.
 """
 
-from functools import cache
+try:
+    from functools import cache
+except ImportError:
+    from functools import lru_cache as cache
 import numpy as np
 
 from .schema import create_schema, Schema

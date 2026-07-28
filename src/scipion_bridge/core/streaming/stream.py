@@ -1,7 +1,10 @@
-from typing import TypeVar, Generic, Optional
+from typing import TypeVar, Generic, Optional, Any
 from scipion_bridge.core.struct import Struct, Set
 
-from streamz import Stream as BackendStream
+try:
+    from streamz import Stream as BackendStream
+except ImportError:
+    BackendStream = Any
 
 T = TypeVar("T", Struct, Set)
 

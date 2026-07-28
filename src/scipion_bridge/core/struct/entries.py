@@ -99,10 +99,6 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         storage_provider: ArrayStorageProvider = Provide[Container.storage_provider],
     ) -> Any:
         """Set up the array storage backend."""
-        if isinstance(storage_provider, Provide):
-            from ..environment.storage import NumPyStorageProvider
-            storage_provider = NumPyStorageProvider()
-
         group = storage_provider.create_group(shape_prefix=shape_prefix)
         
         def _create_storage(schema: Schema, *, root: str = "", shape_prefix: tuple = tuple()):

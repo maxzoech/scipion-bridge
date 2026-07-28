@@ -1,6 +1,7 @@
-from dataclasses import dataclass
+import numpy as np
 
-@dataclass
-class SetOfParticles:
+from ..core.struct import Struct, Array
 
-    num_particles: int
+
+class Particle(Struct):
+    pixels: Array[np.float32, [256, 256]]
