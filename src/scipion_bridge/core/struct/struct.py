@@ -7,9 +7,6 @@ in a Zarr group and can be accessed or mutated via standard Python attribute acc
 
 from functools import cache
 import numpy as np
-import zarr
-from zarr.storage import MemoryStore
-from zarr.storage import LocalStore as DiskStore
 
 from .schema import create_schema, Schema
 from .entries import Entry, _ArrayEntry, _StructEntry, _SchemaSetEntry, SchemaConvertible, _StorageView
@@ -19,7 +16,7 @@ from typing import Any, Optional
 
 
 class Struct(SchemaConvertible):
-    """Base class for schema-defined data structures backed by Zarr array storage.
+    """Base class for schema-defined data structures backed by array storage.
 
     Subclasses define fields via type annotations (e.g. ``voltage_kv: float``).
     Array and scalar values are stored internally in `_zarr_group`.
@@ -27,10 +24,14 @@ class Struct(SchemaConvertible):
 
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
 
-    def configure_array_storage(self) -> zarr.Group:
-        """Initialize a blank Zarr storage group for standalone Struct instances."""
-        store = MemoryStore()
-        return zarr.group(store=store)
+    @classmethod
+    def __class_getitem__(cls, params):
+        from .schema import Array
+        return Array[params]
+
+    def configure_array_storage(self) -> Any:
+        """Initialize storage group for standalone Struct instances."""
+        return super().configure_array_storage()
 
     @classmethod
     def to_schema_entry(cls) -> _StructEntry:

@@ -279,3 +279,28 @@ def test_map_leaves():
         "tag": "Array",
     }
     assert mapped == expected
+
+
+def test_array_shape_syntax():
+    class ParticleListShape(B.Struct):
+        pixels: B.Array[np.float32, [256, 256]]
+
+    class ParticleTupleShape(B.Struct):
+        pixels: B.Array[np.float32, (256, 256)]
+
+    class ParticleStructSyntax(B.Struct):
+        pixels: B.Struct[np.float32, [256, 256]]
+
+    class ParticleFlatShape(B.Struct):
+        pixels: B.Array[np.float32, 256, 256]
+
+    s_list = ParticleListShape.schema()
+    s_tuple = ParticleTupleShape.schema()
+    s_struct = ParticleStructSyntax.schema()
+    s_flat = ParticleFlatShape.schema()
+
+    assert s_list.fields["pixels"].min_shape == (256, 256)
+    assert s_tuple.fields["pixels"].min_shape == (256, 256)
+    assert s_struct.fields["pixels"].min_shape == (256, 256)
+    assert s_flat.fields["pixels"].min_shape == (256, 256)
+

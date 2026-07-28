@@ -30,8 +30,6 @@ from .entries import (
     _StorageView,
 )
 from .schema import Schema
-import zarr
-from zarr.storage import MemoryStore
 
 import numpy as np
 
@@ -93,8 +91,8 @@ class Set(Generic[T], SchemaConvertible):
     __runtime_args__ = None
     _generic_cache: Dict = {}
 
-    def configure_array_storage(self) -> zarr.Group:
-        """Pre-allocate array storage in Zarr for the configured set capacity."""
+    def configure_array_storage(self) -> Any:
+        """Pre-allocate array storage for the configured set capacity."""
         return super().configure_array_storage(shape_prefix=(self._capacity,))
 
     def __init__(self, capacity: int):

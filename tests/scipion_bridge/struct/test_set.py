@@ -512,15 +512,22 @@ class StaticParticle2D(B.Struct):
 
 
 def test_struct_instance_static_arrays():
-    B.Set[StaticParticle2D].print_schema()
 
     particles = B.Set[StaticParticle2D](capacity=10)
-    data = np.random.uniform(size=[256, 256])
-    particles[0].pixels = data
+    data_1 = np.random.uniform(size=[256, 256])
+    data_2 = np.random.uniform(size=[256, 256])
+
+    # particles.print_storage_info()
+
+    particles[0].pixels = data_1
+    particles[1].pixels = data_2
 
     assert particles[0].pixels.shape == (256, 256)
-    assert np.allclose(particles[0].pixels, data)
+    assert np.allclose(particles[0].pixels, data_1)
+    assert np.allclose(particles[1].pixels, data_2)
 
+    subset = particles[:2]
+    assert np.allclose(subset[-1].pixels, data_2)
 
 class DeepTiltSeries(B.Struct):
     tilts: B.Set[StaticParticle, 10]

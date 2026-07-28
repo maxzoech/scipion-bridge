@@ -10,10 +10,11 @@ packages = [{ include = "scipion_bridge", from = "src" }]
 python = ">=3.8"
 dependency-injector = ">=4.48.1,<5.0.0"
 autopep8 = ">=2.3.0,<3.0.0"
-networkx = ">=3.1.0,<4.0.0"
+networkx = ">=3.0.0,<4.0.0"
 tabulate = "^0.9.0"
 xmipp_metadata = "^1.1.5"
-zarr = "^3.0.0"
+scipion-pyworkflow = { version = "^3.11", optional = true }
+zarr = { version = "^2.18.2", optional = true }
 
 [tool.poetry.group.test]
 optional = true
@@ -24,15 +25,12 @@ pytest-mock = "*"
 pytest-cov = "*"
 numpy = "*"
 
-# Optional dependencies
-scipion-pyworkflow = { version = "^3.11", optional = true }
-
 [build-system]
 requires = ["poetry-core>=1.0.0,<2.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.extras]
-pyworkflow = ["scipion-pyworkflow"]
+pyworkflow = ["scipion-pyworkflow", "zarr"]
 
 [tool.coverage.report]
 exclude_lines = [

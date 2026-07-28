@@ -17,12 +17,12 @@ from functools import reduce
 from enum import Enum
 from typing import Optional, Tuple, Any, TYPE_CHECKING, Type
 
-from zarr.storage import MemoryStore
+from dependency_injector.wiring import Provide, inject
+from ...backend.standalone.container import Container
+from ..environment.storage import ArrayStorageProvider
 
 if TYPE_CHECKING:
     from .schema import Schema
-
-import zarr
 
 
 # ---------------------------------------------------------------------------
@@ -92,11 +92,18 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         self._zarr_group = self.configure_array_storage()
      
 
-    def configure_array_storage(self, shape_prefix = tuple()) -> zarr.Group:
+    @inject
+    def configure_array_storage(
+        self,
+        shape_prefix: tuple = tuple(),
+        storage_provider: ArrayStorageProvider = Provide[Container.storage_provider],
+    ) -> Any:
         """Set up the array storage backend."""
+        if isinstance(storage_provider, Provide):
+            from ..environment.storage import NumPyStorageProvider
+            storage_provider = NumPyStorageProvider()
 
-        store = MemoryStore()
-        group = zarr.group(store=store)
+        group = storage_provider.create_group(shape_prefix=shape_prefix)
         
         def _create_storage(schema: Schema, *, root: str = "", shape_prefix: tuple = tuple()):
         

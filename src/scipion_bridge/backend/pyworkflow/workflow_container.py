@@ -7,10 +7,11 @@ import random
 
 from ...core.environment.cmd_exec import ShellExecProvider
 from ...core.environment.temp_files import TemporaryFilesProvider
+from ...core.environment.storage import ArrayStorageProvider
 from ...core.environment.domain import Domain
 
 from ..standalone.container import Container
-from typing import Optional
+from typing import Optional, Any
 
 class _PyWorkflowExecProvider(ShellExecProvider):
 
@@ -59,12 +60,35 @@ class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
         return path
 
 
+class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
+
+    def __init__(self, backend=None):
+        self.backend = backend
+
+    def create_group(self, shape_prefix: tuple = ()) -> Any:
+        try:
+            import zarr
+        except ImportError:
+            raise ImportError(
+                "Using Zarr storage with pyworkflow requires zarr. "
+                "Install it using pip install \"scipion-bridge[pyworkflow]\""
+            )
+
+        try:
+            from zarr.storage import LocalStore
+            store = LocalStore()
+            return zarr.group(store=store)
+        except (ImportError, AttributeError):
+            return zarr.group()
+
+
 def configure_pyworkflow_env(backend, *, conda_env: str, modules=None, packages=None):
     from dependency_injector import providers
 
     container = Container(
         shell_exec=providers.Factory(_PyWorkflowExecProvider, backend=backend, conda_env=conda_env),
         temp_file_provider=providers.Factory(_PyWorkflowTempFileProvider, backend=backend),
+        storage_provider=providers.Factory(_PyWorkflowZarrStorageProvider, backend=backend),
     )
 
     container.wire(modules=modules, packages=packages)

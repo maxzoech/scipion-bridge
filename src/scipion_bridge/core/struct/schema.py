@@ -37,31 +37,49 @@ class Array(Generic[T]):
 
     @classmethod
     def __class_getitem__(cls, params):
-        type_args = params if isinstance(params, tuple) else (params,)
+        raw_args = params if isinstance(params, tuple) else (params,)
 
         # Use Generic[T] behavior for TypeVars for type checkers
-        if any(isinstance(t, TypeVar) for t in type_args):
-            return super().__class_getitem__((params[0],))
+        if any(isinstance(t, TypeVar) for t in raw_args):
+            return super().__class_getitem__((raw_args[0],))
 
         # TODO: Correctly handle forward-declared references
-        if any(isinstance(t, (str, ForwardRef)) for t in type_args):
-            return super().__class_getitem__((params[0],))
+        if any(isinstance(t, (str, ForwardRef)) for t in raw_args):
+            return super().__class_getitem__((raw_args[0],))
 
-        cache_key = (cls, params)
+        dtype = raw_args[0]
+        if len(raw_args) > 1:
+            if isinstance(raw_args[1], (list, tuple)):
+                shape_tuple = tuple(raw_args[1])
+            else:
+                shape_tuple = tuple(raw_args[1:])
+        else:
+            shape_tuple = ()
+
+        cache_key = (cls, dtype, shape_tuple)
         if cache_key in Array._generic_cache:
             return Array._generic_cache[cache_key]
 
-        param_names = ",".join(getattr(t, "__name__", str(t)) for t in type_args)
-        new_cls_name = f"{cls.__name__}[{param_names}]"
+        dtype_name = getattr(dtype, "__name__", str(dtype))
+        if shape_tuple:
+            if len(raw_args) > 1 and isinstance(raw_args[1], (list, tuple)):
+                shape_str = f"[{', '.join(str(s) for s in shape_tuple)}]"
+            else:
+                shape_str = ", ".join(str(s) for s in shape_tuple)
+            new_cls_name = f"{cls.__name__}[{dtype_name}, {shape_str}]"
+        else:
+            new_cls_name = f"{cls.__name__}[{dtype_name}]"
+
+        runtime_args = (dtype, *shape_tuple)
 
         new_cls = type(
             new_cls_name,
             (cls,),
             {
                 "__module__": cls.__module__,
-                "__runtime_args__": type_args,
+                "__runtime_args__": runtime_args,
                 "__origin__": cls,
-                "__args__": type_args,
+                "__args__": (dtype,),
             },
         )
 
@@ -72,9 +90,9 @@ class Array(Generic[T]):
     def dtype(cls) -> Type:
         if len(cls.__runtime_args__) == 0:
             raise TypeError(
-            f"Missing data type parameter for {cls.__name__}. "
-            f"Please specify it explicitly (e.g., {cls.__name__}[int] or {cls.__name__}[float])."
-        )
+                f"Missing data type parameter for {cls.__name__}. "
+                f"Please specify it explicitly (e.g., {cls.__name__}[int] or {cls.__name__}[float])."
+            )
 
         return cls.__runtime_args__[0]
 
