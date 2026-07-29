@@ -74,9 +74,13 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
                 "Install it using pip install \"scipion-bridge[pyworkflow]\""
             )
 
-        from zarr.storage import LocalStore
-        store = LocalStore()
-        return zarr.group(store=store)
+        try:
+            from zarr.storage import LocalStore
+            store = LocalStore()
+            return zarr.group(store=store)
+        except (ImportError, AttributeError):
+            return zarr.group()
+
 
     def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
         if not arrays:

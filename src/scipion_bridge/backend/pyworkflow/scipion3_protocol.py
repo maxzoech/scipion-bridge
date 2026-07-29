@@ -8,7 +8,8 @@ import time
 from ...core.protocol import Protocol, Field
 from ...core.struct import Set as BridgeSet
 from ...core.typed import resolve
-from ...core.streaming import Pipeline
+from ...core.streaming import Pipeline, Sink
+
 
 from .workflow_container import configure_pyworkflow_env
 
@@ -113,9 +114,15 @@ def convert_protocol_to_scipion3_protocol(
                 k: get_args(v)[0] for k, v in protocol._configuration.inputs.items()
             }
 
-            self._stepsPipeline = Pipeline.from_sink(
-                protocol.steps().sink(print)
-            )
+            steps_node = protocol.steps()
+            if steps_node is not None:
+                if not isinstance(steps_node, Sink):
+                    steps_node = steps_node.sink(print)
+                self._stepsPipeline = Pipeline.from_sink(steps_node)
+            else:
+                self._stepsPipeline = None
+
+
 
 
         def _defineParams(self, form):

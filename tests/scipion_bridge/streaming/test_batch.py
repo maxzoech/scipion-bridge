@@ -65,7 +65,24 @@ def test_batch_rechunk_large_set_into_small_sets():
 
 
 
+def test_batch_large_number_of_elements():
+    received = []
+
+    # Pipeline: Source -> batch(1500) -> sink
+    source = Source("items")
+    sink_node = source.batch(1500).sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    for i in range(1, 1501):
+        p = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + i, metadata=Metadata(foo=i))
+        stream.send(items=B.Set[Particle]([p]))
+
+    assert len(received) == 1
+    assert len(received[0]) == 1500
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
     configure_default_env()
     test_batch_single_elements_into_set()
+    test_batch_large_number_of_elements()

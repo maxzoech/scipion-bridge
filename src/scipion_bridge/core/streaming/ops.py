@@ -1,14 +1,15 @@
 from functools import partial, reduce
 from pyrsistent import pdeque, PDeque
 
-from streamz import Stream, Tuple
+from streamz import Stream
 from scipion_bridge.core.struct import Struct
 from scipion_bridge.core import struct
 
 from .node import Node
 from .sink import Sink
 
-from typing import Optional, List, Dict, Callable, Any, Type, Union
+from typing import Optional, List, Dict, Callable, Any, Type, Union, Tuple
+
 
 
 class Op(Node):
@@ -87,40 +88,39 @@ class BatchOp(Op):
         state: List[struct.Set],
         new_chunks: List[struct.Set],
     ) -> Tuple[List[struct.Set], List[struct.Set]]:
-        initial_queue = [s for s in (state + new_chunks) if len(s) > 0]
+        queue = [s for s in (state + new_chunks) if len(s) > 0]
+        emitted: List[struct.Set] = []
 
-        def _extract_one_batch(
-            queue: List[struct.Set],
-            accumulated: List[struct.Set],
-            needed: int,
-        ) -> Tuple[List[struct.Set], struct.Set]:
-            if needed == 0:
-                batch = (
-                    accumulated[0]
-                    if len(accumulated) == 1
-                    else struct.Set.concat(*accumulated)
-                )
-                return queue, batch
-            elif len(queue[0]) <= needed:
-                head, tail = queue[0], queue[1:]
-                return _extract_one_batch(tail, accumulated + [head], needed - len(head))
-            else:
-                head, tail = queue[0], queue[1:]
-                take = head[:needed]
-                leftover = head[needed:]
-                return _extract_one_batch([leftover] + tail, accumulated + [take], 0)
+        total_capacity = sum(len(s) for s in queue)
 
-        def _process_queue(
-            queue: List[struct.Set], emitted: List[struct.Set]
-        ) -> Tuple[List[struct.Set], List[struct.Set]]:
+        while total_capacity >= self.batch_size:
+            accumulated: List[struct.Set] = []
+            needed = self.batch_size
+
+            while queue and needed > 0:
+                head = queue[0]
+                head_len = len(head)
+
+                if head_len <= needed:
+                    accumulated.append(head)
+                    needed -= head_len
+                    queue.pop(0)
+                else:
+                    accumulated.append(head[:needed])
+                    queue[0] = head[needed:]
+                    needed = 0
+
+            batch = (
+                accumulated[0]
+                if len(accumulated) == 1
+                else struct.Set.concat(*accumulated)
+            )
+            emitted.append(batch)
+
             total_capacity = sum(len(s) for s in queue)
-            if total_capacity < self.batch_size:
-                return queue, emitted
-            else:
-                remaining_queue, batch = _extract_one_batch(queue, [], self.batch_size)
-                return _process_queue(remaining_queue, emitted + [batch])
 
-        return _process_queue(initial_queue, [])
+        return queue, emitted
+
 
     def _chunk_set(self, x):
         if not isinstance(x, struct.Set):
