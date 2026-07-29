@@ -26,6 +26,7 @@ def register_pyworkflow_resolvers():
             ih = ImageHandler()
             img = ih.read(value)
             pixel_data = img.getData().astype(np.float32)
+            print(pixel_data.shape)
         else:
             raise ValueError("Could not convert Scipion 3 particle to Scipion Bridge particle")
 

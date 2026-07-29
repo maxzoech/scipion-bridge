@@ -82,7 +82,7 @@ class Struct(SchemaConvertible):
                 value = np.reshape(value, [-1])
                 is_scalar = not input_has_shape and value.size == 1
 
-                buffer = self._zarr_group.create_array(
+                buffer = self._zarr_group.create_dataset(
                     name=name,
                     shape=value.shape,
                     dtype=entry.dtype,

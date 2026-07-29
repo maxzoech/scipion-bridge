@@ -6,9 +6,12 @@ from collections import Counter, defaultdict
 import time
 
 from ...core.protocol import Protocol, Field
+from ...core.struct import Set as BridgeSet
+from ...core.typed import resolve
+
 from .workflow_container import configure_pyworkflow_env
 
-from typing import Optional, get_args, Dict, List, Any, get_type_hints
+from typing import Optional, get_args, Dict, List, Any, get_type_hints, Type, Union
 
 from enum import Enum
 
@@ -98,11 +101,13 @@ def convert_protocol_to_scipion3_protocol(
         _label = label
         _devStatus = BETA
         # _possibleOutputs = Outputs
+        stepsExecutionMode = cons.STEPS_PARALLEL
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
 
             self.itemIdReadList = defaultdict(list)
+            self.inputTypes = get_type_hints(protocol.run)
 
         def _defineParams(self, form):
 
@@ -150,17 +155,26 @@ def convert_protocol_to_scipion3_protocol(
         def _validateProtocolSetup(self):
             protocol.validate_protocol_configuration()
 
-        def _emitDataToPipelineStep(self, argname: str, inputData: Any):
-            pass
-            # bridgeType 
+        def _submitDataStep(self, argname: str, inputData: Union[Any, List[Any]]):
+            if not isinstance(inputData, list):
+                raise NotImplementedError
+
+            for sample in inputData:
+                bridgeType: BridgeSet = self.inputTypes[argname]
+                assert isinstance(bridgeType, type) and issubclass(bridgeType, BridgeSet)
+
+                bridgeValue = resolve.resolve(sample, bridgeType.item_type())
+                print(f"Submit {bridgeValue} for arg {argname}")
+
+
+        def _finalizeOutput(self):
+            print("Finalize the output here...")
+
 
         def _convertInput(self):
             print("Validate Protocol")
 
         def stepsGeneratorStep(self) -> None:
-            import logging
-
-            # logging.basicConfig(level=logging.DEBUG)
 
             configure_pyworkflow_env(
                 backend=self,
@@ -180,12 +194,10 @@ def convert_protocol_to_scipion3_protocol(
                     inputIDs[key]
                 )
 
-            idx = 0
+            stepDeps = []
 
             while True:
-                idx += 1
-                assert idx < 5, "Infinite loop"
-
+                
                 inputs = {
                     k: getattr(self, k).get()
                     for k in get_type_hints(protocol.run).keys()
@@ -200,28 +212,33 @@ def convert_protocol_to_scipion3_protocol(
                     k: _isFinished(k, inputs=inputs, inputIDs=inputIDs)
                     for k in inputs.keys()
                 }
-                nonProcessedElements = defaultdict(list)
 
                 if all(inputsAreFinished.values()):
-                    # Enqueue the output step here
+                    self._insertFunctionStep("_finalizeOutput", prerequisites=stepDeps)
                     break
 
-                for k, inputSet in inputs.items():
-                    nonProcessedIds = inputIDs[k] - set(self.itemIdReadList[k])
-                    items = []
+                for name, inputSet in inputs.items():
+                    nonProcessedIds = inputIDs[name] - set(self.itemIdReadList[name])
+                    if not nonProcessedIds:
+                        continue
 
-                    for item in inputSet.iterItems():
-                        obj_id = item.getObjId()
+                    # Form SQL 'IN' clause string for Scipion's underlying SQLite query engine
+                    idListStr = ",".join(map(str, nonProcessedIds))
 
-                        if obj_id in nonProcessedIds:
-                            items.append(item.clone())
-                            self.itemIdReadList[k].append(obj_id)
+                    itemsToSubmit = []
+                    for item in inputSet.iterItems(where=f"id IN ({idListStr})"):
+                        objId = item.getObjId()
+                        
+                        itemsToSubmit.append(item.clone())
+                        
+                        # Track read item ID
+                        self.itemIdReadList[name].append(objId)
 
-                    nonProcessedElements[k] = items
+                    dataStep = self._insertFunctionStep("_submitDataStep", name, itemsToSubmit)
+                    stepDeps.append(dataStep)
 
-                for name, inputSet in nonProcessedElements.items():
-                    print(f"Process {len(inputSet)} elements for {name}")
-
+                time.sleep(self.__scipion_bridge_param_polling_freq)
+                
                 for inputSet in inputs.values():
                     if inputSet.isStreamOpen():
                         with self._lock:

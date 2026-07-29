@@ -123,7 +123,7 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
                         shape_prefix=shape_prefix
                     )
                 elif isinstance(field, _ArraySetEntry) or (isinstance(field, _ArrayEntry) and field.is_static):
-                    group.create_array(
+                    group.create_dataset(
                         name=path,
                         shape=(*shape_prefix, *field.min_shape),
                         dtype=field.dtype,
