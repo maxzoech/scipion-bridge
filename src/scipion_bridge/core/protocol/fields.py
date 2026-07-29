@@ -32,16 +32,17 @@ class Field(Generic[T]):
         self.help = help
 
 
-    # def __eq__(self, other: Any) -> bool:
-    #     if not isinstance(other, Field):
-    #         return False
-    #     return (
-    #         self.default == other.default
-    #         and self.optional == other.optional
-    #         and self.label == other.label
-    #         and getattr(self, "group", None) == getattr(other, "group", None)
-    #         and self.help == other.help
-    #     )
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, Field):
+            return False
+        return (
+            self.default == other.default
+            and self.optional == other.optional
+            and self.label == other.label
+            and getattr(self, "group", None) == getattr(other, "group", None)
+            and self.help == other.help
+        )
+
 
 
 

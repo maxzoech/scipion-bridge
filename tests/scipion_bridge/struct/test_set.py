@@ -586,5 +586,21 @@ def test_set_init_from_elements():
         B.Set[CTF]([ctf1, ctf2], capacity=1)
 
 
+def test_set_concat():
+    ctf1 = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
+    ctf2 = CTF(voltage_kv=200.0, amplitude_contrast=0.10)
+    ctf3 = CTF(voltage_kv=100.0, amplitude_contrast=0.05)
+
+    s1 = B.Set[CTF]([ctf1, ctf2])
+    s2 = B.Set[CTF]([ctf3])
+
+    combined = B.Set[CTF].concat(s1, s2)
+    assert isinstance(combined, B.Set)
+    assert len(combined) == 3
+    assert combined[0].voltage_kv == 300.0
+    assert combined[1].voltage_kv == 200.0
+    assert combined[2].voltage_kv == 100.0
+
+
 if __name__ == "__main__":
     test_struct_instance_static_arrays()

@@ -1,7 +1,7 @@
 """Storage providers for schema-driven Struct and Set data containers."""
 
 import abc
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Sequence
 import numpy as np
 
 
@@ -90,9 +90,18 @@ class ArrayStorageProvider(abc.ABC):
         """Create and return a new array storage group instance."""
         ...
 
+    @abc.abstractmethod
+    def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
+        """Concatenate a sequence of backend storage arrays along an axis."""
+        ...
+
 
 class NumPyStorageProvider(ArrayStorageProvider):
     """Default array storage provider backed by NumPy in-memory data structures."""
 
     def create_group(self, shape_prefix: Tuple[int, ...] = ()) -> NumPyStorageGroup:
         return NumPyStorageGroup()
+
+    def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
+        return np.concatenate([np.asarray(a) for a in arrays], axis=axis)
+

@@ -141,6 +141,41 @@ class Set(Generic[T], SchemaConvertible):
         )
 
     @classmethod
+    def concat(cls, *sets: Set[T]) -> Set[T]:
+        """Concatenate multiple Set instances of the same item_type into a single combined Set."""
+        if not sets:
+            raise ValueError("Set.concat requires at least one Set argument.")
+
+        first_set = sets[0]
+        if not isinstance(first_set, Set):
+            raise TypeError(f"Expected a Set instance, got {type(first_set).__name__}")
+
+        target_item_type = first_set.item_type()
+
+        for idx, s in enumerate(sets[1:], start=1):
+            if not isinstance(s, Set):
+                raise TypeError(f"Argument at index {idx} is not a Set instance.")
+            
+            if s.item_type() != target_item_type:
+                raise TypeError(
+                    f"Cannot concatenate Set of '{s.item_type().__name__}' "
+                    f"with Set of '{target_item_type.__name__}' at index {idx}."
+                )
+
+        total_capacity = sum(len(s) for s in sets)
+        target_cls = Set[target_item_type]
+        concatenated_set = target_cls(capacity=total_capacity)
+
+        provider = first_set._storage_provider
+
+        for path, _ in concatenated_set.schema().tree_iter():
+            arrays = [s._zarr_group[path][:len(s)] for s in sets]
+            concatenated_set._zarr_group[path][:] = provider.concat(arrays, axis=0)
+
+        return concatenated_set
+
+
+    @classmethod
     def _validate_as_field(cls, key_path: str) -> dict:
         from .schema import _validate_struct_datatypes
 

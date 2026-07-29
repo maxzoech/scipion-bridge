@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import List
+from typing import List, Sequence
 from pathlib import Path
 import string
 import random
@@ -74,12 +74,22 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
                 "Install it using pip install \"scipion-bridge[pyworkflow]\""
             )
 
-        try:
-            from zarr.storage import LocalStore
-            store = LocalStore()
-            return zarr.group(store=store)
-        except (ImportError, AttributeError):
-            return zarr.group()
+        from zarr.storage import LocalStore
+        store = LocalStore()
+        return zarr.group(store=store)
+
+    def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
+        if not arrays:
+            raise ValueError("concat requires at least one array")
+
+        import zarr
+        first = arrays[0]
+        target = zarr.array(first)
+        
+        for a in arrays[1:]:
+            target.append(a, axis=axis)
+
+        return target
 
 
 def configure_pyworkflow_env(backend, *, conda_env: str, modules=None, packages=None):

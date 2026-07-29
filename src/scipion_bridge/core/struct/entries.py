@@ -100,6 +100,8 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     ) -> Any:
         """Set up the array storage backend."""
         group = storage_provider.create_group(shape_prefix=shape_prefix)
+        self._storage_provider = storage_provider
+
         
         def _create_storage(schema: Schema, *, root: str = "", shape_prefix: tuple = tuple()):
         
