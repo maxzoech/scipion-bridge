@@ -16,7 +16,10 @@ class Op(Node):
         return node
 
     def map(self, func: Callable[[Any], Any]) -> "MapOp":
-        return self.op(MapOp(func)) 
+        return self.op(MapOp(func))
+
+    def batch(self, batch_size: int, *, drop_last = False):
+        return self.op(BatchOp(batch_size, drop_last))
 
     def sink(self, callback: Callable[[Any], Any]) -> Sink:
         """Attach a terminal Sink node and return it."""
@@ -54,33 +57,24 @@ class Source(Op):
 class MapOp(Op):
     """Mapping operation node."""
 
-    def __init__(self, func: Callable[[Any], Any], upstream: Optional[List[Node]] = None):
-        super().__init__(upstream=upstream)
+    def __init__(self, func: Callable[[Any], Any]):
+        super().__init__(upstream=None)
         self.func = func
 
     def transform(self, stream: Stream) -> Stream:
         return stream.map(self.func)
 
 
-class CombineOp(Op):
-    """Combines multiple upstream streams using streamz.combine_latest."""
+class BatchOp(Op):
+    """
+    Merges or splits a Set[...] to a specific batch size
+    """
 
-    def __init__(self, upstream: List[Node]):
-        super().__init__(upstream=upstream)
+    def __init__(self, batch_size: int, drop_last=False):
+        super().__init__(upstream=None)
 
-    def transform(self, *streams: Stream) -> Stream:
-        primary_stream = streams[0]
-        other_streams = streams[1:]
-        return primary_stream.combine_latest(*other_streams)
+        if drop_last:
+            raise NotImplementedError("Drop last is not implemented yet")
 
-
-class ZipOp(Op):
-    """Zips multiple upstream streams element-by-element."""
-
-    def __init__(self, upstream: List[Node]):
-        super().__init__(upstream=upstream)
-
-    def transform(self, *streams: Stream) -> Stream:
-        primary_stream = streams[0]
-        other_streams = streams[1:]
-        return primary_stream.zip(*other_streams)
+    def transform(self, streams: Stream):
+        raise NotImplementedError

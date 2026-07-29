@@ -15,6 +15,8 @@ from typing import (
     ForwardRef,
     Tuple,
     Optional,
+    Sequence,
+    overload,
 )
 try:
     from typing import Self
@@ -88,6 +90,7 @@ class Set(Generic[T], SchemaConvertible):
     """Generic fixed-capacity sequence container of Struct items backed by Zarr arrays.
 
     Parameters:
+        elements (Sequence[T]): Initial elements to populate into the set.
         capacity (int): The total maximum capacity (length) of the set.
     """
 
@@ -98,11 +101,36 @@ class Set(Generic[T], SchemaConvertible):
         """Pre-allocate array storage for the configured set capacity."""
         return super().configure_array_storage(shape_prefix=(self._capacity,))
 
-    def __init__(self, capacity: int):
+    @overload
+    def __init__(self, elements: Sequence[T], *, capacity: Optional[int] = None) -> None: ...
+
+    @overload
+    def __init__(self, *, capacity: int) -> None: ...
+
+    def __init__(
+        self,
+        elements: Sequence[Any] = (),
+        *,
+        capacity: Optional[int] = None,
+    ):
+        if not elements and capacity is None:
+            raise ValueError("Must specify capacity when initializing an empty Set.")
+
+        if capacity is None:
+            capacity = len(elements)
+        elif capacity < len(elements):
+            raise ValueError(
+                f"Specified capacity ({capacity}) cannot be smaller than number of elements ({len(elements)})."
+            )
+
         self._capacity = capacity
         self._view: Optional[_StorageView] = None
 
         super().__init__()
+
+        for i, elem in enumerate(elements):
+            self[i] = elem
+
 
     @classmethod
     def to_schema_entry(cls) -> _SchemaSetEntry:

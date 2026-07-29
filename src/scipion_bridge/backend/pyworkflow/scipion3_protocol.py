@@ -8,6 +8,7 @@ import time
 from ...core.protocol import Protocol, Field
 from ...core.struct import Set as BridgeSet
 from ...core.typed import resolve
+from ...core.streaming import Pipeline
 
 from .workflow_container import configure_pyworkflow_env
 
@@ -112,6 +113,11 @@ def convert_protocol_to_scipion3_protocol(
                 k: get_args(v)[0] for k, v in protocol._configuration.inputs.items()
             }
 
+            self._stepsPipeline = Pipeline.from_sink(
+                protocol.steps().sink(print)
+            )
+
+
         def _defineParams(self, form):
 
             form.addSection(label="Input")
@@ -153,6 +159,8 @@ def convert_protocol_to_scipion3_protocol(
                 "Higher values reduce system overhead during continuous data acquisition.",
             )
 
+            form.addParallelSection(threads=2, mpi=1)
+
 
         def _validateProtocolSetup(self):
             protocol.validate_protocol_configuration()
@@ -166,7 +174,12 @@ def convert_protocol_to_scipion3_protocol(
                 assert isinstance(bridgeType, type) and issubclass(bridgeType, BridgeSet)
 
                 bridgeValue = resolve.resolve(sample, bridgeType.item_type())
-                print(f"Submit {bridgeValue} for arg {argname}")
+
+                args = {
+                    argname: bridgeType([bridgeValue])
+                }
+                self._stepsPipeline.send(**args)
+
 
 
         def _finalizeOutput(self):

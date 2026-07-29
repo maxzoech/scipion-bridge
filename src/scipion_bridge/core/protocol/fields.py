@@ -8,8 +8,8 @@ T = TypeVar("T")
 from ..streaming.ops import Source
 
 
-@dataclass
 class Field(Generic[T]):
+
 
     def __init__(
         self,
@@ -28,14 +28,26 @@ class Field(Generic[T]):
         self.default = default
         self.optional = optional
         self.label = label
+        self.group = group
         self.help = help
 
 
-@dataclass
+    # def __eq__(self, other: Any) -> bool:
+    #     if not isinstance(other, Field):
+    #         return False
+    #     return (
+    #         self.default == other.default
+    #         and self.optional == other.optional
+    #         and self.label == other.label
+    #         and getattr(self, "group", None) == getattr(other, "group", None)
+    #         and self.help == other.help
+    #     )
+
+
+
 class Input(Field, Generic[T], Source):
 
     def __set_name__(self, owner, name):
-        del owner
         self.name = name
 
     def __init__(
@@ -57,3 +69,5 @@ class Input(Field, Generic[T], Source):
 
         Source.__init__(self)
 
+    def __hash__(self):
+        return Source.__hash__(self)

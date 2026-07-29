@@ -558,9 +558,32 @@ def test_deeply_nested_multi_level_attribute_mutation():
     series_set[0].tilts[1].ctf.voltage_kv = 400.0
     series_set[0].tilts[1].camera.gain = 3.5
 
-    # 3. Verify in-place storage update
     assert series_set[0].tilts[1].ctf.voltage_kv == 400.0
     assert series_set[0].tilts[1].camera.gain == 3.5
+
+
+def test_set_init_from_elements():
+    ctf1 = CTF(voltage_kv=300.0, amplitude_contrast=0.07)
+    ctf2 = CTF(voltage_kv=200.0, amplitude_contrast=0.10)
+
+    # Positional list initialization
+    s1 = B.Set[CTF]([ctf1, ctf2])
+    assert len(s1) == 2
+    assert s1[0].voltage_kv == 300.0
+    assert s1[1].voltage_kv == 200.0
+
+    # Keyword capacity + elements
+    s2 = B.Set[CTF]([ctf1], capacity=5)
+    assert len(s2) == 5
+    assert s2[0].voltage_kv == 300.0
+    assert s2[1].voltage_kv == 0.0
+
+    # Errors
+    with pytest.raises(ValueError, match="Must specify capacity"):
+        B.Set[CTF]()
+
+    with pytest.raises(ValueError, match="smaller than number of elements"):
+        B.Set[CTF]([ctf1, ctf2], capacity=1)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,10 @@
-from typing import Optional, List, Dict
+import abc
 from streamz import Stream
 
-class Node:
+from typing import Optional, List, Dict, Any
+
+
+class Node(metaclass=abc.ABCMeta):
     """
     Base class for all nodes in the streaming computational graph.
     """
@@ -9,12 +12,19 @@ class Node:
     def __init__(self, upstream: Optional[List["Node"]] = None):
         self.upstream: List[Node] = upstream if upstream is not None else []
 
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __eq__(self, other: Any) -> bool:
+        return self is other
+
+
+    @abc.abstractmethod
     def transform(self, *streams: Stream) -> Stream:
         """
         Transforms upstream streamz stream(s) into a new streamz stream operator.
         Must be implemented by subclasses.
         """
-        raise NotImplementedError
 
     def compile(
         self,
