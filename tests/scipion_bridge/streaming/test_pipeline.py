@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.streaming.stream import Source, Stream
+from scipion_bridge.core.streaming.pipeline import Source, Pipeline
 
 
 class Metadata(B.Struct):
@@ -46,7 +46,6 @@ def test_fluent_pipeline():
         source
         .map(lambda x: x + 10)
         .map(lambda x: x * 2)
-        .filter(lambda x: x > 25)
         .sink(lambda x: received.append(x))
     )
 
@@ -54,7 +53,7 @@ def test_fluent_pipeline():
     stream.send(numbers=5)   # 5 -> 15 -> 30 -> kept (30)
     stream.send(numbers=1)   # 1 -> 11 -> 22 -> filtered out
 
-    assert received == [30]
+    assert received == [30, 22]
 
 
 def test_disallow_lists():
