@@ -101,7 +101,7 @@ def convert_protocol_to_scipion3_protocol(
         _label = label
         _devStatus = BETA
         # _possibleOutputs = Outputs
-        stepsExecutionMode = cons.STEPS_PARALLEL
+        # stepsExecutionMode = cons.STEPS_PARALLEL # We want to run the steps sequentially
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
@@ -153,7 +153,6 @@ def convert_protocol_to_scipion3_protocol(
                 "Higher values reduce system overhead during continuous data acquisition.",
             )
 
-            form.addParallelSection(threads=2, mpi=0)
 
         def _validateProtocolSetup(self):
             protocol.validate_protocol_configuration()
