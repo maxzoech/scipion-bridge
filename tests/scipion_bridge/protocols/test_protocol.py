@@ -38,7 +38,7 @@ class BasicProtocol(Protocol):
     # Fields
     state: int = 42
 
-    def run(self, path: int):
+    def steps(self):
         pass
 
 def test_create_protocol():

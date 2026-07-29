@@ -1,11 +1,11 @@
 import inspect
 import ast
-import autopep8 # type: ignore
+import textwrap
 
 from typing import Any
 
 def parse_ast(cls: Any) -> ast.AST:
     source = inspect.getsource(cls)
-    source = autopep8.fix_code(source)
+    source = textwrap.dedent(source)
 
     return ast.parse(source)

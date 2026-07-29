@@ -1,6 +1,6 @@
 from __future__ import annotations
 import inspect
-import autopep8  # type: ignore
+import textwrap
 import ast
 import abc
 
@@ -61,18 +61,11 @@ class Protocol(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def run(self, *args: Any, **kwargs: Any):
+    def steps(self):
         pass
 
     def validate_protocol_configuration(self):
-        
-        arg_types = get_type_hints(self.run)
-        input_types = {
-            k: get_args(v)[0] for (k, v) in self._configuration.inputs.items()
-        }
-
-        if arg_types != input_types:
-            raise ValidationError("Arguments of method run() do not match declared inputs. This is a bug.")
+        pass
 
 
 def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
@@ -80,7 +73,7 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
     attributes = get_type_hints(cls)
 
     source = inspect.getsource(cls)
-    source = autopep8.fix_code(source)
+    source = textwrap.dedent(source)
 
     tree = ast.parse(source)
     class_def = tree.body[0]

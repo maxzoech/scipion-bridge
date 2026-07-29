@@ -12,7 +12,7 @@ from ..environment.domain import Domain
 
 import ast
 import inspect
-import autopep8  # type: ignore
+import textwrap
 from typing import Dict, Any, Callable, Optional, Set, List, Protocol, TypeVar, overload
 
 import itertools
@@ -121,7 +121,7 @@ def shell_command(
 def _func_is_empty(func):
 
     source = inspect.getsource(func)
-    source = autopep8.fix_code(source)
+    source = textwrap.dedent(source)
 
     tree = ast.parse(source)
 

@@ -107,7 +107,10 @@ def convert_protocol_to_scipion3_protocol(
             super().__init__(**kwargs)
 
             self.itemIdReadList = defaultdict(list)
-            self.inputTypes = get_type_hints(protocol.run)
+
+            self.inputTypes = {
+                k: get_args(v)[0] for k, v in protocol._configuration.inputs.items()
+            }
 
         def _defineParams(self, form):
 
@@ -200,7 +203,7 @@ def convert_protocol_to_scipion3_protocol(
                 
                 inputs = {
                     k: getattr(self, k).get()
-                    for k in get_type_hints(protocol.run).keys()
+                    for k in self.inputTypes.keys()
                 }
 
                 with self._lock:

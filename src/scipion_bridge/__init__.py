@@ -11,7 +11,6 @@ from .core.protocol import Protocol, Field, Input
 from .core import struct
 from .core.struct import Struct, Set, Array
 
-
 from .core.typed import core_resolvers
 lift_resolvers(core_resolvers, proxy)
 
@@ -35,4 +34,6 @@ __all__ = [
     "Struct",
     "Set",
     "Array",
+    "Marker",
+    "is_marker_type",
 ]
