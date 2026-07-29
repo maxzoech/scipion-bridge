@@ -30,10 +30,10 @@ class Source(Op):
     Entry point input stream node.
     """
 
-    def __init__(self, name: str, *, dtype: Optional[Type[Union[Struct, Set]]] = None):
+    def __init__(self, name: Optional[str] = None):
         super().__init__(upstream=[])
         self.name = name
-        self.dtype = dtype
+
 
     def compile(
         self,
@@ -41,7 +41,9 @@ class Source(Op):
         compile_cache: Optional[Dict[Node, Stream]] = None,
     ) -> Stream:
         del compile_cache
+        assert self.name is not None, f"Source node {self} has no name assigned before building."
         return sources_map[self.name]
+
 
     def transform(self, *streams: Stream) -> Stream:
         if streams:

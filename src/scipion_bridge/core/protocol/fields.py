@@ -5,6 +5,8 @@ from enum import Enum
 
 T = TypeVar("T")
 
+from ..streaming.ops import Source
+
 
 @dataclass
 class Field(Generic[T]):
@@ -30,7 +32,11 @@ class Field(Generic[T]):
 
 
 @dataclass
-class Input(Field, Generic[T]):
+class Input(Field, Generic[T], Source):
+
+    def __set_name__(self, owner, name):
+        del owner
+        self.name = name
 
     def __init__(
         self,
@@ -40,6 +46,14 @@ class Input(Field, Generic[T]):
         label: Optional[str] = None,
         help: Optional[str] = None,
     ):
-        super().__init__(
-            default=default, optional=optional, group="Input", label=label, help=help,
+        Field.__init__(
+            self,
+            default=default,
+            optional=optional,
+            group="Input",
+            label=label,
+            help=help,
         )
+
+        Source.__init__(self)
+

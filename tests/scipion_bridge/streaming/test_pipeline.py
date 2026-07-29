@@ -23,8 +23,9 @@ def test_basic_stream():
     batch_size = 5
     received = []
 
-    source = Source("particles", dtype=B.Set[Particle])
+    source = Source("particles")
     sink_node = source.sink(lambda x: received.append(x))
+
     stream = Pipeline.from_sink(sink_node)
 
     for batch_idx in range(2):
@@ -73,8 +74,9 @@ def test_modify_set_to_struct_with_latent():
         latent = np.full(128, 0.42, dtype=np.float32)
         return ParticleEmbeddings(particles=particle_set, latent_code=latent)
 
-    source = Source("particles", dtype=B.Set[Particle])
+    source = Source("particles")
     sink_node = source.map(_encode_particles).sink(lambda x: received.append(x))
+
     stream = Pipeline.from_sink(sink_node)
 
     batch_size = 3

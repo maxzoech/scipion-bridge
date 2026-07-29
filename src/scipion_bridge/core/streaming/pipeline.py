@@ -53,7 +53,9 @@ class Pipeline:
                 return
             visited.add(n)
             if isinstance(n, Source):
+                assert n.name is not None, f"Source node {n} must have a name assigned before building the pipeline."
                 sources[n.name] = n
+
             for up in n.upstream:
                 _find_sources(up)
 
