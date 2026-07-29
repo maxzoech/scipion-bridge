@@ -11,7 +11,6 @@ from .sink import Sink
 from typing import Optional, List, Dict, Callable, Any, Type, Union, Tuple
 
 
-
 class Op(Node):
     """
     Intermediate operation node that allows chaining downstream operations.
@@ -76,7 +75,7 @@ class MapOp(Op):
 
 class BatchOp(Op):
     """
-    Merges or splits a Set[...] to a specific batch size.
+    Merges or splits Set[...] containers to a specific batch size.
     """
 
     def __init__(self, size: int, upstream: Optional[List[Node]] = None):
@@ -85,15 +84,21 @@ class BatchOp(Op):
 
     def _accumulate_batches(
         self,
-        state: List[struct.Set],
-        new_chunks: List[struct.Set],
-    ) -> Tuple[List[struct.Set], List[struct.Set]]:
-        queue = [s for s in (state + new_chunks) if len(s) > 0]
+        state: Tuple[List[struct.Set], int],
+        new_set: struct.Set,
+    ) -> Tuple[Tuple[List[struct.Set], int], List[struct.Set]]:
+        queue, capacity = state
+
+        if not isinstance(new_set, struct.Set):
+            raise ValueError("Input for batch needs to be a set")
+
+        if len(new_set) > 0:
+            queue.append(new_set)
+            capacity += len(new_set)
+
         emitted: List[struct.Set] = []
 
-        total_capacity = sum(len(s) for s in queue)
-
-        while total_capacity >= self.batch_size:
+        while capacity >= self.batch_size:
             accumulated: List[struct.Set] = []
             needed = self.batch_size
 
@@ -116,30 +121,13 @@ class BatchOp(Op):
                 else struct.Set.concat(*accumulated)
             )
             emitted.append(batch)
+            capacity -= self.batch_size
 
-            total_capacity = sum(len(s) for s in queue)
-
-        return queue, emitted
-
-
-    def _chunk_set(self, x):
-        if not isinstance(x, struct.Set):
-            raise ValueError("Input for batch needs to be a set")
-
-        n = len(x)
-        if n > self.batch_size:
-            return [x[i : i + self.batch_size] for i in range(0, n, self.batch_size)]
-        return [x]
+        return (queue, capacity), emitted
 
     def transform(self, stream: Stream) -> Stream:
-        return (
-            stream.map(self._chunk_set)
-            .accumulate(
-                self._accumulate_batches,
-                start=[],
-                returns_state=True,
-            )
-            .flatten()
-        )
-
-
+        return stream.accumulate(
+            self._accumulate_batches,
+            start=([], 0),
+            returns_state=True,
+        ).flatten()
