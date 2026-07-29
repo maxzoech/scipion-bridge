@@ -2,79 +2,30 @@ from typing import Optional, List, Dict, Callable, Any, Type, Union
 from streamz import Stream
 from scipion_bridge.core.struct import Struct, Set
 
+from .node import Node
+from .sink import Sink
 
-class Node:
+class Op(Node):
     """
-    Base class for nodes in the streaming computational graph.
+    Intermediate operation node that allows chaining downstream operations.
     """
 
-    def __init__(self, upstream: Optional[List["Node"]] = None):
-        self.upstream: List[Node] = upstream if upstream is not None else []
-
-    def transform(self, *streams: Stream) -> Stream:
-        """
-        Transforms upstream streamz stream(s) into a new streamz stream operator.
-        Must be implemented by subclasses.
-        """
-        raise NotImplementedError
-
-    def compile(
-        self,
-        sources_map: Dict[str, Stream],
-        compile_cache: Optional[Dict["Node", Stream]] = None,
-    ) -> Stream:
-        """
-        Recursively compile this node and its upstream dependencies into a streamz stream.
-        """
-        if compile_cache is None:
-            compile_cache = {}
-
-        if self in compile_cache:
-            return compile_cache[self]
-
-        upstream_streams = [
-            upstream.compile(sources_map, compile_cache) for upstream in self.upstream
-        ]
-        compiled = self.transform(*upstream_streams)
-
-        compile_cache[self] = compiled
-        return compiled
-
-    def op(self, node: "Node") -> "Node":
-        """Add a downstream operation node to this node."""
+    def op(self, node: Node) -> Node:
+        """Connect a downstream node to this op."""
         node.upstream.append(self)
         return node
 
-    def build(self) -> Any:
-        """Convenience method to compile the computational graph from root sources to this node."""
-        from .pipeline import Pipeline
-
-        visited = set()
-        sources: List[Source] = []
-
-        def _find_sources(n: Node):
-            if n in visited:
-                return
-            visited.add(n)
-            if isinstance(n, Source):
-                sources.append(n)
-            for up in n.upstream:
-                _find_sources(up)
-
-        _find_sources(self)
-        pipeline = Pipeline(sources=sources, leaf=self)
-        return pipeline.build()
-
-    # Fluent helper methods
     def map(self, func: Callable[[Any], Any]) -> "MapOp":
-        return self.op(MapOp(func))
+        return self.op(MapOp(func)) 
 
-    def sink(self, callback: Callable[[Any], Any]) -> "SinkOp":
-        return self.op(SinkOp(callback))
+    def sink(self, callback: Callable[[Any], Any]) -> Sink:
+        """Attach a terminal Sink node and return it."""
+        sink_node = Sink(callback)
+        self.op(sink_node)
+        return sink_node
 
 
-
-class Source(Node):
+class Source(Op):
     """
     Entry point input stream node.
     """
@@ -90,7 +41,6 @@ class Source(Node):
         compile_cache: Optional[Dict[Node, Stream]] = None,
     ) -> Stream:
         del compile_cache
-
         return sources_map[self.name]
 
     def transform(self, *streams: Stream) -> Stream:
@@ -99,7 +49,7 @@ class Source(Node):
         raise NotImplementedError("Source node must be compiled via sources_map lookup.")
 
 
-class MapOp(Node):
+class MapOp(Op):
     """Mapping operation node."""
 
     def __init__(self, func: Callable[[Any], Any], upstream: Optional[List[Node]] = None):
@@ -109,13 +59,26 @@ class MapOp(Node):
     def transform(self, stream: Stream) -> Stream:
         return stream.map(self.func)
 
-class SinkOp(Node):
-    """Sink output operation node."""
 
-    def __init__(self, callback: Callable[[Any], Any], upstream: Optional[List[Node]] = None):
+class CombineOp(Op):
+    """Combines multiple upstream streams using streamz.combine_latest."""
+
+    def __init__(self, upstream: List[Node]):
         super().__init__(upstream=upstream)
-        self.callback = callback
 
-    def transform(self, stream: Stream) -> Stream:
-        return stream.sink(self.callback)
+    def transform(self, *streams: Stream) -> Stream:
+        primary_stream = streams[0]
+        other_streams = streams[1:]
+        return primary_stream.combine_latest(*other_streams)
 
+
+class ZipOp(Op):
+    """Zips multiple upstream streams element-by-element."""
+
+    def __init__(self, upstream: List[Node]):
+        super().__init__(upstream=upstream)
+
+    def transform(self, *streams: Stream) -> Stream:
+        primary_stream = streams[0]
+        other_streams = streams[1:]
+        return primary_stream.zip(*other_streams)

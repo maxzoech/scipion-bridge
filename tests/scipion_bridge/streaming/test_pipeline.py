@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.streaming.pipeline import Source, Pipeline
+from scipion_bridge.core.streaming.ops import Source, Sink
+from scipion_bridge.core.streaming.pipeline import Pipeline
 
 
 class Metadata(B.Struct):
@@ -23,7 +24,8 @@ def test_basic_stream():
     received = []
 
     source = Source("particles", dtype=B.Set[Particle])
-    stream = source.sink(lambda x: received.append(x)).build()
+    sink_node = source.sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
 
     for batch_idx in range(2):
         particle_set = B.Set[Particle](capacity=batch_size)
@@ -42,23 +44,23 @@ def test_fluent_pipeline():
     received = []
 
     source = Source("numbers")
-    pipeline = (
+    sink_node = (
         source
         .map(lambda x: x + 10)
         .map(lambda x: x * 2)
         .sink(lambda x: received.append(x))
     )
 
-    stream = pipeline.build()
-    stream.send(numbers=5)   # 5 -> 15 -> 30 -> kept (30)
-    stream.send(numbers=1)   # 1 -> 11 -> 22 -> filtered out
+    stream = Pipeline.from_sink(sink_node)
+    stream.send(numbers=5)   # 5 -> 15 -> 30
+    stream.send(numbers=1)   # 1 -> 11 -> 22
 
     assert received == [30, 22]
 
 
 def test_disallow_lists():
     source = Source("data")
-    stream = source.build()
+    stream = Pipeline.from_sink(source)
 
     with pytest.raises(TypeError, match="Python lists are not supported"):
         stream.send(data=[1, 2, 3])
@@ -72,7 +74,8 @@ def test_modify_set_to_struct_with_latent():
         return ParticleEmbeddings(particles=particle_set, latent_code=latent)
 
     source = Source("particles", dtype=B.Set[Particle])
-    stream = source.map(_encode_particles).sink(lambda x: received.append(x)).build()
+    sink_node = source.map(_encode_particles).sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
 
     batch_size = 3
     particle_set = B.Set[Particle](capacity=batch_size)
