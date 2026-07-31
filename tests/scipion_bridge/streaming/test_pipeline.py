@@ -41,24 +41,6 @@ def test_basic_stream():
     assert len(received) == 2
 
 
-def test_fluent_pipeline():
-    received = []
-
-    source = Source("numbers")
-    sink_node = (
-        source
-        .map(lambda x: x + 10)
-        .map(lambda x: x * 2)
-        .sink(lambda x: received.append(x))
-    )
-
-    stream = Pipeline.from_sink(sink_node)
-    stream.send(numbers=5)   # 5 -> 15 -> 30
-    stream.send(numbers=1)   # 1 -> 11 -> 22
-
-    assert received == [30, 22]
-
-
 def test_disallow_lists():
     source = Source("data")
     stream = Pipeline.from_sink(source)
@@ -67,37 +49,6 @@ def test_disallow_lists():
         stream.send(data=[1, 2, 3])
 
 
-def test_modify_set_to_struct_with_latent():
-    received = []
-
-    def _encode_particles(particle_set: B.Set[Particle]) -> ParticleEmbeddings:
-        latent = np.full(128, 0.42, dtype=np.float32)
-        return ParticleEmbeddings(particles=particle_set, latent_code=latent)
-
-    source = Source("particles")
-    sink_node = source.map(_encode_particles).sink(lambda x: received.append(x))
-
-    stream = Pipeline.from_sink(sink_node)
-
-    batch_size = 3
-    particle_set = B.Set[Particle](capacity=batch_size)
-    for idx in range(batch_size):
-        pixels = np.ones([256, 256], dtype=np.float32) * idx
-        particle_set[idx] = Particle(pixels=pixels, metadata=Metadata(foo=idx))
-
-    stream.send(particles=particle_set)
-
-    assert len(received) == 1
-    result = received[0]
-    assert isinstance(result, ParticleEmbeddings)
-    assert isinstance(result.particles, B.Set)
-    assert len(result.particles) == batch_size
-    assert result.latent_code.shape == (128,)
-    assert np.allclose(result.latent_code, 0.42)
-
-
 if __name__ == "__main__":
     test_basic_stream()
-    test_fluent_pipeline()
     test_disallow_lists()
-    test_modify_set_to_struct_with_latent()

@@ -24,8 +24,8 @@ class Op(Node):
     def map(self, func: Callable[[Any], Any]) -> "MapOp":
         return self.op(MapOp(func))
 
-    def batch(self, size: int) -> "BatchOp":
-        return self.op(BatchOp(size))
+    def chunk(self, size: int) -> "ChunkOp":
+        return self.op(ChunkOp(size))
 
     def sink(self, callback: Callable[[Any], Any]) -> Sink:
         """Attach a terminal Sink node and return it."""
@@ -73,16 +73,16 @@ class MapOp(Op):
         return stream.map(self.func)
 
 
-class BatchOp(Op):
+class ChunkOp(Op):
     """
-    Merges or splits Set[...] containers to a specific batch size.
+    Merges or splits Set[...] containers to a specific chunk size.
     """
 
     def __init__(self, size: int, upstream: Optional[List[Node]] = None):
         super().__init__(upstream=upstream)
-        self.batch_size = size
+        self.chunk_size = size
 
-    def _accumulate_batches(
+    def _accumulate_chunks(
         self,
         state: Tuple[List[struct.Set], int],
         new_set: struct.Set,
@@ -90,7 +90,7 @@ class BatchOp(Op):
         queue, capacity = state
 
         if not isinstance(new_set, struct.Set):
-            raise ValueError("Input for batch needs to be a set")
+            raise ValueError("Input for chunk needs to be a set")
 
         if len(new_set) > 0:
             queue.append(new_set)
@@ -98,9 +98,9 @@ class BatchOp(Op):
 
         emitted: List[struct.Set] = []
 
-        while capacity >= self.batch_size:
+        while capacity >= self.chunk_size:
             accumulated: List[struct.Set] = []
-            needed = self.batch_size
+            needed = self.chunk_size
 
             while queue and needed > 0:
                 head = queue[0]
@@ -115,19 +115,19 @@ class BatchOp(Op):
                     queue[0] = head[needed:]
                     needed = 0
 
-            batch = (
+            chunk = (
                 accumulated[0]
                 if len(accumulated) == 1
                 else struct.Set.concat(*accumulated)
             )
-            emitted.append(batch)
-            capacity -= self.batch_size
+            emitted.append(chunk)
+            capacity -= self.chunk_size
 
         return (queue, capacity), emitted
 
     def transform(self, stream: Stream) -> Stream:
         return stream.accumulate(
-            self._accumulate_batches,
+            self._accumulate_chunks,
             start=([], 0),
             returns_state=True,
         ).flatten()
