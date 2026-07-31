@@ -1,3 +1,4 @@
+from typing import Optional, List, Dict, Callable, Any, Type, Union, Tuple
 from functools import partial, reduce
 from pyrsistent import pdeque, PDeque
 
@@ -5,10 +6,8 @@ from streamz import Stream
 from scipion_bridge.core.struct import Struct
 from scipion_bridge.core import struct
 
-from .node import Node
+from .node import Node, FlushSignal, FLUSH
 from .sink import Sink
-
-from typing import Optional, List, Dict, Callable, Any, Type, Union, Tuple
 
 
 class Op(Node):
@@ -69,8 +68,13 @@ class MapOp(Op):
         super().__init__(upstream=None)
         self.func = func
 
+    def _map_func(self, x: Any) -> Any:
+        if isinstance(x, FlushSignal):
+            return x
+        return self.func(x)
+
     def transform(self, stream: Stream) -> Stream:
-        return stream.map(self.func)
+        return stream.map(self._map_func)
 
 
 class ChunkOp(Op):
@@ -85,9 +89,22 @@ class ChunkOp(Op):
     def _accumulate_chunks(
         self,
         state: Tuple[List[struct.Set], int],
-        new_set: struct.Set,
-    ) -> Tuple[Tuple[List[struct.Set], int], List[struct.Set]]:
+        new_set: Union[struct.Set, FlushSignal],
+    ) -> Tuple[Tuple[List[struct.Set], int], List[Union[struct.Set, FlushSignal]]]:
         queue, capacity = state
+
+        if isinstance(new_set, FlushSignal):
+            emitted: List[Union[struct.Set, FlushSignal]] = []
+            if queue:
+                leftover = (
+                    queue[0]
+                    if len(queue) == 1
+                    else struct.Set.concat(*queue)
+                )
+                emitted.append(leftover)
+            emitted.append(FLUSH)
+            
+            return ([], 0), emitted
 
         if not isinstance(new_set, struct.Set):
             raise ValueError("Input for chunk needs to be a set")
@@ -96,7 +113,7 @@ class ChunkOp(Op):
             queue.append(new_set)
             capacity += len(new_set)
 
-        emitted: List[struct.Set] = []
+        emitted: List[Union[struct.Set, FlushSignal]] = []
 
         while capacity >= self.chunk_size:
             accumulated: List[struct.Set] = []

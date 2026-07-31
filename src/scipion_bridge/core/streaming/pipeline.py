@@ -15,7 +15,7 @@ import streamz
 from streamz import Stream
 
 from scipion_bridge.core.struct import Struct, Set
-from .ops import Source
+from .ops import Source, FlushSignal, FLUSH
 from .sink import Sink
 from .node import Node
 
@@ -91,3 +91,16 @@ class Pipeline:
                 self._backend_sources[name].emit(value)
             else:
                 raise KeyError(f"Input source '{name}' is not registered in this pipeline.")
+
+    def flush(self) -> None:
+        """
+        Flush all stateful operations in the pipeline by sending a FLUSH sentinel to all input sources.
+        """
+        for stream in self._backend_sources.values():
+            stream.emit(FLUSH)
+
+    def __enter__(self) -> Pipeline:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.flush()

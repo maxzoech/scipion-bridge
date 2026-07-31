@@ -132,6 +132,43 @@ def test_map_op_transform_struct():
     assert np.allclose(result.latent_code, 0.42)
 
 
+def test_chunk_op_flush_partial_set():
+    received = []
+
+    source = Source("items")
+    sink_node = source.chunk(5).sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
+    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+
+    stream.send(items=B.Set[Particle]([p1]))
+    stream.send(items=B.Set[Particle]([p2]))
+
+    assert len(received) == 0  # 2 elements, chunk_size=5 -> buffered
+
+    stream.flush()
+
+    assert len(received) == 1
+    flushed_chunk = received[0]
+    assert isinstance(flushed_chunk, B.Set)
+    assert len(flushed_chunk) == 2
+    assert flushed_chunk[0].metadata.foo == 1
+    assert flushed_chunk[1].metadata.foo == 2
+
+
+def test_chunk_op_flush_empty_queue():
+    received = []
+
+    source = Source("items")
+    sink_node = source.chunk(5).sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    stream.flush()
+
+    assert len(received) == 0  # Empty queue -> nothing emitted on flush
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
     configure_default_env()
@@ -139,3 +176,5 @@ if __name__ == "__main__":
     test_chunk_large_number_of_elements()
     test_map_op()
     test_map_op_transform_struct()
+    test_chunk_op_flush_partial_set()
+    test_chunk_op_flush_empty_queue()

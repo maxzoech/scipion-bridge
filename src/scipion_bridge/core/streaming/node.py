@@ -4,6 +4,16 @@ from streamz import Stream
 from typing import Optional, List, Dict, Any
 
 
+class FlushSignal:
+    """Sentinel object emitted through the stream graph to trigger state flushing."""
+
+    def __repr__(self) -> str:
+        return "<FLUSH_SIGNAL>"
+
+
+FLUSH = FlushSignal()
+
+
 class Node(metaclass=abc.ABCMeta):
     """
     Base class for all nodes in the streaming computational graph.

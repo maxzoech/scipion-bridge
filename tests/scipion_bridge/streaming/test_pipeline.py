@@ -41,14 +41,25 @@ def test_basic_stream():
     assert len(received) == 2
 
 
-def test_disallow_lists():
-    source = Source("data")
-    stream = Pipeline.from_sink(source)
+def test_pipeline_context_manager_autoflush():
+    received = []
 
-    with pytest.raises(TypeError, match="Python lists are not supported"):
-        stream.send(data=[1, 2, 3])
+    source = Source("items")
+    sink_node = source.chunk(10).sink(lambda x: received.append(x))
+
+    p = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=42))
+
+    with Pipeline.from_sink(sink_node) as pipe:
+        pipe.send(items=B.Set[Particle]([p]))
+        assert len(received) == 0  # 1 element buffered for chunk_size=10
+
+    # Upon exiting context manager, auto-flush happens
+    assert len(received) == 1
+    assert len(received[0]) == 1
+    assert received[0][0].metadata.foo == 42
 
 
 if __name__ == "__main__":
     test_basic_stream()
     test_disallow_lists()
+    test_pipeline_context_manager_autoflush()

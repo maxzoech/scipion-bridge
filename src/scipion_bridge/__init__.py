@@ -11,7 +11,7 @@ from .core.protocol import Protocol, Field, Input
 from .core import struct
 from .core.struct import Struct, Set, Array
 
-from .core.streaming.ops import Op
+from .core.streaming.ops import Op, FlushSignal, FLUSH
 
 from .core.typed import core_resolvers
 lift_resolvers(core_resolvers, proxy)
@@ -36,5 +36,7 @@ __all__ = [
     "Struct",
     "Set",
     "Array",
-    "Op"
+    "Op",
+    "FlushSignal",
+    "FLUSH",
 ]

@@ -190,6 +190,7 @@ def convert_protocol_to_scipion3_protocol(
 
 
         def _finalizeOutput(self):
+            self._stepsPipeline.flush()
             print("Finalize the output here...")
 
 
