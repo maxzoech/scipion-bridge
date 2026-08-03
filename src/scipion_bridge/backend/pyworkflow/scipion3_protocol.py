@@ -276,6 +276,6 @@ def convert_protocol_to_scipion3_protocol(
     # Copy the module and class name from the source protocol so Scipion class registration finds it
     ScipionProtocolWrapper.__module__ = protocol.__module__
     ScipionProtocolWrapper.__name__ = protocol.__class__.__name__
-    ScipionProtocolWrapper.__qualname__ = protocol.__class__.__name__
+    ScipionProtocolWrapper.__qualname__ = protocol.__class__.__qualname__
 
     return ScipionProtocolWrapper

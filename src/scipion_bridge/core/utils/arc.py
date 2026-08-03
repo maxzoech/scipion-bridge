@@ -30,11 +30,16 @@ class FileReferenceCounter:
 
         return new_path
 
+    def register_temporary_file(self, path: os.PathLike) -> Path:
+        path_obj = Path(path)
+        self.references[path_obj] = 0
+        return path_obj
+
     def add_reference(self, path: os.PathLike):
         if path not in self.references:
             self.references[path] = 1
             warnings.warn(
-                "Counting references for non-temporary files is deprecated (these files are most likely created by the user at a persistent location, so reference counting would delete them)",
+                f"Counting references for non-temporary file at {path} is deprecated (these files are most likely created by the user at a persistent location, so reference counting would delete them)",
                 DeprecationWarning,
             )
         else:

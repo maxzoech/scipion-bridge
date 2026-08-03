@@ -1,7 +1,8 @@
+import logging
 import os
 import warnings
 from pathlib import Path
-
+import tempfile
 
 from scipion_bridge.core.typed.resolve import (
     current_registry,
@@ -16,6 +17,7 @@ from scipion_bridge.core.utils.arc import manager as arc_manager
 import pytest
 from typing import Optional, Tuple
 
+temp_base_dir = tempfile.gettempdir()
 
 class TempFileMock:
 
@@ -23,7 +25,8 @@ class TempFileMock:
         self.count = 0
 
     def new_temporary_file(self, suffix: str) -> os.PathLike:
-        file = f"/tmp/temp_file_{self.count}{suffix}"
+        
+        file = f"{temp_base_dir}/temp_file_{self.count}{suffix}"
         self.count += 1
 
         return Path(file)
@@ -47,7 +50,7 @@ class TextFile(sb.Proxy):
 
 
 @pytest.mark.filterwarnings(
-    "ignore:Counting references for non-temporary files is deprecated"
+    "ignore:Counting references for non-temporary file.*is deprecated"
 )
 def test_conversion_to_typed_proxy():
 
@@ -75,16 +78,17 @@ def test_conversion_to_typed_proxy():
 
         del typed, untyped
 
-    proxy_obj = sb.Proxy(Path("/tmp/test_file"), managed=True)
+    proxy_obj = sb.Proxy(Path(f"{temp_base_dir}/test_file"), managed=True)
     with open(proxy_obj.path, mode="w") as f:
         f.write("Hello World")
 
     proxy_obj = proxy_obj.typed(astype=TextFile)
-    assert arc_manager.is_tracked(Path("/tmp/test_file")) == False
-    assert arc_manager.is_tracked(Path("/tmp/test_file.txt")) == True
+    assert arc_manager.is_tracked(Path(f"{temp_base_dir}/test_file")) == False
+    assert arc_manager.is_tracked(Path(f"{temp_base_dir}/test_file.txt")) == True
 
     with open(proxy_obj.path, mode="r") as f:
         assert f.read() == "Hello World"
+
 
 
 def test_resolve_proxy_output():
@@ -102,7 +106,7 @@ def test_resolve_proxy_output():
 
     with container.temp_file_provider.override(temp_file_mock):
         p = current_registry().resolve(sb.Output(Volume), astype=sb.Proxy)
-        assert str(p.path) == "/tmp/temp_file_0.vol"
+        assert str(p.path) == f"{temp_base_dir}/temp_file_0.vol"
 
         del p
 
@@ -180,8 +184,8 @@ def test_resolve_proxy_multi_output():
     with container.temp_file_provider.override(temp_file_mock):
         output: Tuple[sb.Proxy, sb.Proxy] = foo()  # type: ignore
 
-        assert str(output[0].path) == "/tmp/temp_file_0.vol"
-        assert str(output[1].path) == "/tmp/temp_file_1.vol"
+        assert str(output[0].path) == f"{temp_base_dir}/temp_file_0.vol"
+        assert str(output[1].path) == f"{temp_base_dir}/temp_file_1.vol"
 
 
 def test_nested_proxies():
@@ -211,7 +215,7 @@ def test_nested_proxies():
     with container.temp_file_provider.override(temp_file_mock):
         output = func_2(sb.Output(TextFile))
         assert isinstance(output, sb.Proxy)
-        assert str(output.path) == "/tmp/temp_file_0.txt"
+        assert str(output.path) == f"{temp_base_dir}/temp_file_0.txt"
         assert output.managed == True
 
         with open(output.path) as f:
@@ -266,7 +270,7 @@ def test_proxify_with_params():
     ):
 
         assert inputs == "/path/to/inputs.txt"
-        assert outputs == "/tmp/temp_file_0.vol"
+        assert outputs == f"{temp_base_dir}/temp_file_0.vol"
         assert bar == "1 2 3"
         assert value == "42"
 
@@ -286,7 +290,7 @@ def test_proxify_with_params():
         out = foo(Path("/path/to/inputs.txt"), bar=(1, 2, 3), value=42)
 
         assert out is not None
-        assert str(out.path) == "/tmp/temp_file_0.vol"
+        assert str(out.path) == f"{temp_base_dir}/temp_file_0.vol"
 
         del out
 
@@ -325,14 +329,14 @@ def test_combine_proxify_and_resolve():
 
     @resolver
     def resolve_numpy_to_my_volume(value: np.ndarray) -> MyVolume:
-        return MyVolume(Path("/tmp/temp_file_0.custom"), managed=True)
+        return MyVolume(Path(f"{temp_base_dir}/temp_file_0.custom"), managed=True)
 
     data = np.random.uniform(1.0, 1.0, size=[16, 16, 16])
 
     @sb.proxify
     def foo(bar: sb.Resolve[str], outputs: sb.ResolveProxy[MyVolume] = sb.Output(MyVolume)):
         assert bar == "42.0"
-        assert outputs == "/tmp/temp_file_0.custom"
+        assert outputs == f"{temp_base_dir}/temp_file_0.custom"
 
     container = Container()
     container.wire(
@@ -347,10 +351,10 @@ def test_combine_proxify_and_resolve():
 
     with container.temp_file_provider.override(temp_file_mock):
         output_new = foo(42.0)
-        assert str(output_new.path) == "/tmp/temp_file_0.custom"  # type: ignore
+        assert str(output_new.path) == f"{temp_base_dir}/temp_file_0.custom"  # type: ignore
 
         output_numpy = foo(bar=42.0, outputs=data)
-        assert str(output_numpy.path) == "/tmp/temp_file_0.custom"  # type: ignore
+        assert str(output_numpy.path) == f"{temp_base_dir}/temp_file_0.custom"  # type: ignore
 
         del output_new, output_numpy
 
@@ -382,6 +386,84 @@ def test_named_proxy():
         foo(Path("/path/to/position.pos"))
 
 
+def test_proxy_group_basic():
+    group = sb.ParticleStackProxy(Path("/data/my_particles"), managed=False)
+    assert group.base_path == Path("/data/my_particles")
+    assert group.metadata.path == Path("/data/my_particles.star")
+    assert group.particle_stack.path == Path("/data/my_particles.mrcs")
+    assert group.primary_proxy == group.metadata
+    assert group.path == Path("/data/my_particles.star")
+
+
+def test_proxy_group_new_temporary_proxy():
+    container = Container()
+    container.wire(
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
+    )
+
+    temp_file_mock = TempFileMock()
+    with container.temp_file_provider.override(temp_file_mock):
+        group = sb.ParticleStackProxy.new_temporary_proxy()
+        assert group.managed == True
+        assert group.metadata.managed == True
+        assert group.particle_stack.managed == True
+
+        assert arc_manager.get_count(group.metadata.path) == 1
+        assert arc_manager.get_count(group.particle_stack.path) == 1
+
+        del group
+
+@pytest.mark.filterwarnings(
+    "ignore:Counting references for non-temporary file.*is deprecated"
+)
+def test_untyped_proxy_to_proxy_group_conversion():
+    untyped = sb.Proxy(Path("/data/particles_raw"), managed=True)
+    group = untyped.typed(astype=sb.ParticleStackProxy)
+
+    assert isinstance(group, sb.ParticleStackProxy)
+    assert group.base_path == Path("/data/particles_raw")
+    assert group.metadata.path == Path("/data/particles_raw.star")
+    assert group.particle_stack.path == Path("/data/particles_raw.mrcs")
+
+
+def test_proxify_with_proxy_group():
+    @sb.proxify
+    def process_particles(
+        stack_input: sb.ResolveProxy[sb.ParticleStackProxy],
+        stack_output: sb.ResolveProxy = sb.Output(sb.ParticleStackProxy),
+    ):
+        assert stack_input == "/path/to/input_particles.star"
+        # The output path will be a temp file base path without extension
+        assert "temp_file" in stack_output
+
+        print(f"Input: {stack_input}, Output: {stack_output}")
+
+    container = Container()
+    container.wire(
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
+    )
+
+    temp_file_mock = TempFileMock()
+    with container.temp_file_provider.override(temp_file_mock):
+        input_group = sb.ParticleStackProxy(Path("/path/to/input_particles"))
+        out_group = process_particles(input_group)
+
+        assert isinstance(out_group, sb.ParticleStackProxy)
+        assert out_group.managed == True
+        assert str(out_group.metadata.path).endswith(".star")
+        assert str(out_group.particle_stack.path).endswith(".mrcs")
+
+
 if __name__ == "__main__":
-    # logging.basicConfig(level=logging.DEBUG)
-    test_combine_proxify_and_resolve()
+    logging.basicConfig(level=logging.DEBUG)
+    test_proxify_with_proxy_group()
+
+

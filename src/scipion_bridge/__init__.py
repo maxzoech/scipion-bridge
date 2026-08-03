@@ -1,7 +1,8 @@
 from .core.typed.resolve import resolver, resolve_params, resolve, lift_resolvers, Resolve
 
 from .core.typed import proxy
-from .core.typed.proxy import proxify, Proxy, Output, ResolveProxy, namedproxy
+from .core.typed.proxy import proxify, Proxy, ProxyGroup, Output, ResolveProxy, namedproxy
+from .single_particle.proxies import ParticleStackProxy, StarfileProxy, MRCStackProxy
 from .core.environment.domain import Domain
 from .core.utils.shell import shell_command
 
@@ -23,6 +24,10 @@ __all__ = [
     "Resolve",
     "proxify",
     "Proxy",
+    "ProxyGroup",
+    "ParticleStackProxy",
+    "StarfileProxy",
+    "MRCStackProxy",
     "Output",
     "ResolveProxy",
     "namedproxy",

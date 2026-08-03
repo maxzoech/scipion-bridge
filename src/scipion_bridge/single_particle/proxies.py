@@ -1,9 +1,24 @@
 
 
-from ..core.typed.proxy import Proxy
+from ..core.typed.proxy import Proxy, ProxyGroup
 
-class ParticleStackProxy(Proxy):
+
+class StarfileProxy(Proxy):
 
     @classmethod
     def file_ext(cls):
-        pass
+        return ".star"
+
+
+class MRCStackProxy(Proxy):
+
+    @classmethod
+    def file_ext(cls):
+        return ".mrcs"
+
+
+class ParticleStackProxy(ProxyGroup):
+    _primary_field = "metadata"
+
+    metadata: StarfileProxy
+    particle_stack: MRCStackProxy
