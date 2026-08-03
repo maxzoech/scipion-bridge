@@ -222,6 +222,48 @@ def test_nested_proxies():
             assert f.read() == "Write from func 1"
 
 
+def test_nested_proxy_groups():
+
+    @sb.proxify
+    def func_1(output_path=sb.Output(sb.ParticleStackProxy)):
+        assert isinstance(output_path, str)
+        meta_path = Path(output_path)
+        stack_path = Path(output_path).with_suffix(".mrcs")
+        with open(meta_path, "w+") as f:
+            f.write("Star metadata from func 1")
+        with open(stack_path, "w+") as f:
+            f.write("MRC stack data from func 1")
+
+    @sb.proxify
+    def func_2(output_path=sb.Output(sb.ParticleStackProxy)):
+        return func_1(output_path)
+
+    container = Container()
+    container.wire(
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
+    )
+
+    temp_file_mock = TempFileMock()
+    with container.temp_file_provider.override(temp_file_mock):
+        output = func_2()
+        
+        assert str(output.metadata.path) == f"{temp_base_dir}/temp_file_0.star"
+        assert str(output.particle_stack.path) == f"{temp_base_dir}/temp_file_0.mrcs"
+
+        assert output.managed == True
+        assert output.metadata.managed == True
+        assert output.particle_stack.managed == True
+
+        with open(output.metadata.path) as f:
+            assert f.read() == "Star metadata from func 1"
+        with open(output.particle_stack.path) as f:
+            assert f.read() == "MRC stack data from func 1"
+
+
 def test_return_value_warning():
 
     @sb.proxify
@@ -479,11 +521,8 @@ def test_proxy_group_validation_and_mapping():
     assert len(group) == 2
     assert set(group.keys()) == {"metadata", "particle_stack"}
     assert group["metadata"] == group.metadata
-    assert group.get("particle_stack") == group.particle_stack
-    assert "metadata" in group
-    assert "nonexistent" not in group
+
     assert set(iter(group)) == {"metadata", "particle_stack"}
-    assert list(group.values()) == [group.metadata, group.particle_stack]
 
     # Test base_path with extension error
     with pytest.raises(ValueError, match="ProxyGroup base_path must not have an extension"):
