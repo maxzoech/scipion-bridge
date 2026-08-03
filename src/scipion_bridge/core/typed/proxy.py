@@ -18,8 +18,7 @@ from ..utils.arc import manager as arc_manager
 
 from .resolve import current_registry, resolve_params, resolver, Registry
 from abc import ABC, ABCMeta, abstractmethod
-from collections.abc import Mapping, Iterator
-from typing import Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast, Callable, get_type_hints
+from typing import Dict, List, Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast, Callable, get_type_hints, Mapping, Iterator
 from typing_extensions import TypeAlias, TypeVar, get_args, get_origin, ParamSpec
 
 
@@ -127,7 +126,7 @@ class Proxy(metaclass=ProxyMetaclass):
             return ext
 
     @classmethod
-    def get_referenced_paths(cls, path_str: str) -> list[Path]:
+    def get_referenced_paths(cls, path_str: str) -> List[Path]:
         """Return the list of filesystem paths associated with this proxy class."""
         return [Path(path_str)]
 
@@ -248,7 +247,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
             setattr(self, field_name, child_proxy)
 
     @classmethod
-    def get_proxy_fields(cls) -> dict[str, Type[Proxy]]:
+    def get_proxy_fields(cls) -> Dict[str, Type[Proxy]]:
         """Return a dictionary mapping child proxy field names to their Proxy subclass types."""
         hints = get_type_hints(cls)
         return {
@@ -258,7 +257,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         }
 
     @classmethod
-    def get_field_paths(cls, base_path: os.PathLike) -> dict[str, Path]:
+    def get_field_paths(cls, base_path: os.PathLike) -> Dict[str, Path]:
         """Return a dictionary mapping each proxy field name to its corresponding Path."""
         base_path = Path(base_path)
         proxy_fields = cls.get_proxy_fields()
@@ -268,7 +267,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         }
 
     @classmethod
-    def get_referenced_paths(cls, path_str: str) -> list[Path]:
+    def get_referenced_paths(cls, path_str: str) -> List[Path]:
         """Return the list of child proxy paths associated with this ProxyGroup class."""
         base_name, _ = os.path.splitext(path_str)
         return list(cls.get_field_paths(base_name).values())
