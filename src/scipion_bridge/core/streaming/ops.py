@@ -38,7 +38,7 @@ class Source(Op):
     Entry point input stream node.
     """
 
-    def __init__(self, name: Optional[str] = None):
+    def __init__(self, name: str):
         super().__init__(upstream=[])
         self.name = name
 

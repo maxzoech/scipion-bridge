@@ -13,14 +13,17 @@ from ...core.environment.domain import Domain
 from ..standalone.container import Container
 from typing import Optional, Any
 
+
 class _PyWorkflowExecProvider(ShellExecProvider):
 
     def __init__(self, backend, conda_env: str):
         try:
-            import pwem # type: ignore
-            from pyworkflow import Config # type: ignore
+            import pwem  # type: ignore
+            from pyworkflow import Config  # type: ignore
         except ImportError:
-            raise ImportError("Using scipion bridge with scipion requires pyworkflow option. Install it using pip install \"scipion-bridge[pyworkflow]\"")
+            raise ImportError(
+                'Using scipion bridge with scipion requires pyworkflow option. Install it using pip install "scipion-bridge[pyworkflow]"'
+            )
 
         self.backend = backend
         self.conda_env = conda_env
@@ -41,6 +44,7 @@ class _PyWorkflowExecProvider(ShellExecProvider):
             self.backend.runJob(self._conda_epilogue, cmd, numberOfMpi=1)
         else:
             self.backend.runJob(cmd, "", numberOfMpi=1)
+
 
 class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
 
@@ -71,38 +75,121 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
         except ImportError:
             raise ImportError(
                 "Using Zarr storage with pyworkflow requires zarr. "
-                "Install it using pip install \"scipion-bridge[pyworkflow]\""
+                'Install it using pip install "scipion-bridge[pyworkflow]"'
             )
 
         try:
             from zarr.storage import LocalStore
+
             store = LocalStore()
             return zarr.group(store=store)
         except (ImportError, AttributeError):
             return zarr.group()
-
 
     def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
         if not arrays:
             raise ValueError("concat requires at least one array")
 
         import zarr
+
         first = arrays[0]
         target = zarr.array(first)
-        
+
         for a in arrays[1:]:
             target.append(a, axis=axis)
 
         return target
 
 
-def configure_pyworkflow_env(backend, *, conda_env: str, modules=None, packages=None):
+from enum import Enum
+from typing import Optional, Any, Dict, Type, Union, get_args
+from ...core.environment.protocol_config import ProtocolConfigurationProvider
+from ...core.protocol.protocol_base import (
+    _ProtocolTypeConfiguration,
+    ProtocolConfiguration,
+)
+
+
+def convert_scipion_to_python(val: Any, dtype: Type) -> Any:
+    """Converts a value retrieved from a PyWorkflow/Scipion Param to its declared Python type."""
+    if hasattr(val, "get") and callable(getattr(val, "get", None)):
+        val = val.get()
+
+    if val is None:
+        return None
+
+    if isinstance(dtype, type) and issubclass(dtype, Enum):
+        if isinstance(val, int):
+            return list(dtype)[val]
+        return dtype(val)
+
+    if dtype in (int, float, bool, str):
+        return dtype(val)
+
+    return val
+
+
+class _PyWorkflowProtocolConfigurationProvider(ProtocolConfigurationProvider):
+    """Provider for retrieving field values from PyWorkflow/Scipion protocol instances."""
+
+    def __init__(
+        self,
+        backend: Any,
+        configuration: Optional[
+            Union[_ProtocolTypeConfiguration, ProtocolConfiguration, Dict[str, Type]]
+        ] = None,
+    ):
+        self.backend = backend
+        self.configuration = configuration
+
+    def _get_dtype(self, name: str) -> Optional[Type]:
+        assert isinstance(self.configuration, _ProtocolTypeConfiguration)
+
+        type_hint = self.configuration.inputs.get(
+            name
+        ) or self.configuration.parameters.get(name)
+        args = get_args(type_hint)
+
+        return args[0]
+
+    def get_value(self, name: str, default: Any = None) -> Any:
+        assert hasattr(
+            self.backend, name
+        ), f"Attribute '{name}' was not found on Scipion protocol instance '{self.backend}'."
+
+        val = getattr(self.backend, name)
+        dtype = self._get_dtype(name)
+
+        return convert_scipion_to_python(val, dtype)
+
+
+def configure_pyworkflow_env(
+    backend,
+    *,
+    conda_env: str,
+    configuration: Optional[
+        Union[_ProtocolTypeConfiguration, ProtocolConfiguration, Dict[str, Type]]
+    ] = None,
+    modules=None,
+    packages=None,
+):
     from dependency_injector import providers
 
     container = Container(
-        shell_exec=providers.Factory(_PyWorkflowExecProvider, backend=backend, conda_env=conda_env),
-        temp_file_provider=providers.Factory(_PyWorkflowTempFileProvider, backend=backend),
-        storage_provider=providers.Factory(_PyWorkflowZarrStorageProvider, backend=backend),
+        shell_exec=providers.Factory(
+            _PyWorkflowExecProvider, backend=backend, conda_env=conda_env
+        ),
+        temp_file_provider=providers.Factory(
+            _PyWorkflowTempFileProvider, backend=backend
+        ),
+        storage_provider=providers.Factory(
+            _PyWorkflowZarrStorageProvider, backend=backend
+        ),
+        protocol_config_provider=providers.Factory(
+            _PyWorkflowProtocolConfigurationProvider,
+            backend=backend,
+            configuration=configuration,
+        ),
     )
 
     container.wire(modules=modules, packages=packages)

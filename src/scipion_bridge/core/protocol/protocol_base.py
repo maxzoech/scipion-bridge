@@ -39,10 +39,9 @@ class Protocol(metaclass=abc.ABCMeta):
         def _build_fields(source_dict, field_class):
             def _get_item(key, type_hint):
                 try:
-                    field = getattr(self, key)
+                    field = getattr(type(self), key)
                 except AttributeError:
-                    dtype = get_args(type_hint)[0]  # type: ignore
-                    field = field_class[dtype](optional=False)
+                    field = field_class(optional=False)
                 return (key, field)
                 
             return OrderedDict(_get_item(k, v) for k, v in source_dict.items())

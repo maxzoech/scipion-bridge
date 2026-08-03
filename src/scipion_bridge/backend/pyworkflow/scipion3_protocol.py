@@ -94,7 +94,7 @@ def convert_protocol_to_scipion3_protocol(
                 f"The type {dtype} is not supported in the Scipion 3 backend."
             )
 
-        kwargs.setdefault("default", element.default)
+        kwargs.setdefault("default", getattr(element, "default", None))
 
         return param_type, kwargs
 
@@ -202,7 +202,8 @@ def convert_protocol_to_scipion3_protocol(
             configure_pyworkflow_env(
                 backend=self,
                 conda_env=conda_env,
-                modules=[__name__],
+                configuration=protocol._configuration,
+                modules=[__name__, type(protocol).__module__],
                 packages=["scipion_bridge"],
             )
 
