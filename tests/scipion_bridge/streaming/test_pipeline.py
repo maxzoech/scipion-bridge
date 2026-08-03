@@ -61,5 +61,4 @@ def test_pipeline_context_manager_autoflush():
 
 if __name__ == "__main__":
     test_basic_stream()
-    test_disallow_lists()
     test_pipeline_context_manager_autoflush()

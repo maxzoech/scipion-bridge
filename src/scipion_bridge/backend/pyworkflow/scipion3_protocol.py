@@ -172,6 +172,9 @@ def convert_protocol_to_scipion3_protocol(
         def _validateProtocolSetup(self):
             protocol.validate_protocol_configuration()
 
+        def _runProtocolProlog(self):
+            protocol.setup()
+
         def _submitDataStep(self, argname: str, inputData: Union[Any, List[Any]]):
             if not isinstance(inputData, list):
                 raise NotImplementedError
@@ -208,6 +211,8 @@ def convert_protocol_to_scipion3_protocol(
             )
 
             self._insertFunctionStep(self._validateProtocolSetup)
+            self._insertFunctionStep(self._runProtocolProlog)
+
             self._insertFunctionStep(self._convertInput)
 
             def _isFinished(key: str, *, inputs, inputIDs) -> bool:

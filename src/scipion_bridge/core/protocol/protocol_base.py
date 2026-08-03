@@ -60,6 +60,10 @@ class Protocol(metaclass=abc.ABCMeta):
     def __init__(self) -> None:
         pass
 
+    def setup(self):
+        """Optional setup method for protocol initialization."""
+        pass
+
     @abc.abstractmethod
     def steps(self) -> Op:
         pass

@@ -34,14 +34,14 @@ class _PyWorkflowExecProvider(ShellExecProvider):
         act_cmd = env_act_cmd.replace(scipion_home, "", 1)
         base_env_act_cmd = pwem.Plugin.getCondaActivationCmd()
 
-        self._conda_epilogue = f"{base_env_act_cmd} {act_cmd}"
+        self._conda_activation_cmd = f"{base_env_act_cmd} {act_cmd} && "
 
     def run(self, func_name: str, domain: "Domain", args: List[str], run_args):
         del run_args
 
         cmd = " ".join(args)
         if domain.isolated:
-            self.backend.runJob(self._conda_epilogue, cmd, numberOfMpi=1)
+            self.backend.runJob(self._conda_activation_cmd, cmd, numberOfMpi=1)
         else:
             self.backend.runJob(cmd, "", numberOfMpi=1)
 
