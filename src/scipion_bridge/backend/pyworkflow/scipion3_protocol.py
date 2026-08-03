@@ -29,9 +29,9 @@ def convert_protocol_to_scipion3_protocol(
     try:
         import pwem  # type: ignore
         from pwem.protocols import ProtProcessParticles  # type: ignore
-        from pyworkflow.protocol import ProtStreamingBase
+        from pyworkflow.protocol import ProtStreamingBase # type: ignore
         from pwem.objects import SetOfParticles, SetOfParticlesFlex, ParticleFlex, SetOfVolumes, Volume  # type: ignore
-        import pyworkflow.protocol.constants as cons
+        import pyworkflow.protocol.constants as cons # type: ignore
         from pyworkflow.constants import BETA  # type: ignore
         from pyworkflow.plugin import Domain  # type: ignore
         from pwem.constants import ALIGN_PROJ, ALIGN_NONE  # type: ignore
