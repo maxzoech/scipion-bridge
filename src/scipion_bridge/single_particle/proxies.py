@@ -18,7 +18,9 @@ class MRCStackProxy(Proxy):
 
 
 class ParticleStackProxy(ProxyGroup):
-    _primary_field = "metadata"
-
     metadata: StarfileProxy
     particle_stack: MRCStackProxy
+
+    @property
+    def primary_proxy(self) -> Proxy:
+        return self.metadata

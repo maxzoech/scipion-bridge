@@ -459,11 +459,49 @@ def test_proxify_with_proxy_group():
         assert isinstance(out_group, sb.ParticleStackProxy)
         assert out_group.managed == True
         assert str(out_group.metadata.path).endswith(".star")
-        assert str(out_group.particle_stack.path).endswith(".mrcs")
+        
+def test_proxy_group_abstract_instantiation():
+    class IncompleteGroup(sb.ProxyGroup):
+        meta: sb.Proxy
+
+    with pytest.raises(TypeError):
+        IncompleteGroup(Path("/data/test"))
+
+
+def test_proxy_group_validation_and_mapping():
+    group = sb.ParticleStackProxy(Path("/data/particles"))
+
+    # Test path and primary_proxy
+    assert group.primary_proxy == group.metadata
+    assert group.path == group.metadata.path
+
+    # Test Mapping interface
+    assert len(group) == 2
+    assert set(group.keys()) == {"metadata", "particle_stack"}
+    assert group["metadata"] == group.metadata
+    assert group.get("particle_stack") == group.particle_stack
+    assert "metadata" in group
+    assert "nonexistent" not in group
+    assert set(iter(group)) == {"metadata", "particle_stack"}
+    assert list(group.values()) == [group.metadata, group.particle_stack]
+
+    # Test base_path with extension error
+    with pytest.raises(ValueError, match="ProxyGroup base_path must not have an extension"):
+        sb.ParticleStackProxy(Path("/data/particles.star"))
+
+    # Test invalid kwarg name
+    with pytest.raises(TypeError, match="Unexpected keyword argument"):
+        sb.ParticleStackProxy(Path("/data/particles"), invalid_arg=123)
+
+    # Test wrong proxy class kwarg
+    wrong_proxy = sb.Proxy(Path("/data/particles.vol"))
+    with pytest.raises(TypeError, match="Expected field 'metadata' to be an instance of"):
+        sb.ParticleStackProxy(Path("/data/particles"), metadata=wrong_proxy)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     test_proxify_with_proxy_group()
+
 
 

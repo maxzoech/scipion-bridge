@@ -17,6 +17,8 @@ from ..utils.func_params import extract_func_params
 from ..utils.arc import manager as arc_manager
 
 from .resolve import current_registry, resolve_params, resolver, Registry
+from abc import ABC, abstractmethod
+from collections.abc import Mapping, Iterator
 from typing import Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast, Callable, get_type_hints
 from typing_extensions import TypeAlias, TypeVar, get_args, get_origin, ParamSpec
 
@@ -192,26 +194,45 @@ class Proxy(metaclass=ProxyMetaclass):
         return f"<{self.__class__.__name__} for {self.path} ({is_owned})>"
 
 
-class ProxyGroup:
-    _primary_field: Optional[str] = None
+class ProxyGroup(Mapping[str, Proxy], ABC):
+    """Abstract base class representing a grouped collection of Proxy objects.
 
-    def __init__(self, base_path: os.PathLike, managed=False, **kwargs):
+    Subclasses must annotate child proxy fields with Proxy types and implement
+    the primary_proxy abstract property.
+    """
+
+    def __init__(self, base_path: os.PathLike, managed: bool = False, **kwargs: Any) -> None:
         self.base_path = Path(base_path)
-        assert (
-            self.base_path.suffix == ""
-        ), f"ProxyGroup base_path must not have an extension, but received '{base_path}'"
+        if self.base_path.suffix != "":
+            raise ValueError(
+                f"ProxyGroup base_path must not have an extension, but received '{base_path}'"
+            )
 
         self.managed = managed
         self._proxies: dict[str, Proxy] = {}
 
-        hints = get_type_hints(self.__class__)
+        proxy_fields = self.get_proxy_fields()
+
+        extra_keys = set(kwargs.keys()) - set(proxy_fields.keys())
+        if extra_keys:
+            raise TypeError(
+                f"Unexpected keyword argument(s) for {self.__class__.__name__}: "
+                f"{', '.join(sorted(extra_keys))}"
+            )
+
         field_paths = self.get_field_paths(self.base_path)
 
-        for field_name, child_path in field_paths.items():
-            child_proxy = kwargs.get(field_name)
-
-            if not isinstance(child_proxy, Proxy):
-                proxy_cls = hints[field_name]
+        for field_name, proxy_cls in proxy_fields.items():
+            child_path = field_paths[field_name]
+            if field_name in kwargs:
+                child_proxy = kwargs[field_name]
+                
+                if not isinstance(child_proxy, proxy_cls):
+                    raise TypeError(
+                        f"Expected field '{field_name}' to be an instance of "
+                        f"{proxy_cls.__name__}, got {type(child_proxy).__name__}"
+                    )
+            else:
                 child_proxy = proxy_cls(child_path, managed=self.managed)
 
             self._proxies[field_name] = child_proxy
@@ -220,30 +241,34 @@ class ProxyGroup:
         super().__init__()
 
     @classmethod
-    def get_field_paths(cls, base_path: os.PathLike) -> dict[str, Path]:
-        """Return a dictionary mapping each proxy field name to its corresponding Path."""
-        base_path = Path(base_path)
+    def get_proxy_fields(cls) -> dict[str, Type[Proxy]]:
+        """Return a dictionary mapping child proxy field names to their Proxy subclass types."""
         hints = get_type_hints(cls)
         return {
-            field_name: Path(f"{base_path}{proxy_cls.extension() or ''}")
+            field_name: proxy_cls
             for field_name, proxy_cls in hints.items()
             if isinstance(proxy_cls, type) and issubclass(proxy_cls, Proxy)
         }
 
+    @classmethod
+    def get_field_paths(cls, base_path: os.PathLike) -> dict[str, Path]:
+        """Return a dictionary mapping each proxy field name to its corresponding Path."""
+        base_path = Path(base_path)
+        proxy_fields = cls.get_proxy_fields()
+        return {
+            field_name: Path(f"{base_path}{proxy_cls.extension() or ''}")
+            for field_name, proxy_cls in proxy_fields.items()
+        }
+
     @property
-    def primary_proxy(self) -> Optional[Proxy]:
-        if self._primary_field and hasattr(self, self._primary_field):
-            return getattr(self, self._primary_field)
-        if self._proxies:
-            return next(iter(self._proxies.values()))
-        return None
+    @abstractmethod
+    def primary_proxy(self) -> Proxy:
+        """Return the primary proxy instance for this group."""
+        ...
 
     @property
     def path(self) -> Path:
-        primary = self.primary_proxy
-        if primary is not None:
-            return primary.path
-        return self.base_path
+        return self.primary_proxy.path
 
     @classmethod
     @inject
@@ -257,19 +282,31 @@ class ProxyGroup:
         base_path = Path(base_temp_file)
 
         children = {}
-        hints = get_type_hints(cls)
-        for field_name, proxy_cls in hints.items():
-            if isinstance(proxy_cls, type) and issubclass(proxy_cls, Proxy):
-                children[field_name] = proxy_cls.new_temporary_proxy(base_path=base_path)
+        for field_name, proxy_cls in cls.get_proxy_fields().items():
+            children[field_name] = proxy_cls.new_temporary_proxy(base_path=base_path)
 
         group = cls(base_path, managed=True, **children)
         return group
 
+    def __getitem__(self, key: str) -> Proxy:
+        return self._proxies[key]
 
-    def __str__(self):
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._proxies)
+
+    def __len__(self) -> int:
+        return len(self._proxies)
+
+    def __repr__(self) -> str:
+        is_owned = "managed" if self.managed else "unmanaged"
+        children = ", ".join(f"{k}={v!r}" for k, v in self._proxies.items())
+        return f"<{self.__class__.__name__} base='{self.base_path}' ({children}) [{is_owned}]>"
+
+    def __str__(self) -> str:
         is_owned = "managed" if self.managed else "unmanaged"
         children = ", ".join(f"{k}={v.path.name}" for k, v in self._proxies.items())
         return f"<{self.__class__.__name__} base='{self.base_path}' ({children}) [{is_owned}]>"
+
 
 
 class Output(Generic[T]):
