@@ -5,15 +5,14 @@ from .particle import Particle
 from ..core.typed.resolve import resolver
 from ..core import struct
 
-import pandas as pd
-import mrcfile
-import starfile
-
 @resolver
 def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackProxy:
     """
     Resolve a ParticleStackProxy from a Particle object.
     """
+    import pandas as pd
+    import mrcfile
+    import starfile
 
     new_proxy = ParticleStackProxy.new_temporary_proxy()
 

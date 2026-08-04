@@ -258,7 +258,7 @@ class Set(Generic[T], SchemaConvertible):
 
         return start, stop
 
-    def _write_array(self, path: str, index: int, arr: np.ndarray) -> None:
+    def _write_array(self, path: str, index: int, arr) -> None:
         """Write an array value to Zarr slice at path and index."""
 
         if self._view is not None:
@@ -283,7 +283,7 @@ class Set(Generic[T], SchemaConvertible):
             else:
                 z_arr[target_indices] = arr
 
-    def _get_leaf_array(self, path: str) -> np.ndarray:
+    def _get_leaf_array(self, path: str):
         """Get the numpy array for a leaf path, delegating to owner set if this is a proxy view."""
         if self._view is not None:
             full_key = f"{self._view.prefix}{path}"
@@ -410,7 +410,7 @@ class Set(Generic[T], SchemaConvertible):
 
         return owner._zarr_group[full_key][indices]
 
-    def _set_leaf_slice(self, path: str, value: np.ndarray):
+    def _set_leaf_slice(self, path: str, value):
         """Set a slice of the underlying Zarr array for a given path, delegating to owner set if this is a proxy view."""
         if not path in self.schema().fields:
             raise KeyError(f"Name '{path}' not found in struct {self.item_type().__name__}.")
