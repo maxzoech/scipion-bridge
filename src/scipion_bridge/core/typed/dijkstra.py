@@ -96,7 +96,7 @@ def find_shortest_path(
         if element.value == destination:
             break
     else:
-        raise nx.NetworkXNoPath
+        raise nx.NetworkXNoPath()
 
     # Backtrack path
     def _find_path(path: List):

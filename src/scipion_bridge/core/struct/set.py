@@ -360,6 +360,26 @@ class Set(Generic[T], SchemaConvertible):
         for path, _ in self.schema().tree_iter():
             self._zarr_group[path][start:stop] = value._zarr_group[path][:]
 
+    def _get_leave_slice(self, path: str):
+        """Get a slice of the underlying Zarr array for a given path, delegating to owner set if this is a proxy view."""
+        if not path in self.schema().fields:
+            raise KeyError(f"Name '{path}' not found in struct {self.item_type().__name__}.")
+
+        entry = self.schema().fields[path]
+        if not isinstance(entry, (_ArraySetEntry, _ArrayEntry)):
+            raise TypeError(f"Field '{path}' is not an array field and cannot be sliced.")
+
+        if self._view is not None:
+            full_key = f"{self._view.prefix}{path}"
+            indices = self._view.indices
+        else:
+            full_key = path
+            indices = slice(None)
+
+        return self._zarr_group[full_key][indices]
+
+        
+
     def __len__(self):
         return self._capacity
 
@@ -384,7 +404,10 @@ class Set(Generic[T], SchemaConvertible):
     def __getitem__(self, key):
         if isinstance(key, slice):
             return self._get_slice(key)
-        return self._get_el(self._normalize_index(key))
+        elif isinstance(key, str):
+            return self._get_leave_slice(key)
+        else:
+            return self._get_el(self._normalize_index(key))
 
     def __setitem__(self, key, value):
         if isinstance(key, slice):

@@ -71,7 +71,7 @@ class FileReferenceCounter:
     def get_count(self, path: os.PathLike):
         if not self.is_tracked(path):
             warnings.warn(
-                "Reference count requested for untracked path {path}; returned 0",
+                f"Reference count requested for untracked path {path}; returned 0",
                 UserWarning,
             )
             return 0

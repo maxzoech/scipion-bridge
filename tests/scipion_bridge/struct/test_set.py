@@ -602,5 +602,38 @@ def test_set_concat():
     assert combined[2].voltage_kv == 100.0
 
 
+def test_set_string_slicing():
+    class Particle(B.Struct):
+        pixels: B.Array[float, 16, 16]
+
+    s = B.Set[Particle](capacity=3)
+    p0_pixels = np.ones((16, 16), dtype=np.float32) * 1.0
+    p1_pixels = np.ones((16, 16), dtype=np.float32) * 2.0
+    p2_pixels = np.ones((16, 16), dtype=np.float32) * 3.0
+
+    s[0].pixels = p0_pixels
+    s[1].pixels = p1_pixels
+    s[2].pixels = p2_pixels
+
+    batched_pixels = s["pixels"]
+    
+    assert batched_pixels is not None
+    assert batched_pixels.shape == (3, 16, 16)
+    assert np.allclose(batched_pixels[0], p0_pixels)
+    assert np.allclose(batched_pixels[1], p1_pixels)
+    assert np.allclose(batched_pixels[2], p2_pixels)
+
+    # Test string slicing on a Set slice view
+    sub_slice = s[1:3]
+    sub_batched_pixels = sub_slice["pixels"]
+    assert sub_batched_pixels is not None
+    assert sub_batched_pixels.shape == (2, 16, 16)
+    assert np.allclose(sub_batched_pixels[0], p1_pixels)
+    assert np.allclose(sub_batched_pixels[1], p2_pixels)
+
+
 if __name__ == "__main__":
-    test_struct_instance_static_arrays()
+    from scipion_bridge.backend.standalone.container import configure_default_env
+    container = configure_default_env()
+
+    test_set_string_slicing()

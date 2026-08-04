@@ -235,6 +235,7 @@ class Registry:
             namespace = Registry._namespace_from_symbol(
                 module=module, qualname=_get_qualname(frame.f_code), strip_last=True
             )
+            del frame
 
         if self.graph.has_edge(origin, target):
             edge = self.graph.edges[(origin, target)]
@@ -403,8 +404,13 @@ class Registry:
         visible_modules = {
             v for v in map(_find_module, frame.f_globals.values()) if v is not None
         }
+        del frame
 
         visible_modules.add(calling_namespace)
+
+        if __package__:
+            visible_modules.add(__package__)
+
         visible_modules = visible_modules.union(associated_namespace)
 
         # Expand namespaces: "foo.bar.func" -> {foo, foo.bar, foo.bar.func}
@@ -457,7 +463,7 @@ class Registry:
 
         total = end - start
         total_ms = total * 1_000
-        search_percentage = int((search_time / total) * 100)
+        search_percentage = int((search_time / total) * 100) if total > 0 else 0
 
         logging.info(
             f"Resolving from '{type(value).__qualname__}' to '{astype.__qualname__}' took {total_ms:2f}ms ({search_time_ms:2f}ms ({search_percentage}%) path finding)"
@@ -533,6 +539,8 @@ def resolver(f):
         strip_last=True,
     )
 
+    # print(f"Registering resolver {f.__qualname__} for {in_dtype.__qualname__} -> {out_dtype.__qualname__} in namespace '{namespace}'")
+
     current_registry().add_resolver(in_dtype, out_dtype, f, namespace)
 
     return f
@@ -584,14 +592,15 @@ def resolve_params(f: Callable):
     def wrapper(*args, **kwargs):
         func_params = extract_func_params(args, kwargs, signature)
 
-        args = list(func_params.items())[: len(args)]
-        kwargs = list(func_params.items())[len(args) :]
+        n_positional = len(args)
+        positional = list(func_params.items())[:n_positional]
+        keyword = list(func_params.items())[n_positional:]
 
-        args = [_resolve_arg(a) for a in args]
-        args = [v for _, v in args]
+        positional = [_resolve_arg(a) for a in positional]
+        args = [v for _, v in positional]
 
-        kwargs = [_resolve_arg(a) for a in kwargs]
-        kwargs = {k.name: v for k, v in kwargs}
+        keyword = [_resolve_arg(a) for a in keyword]
+        kwargs = {k.name: v for k, v in keyword}
 
         return f(*args, **kwargs)
 

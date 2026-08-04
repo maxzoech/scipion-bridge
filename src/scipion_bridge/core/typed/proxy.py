@@ -8,13 +8,10 @@ from functools import partial, wraps
 import shutil
 
 from dependency_injector.wiring import Provide, inject
-from matplotlib.pylab import dtype
 from ...backend.standalone.container import Container
 from ..environment.temp_files import TemporaryFilesProvider
 from ..utils.arc import manager as arc_manager
 from ..utils.func_params import extract_func_params
-
-from ..utils.arc import manager as arc_manager
 
 from .resolve import current_registry, resolve_params, resolver, Registry
 from abc import ABC, ABCMeta, abstractmethod
@@ -103,7 +100,7 @@ class Proxy(metaclass=ProxyMetaclass):
         self._path = Path(path)
         self.managed = managed
 
-        if self.managed == True:
+        if self.managed:
             arc_manager.add_reference(self._path)
 
         super().__init__(*args, **kwargs)
@@ -192,7 +189,7 @@ class Proxy(metaclass=ProxyMetaclass):
                 arc_manager.remove_reference(self._path)
 
         except Exception as e:
-            logging.warning(f"Failed to delete file at getattr(self, '_path', None): {e}")
+            logging.warning(f"Failed to delete file at {getattr(self, '_path', None)}: {e}")
             pass  # Fail silently
 
     def __str__(self):
@@ -215,6 +212,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
             )
 
         super().__init__(base_path, managed=False)
+        
         self.base_path = base_path
         self.managed = managed
         self._proxies: dict[str, Proxy] = {}
@@ -299,12 +297,16 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
     @inject
     def new_temporary_proxy(
         cls,
+        base_path: Optional[os.PathLike] = None,
         temp_file_provider: TemporaryFilesProvider = Provide[
             Container.temp_file_provider
         ],
     ) -> "ProxyGroup":
-        base_temp_file = temp_file_provider.new_temporary_file(suffix="")
-        base_path = Path(base_temp_file)
+        if base_path is not None:
+            base_path = Path(base_path)
+        else:
+            base_temp_file = temp_file_provider.new_temporary_file(suffix="")
+            base_path = Path(base_temp_file)
 
         children = {}
         for field_name, proxy_cls in cls.get_proxy_fields().items():
@@ -331,6 +333,11 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         is_owned = "managed" if self.managed else "unmanaged"
         children = ", ".join(f"{k}={v.path.name}" for k, v in self._proxies.items())
         return f"<{self.__class__.__name__} base='{self.base_path}' ({children}) [{is_owned}]>"
+
+    def __del__(self):
+        # ProxyGroup does not directly manage the base_path via ARC.
+        # Child proxies handle their own reference-counted cleanup.
+        pass
 
 
 class Output(Generic[T]):
