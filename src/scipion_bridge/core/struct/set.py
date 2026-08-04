@@ -295,7 +295,14 @@ class Set(Generic[T], SchemaConvertible):
         new_el: T = item_type()
 
         if self._view is not None:
-            new_el._view = self._view.sub_index_view(index)
+            parent_indices = self._view.indices
+            if parent_indices and isinstance(parent_indices[0], slice):
+                slice_start = parent_indices[0].start if parent_indices[0].start is not None else 0
+                abs_index = slice_start + index
+                new_indices = (abs_index, *parent_indices[1:])
+            else:
+                new_indices = (*parent_indices, index)
+            new_el._view = _StorageView(owner=self._view.owner, indices=new_indices, prefix=self._view.prefix)
         else:
             new_el._view = _StorageView(owner=self, indices=(index,), prefix="")
         
@@ -305,11 +312,27 @@ class Set(Generic[T], SchemaConvertible):
         start, stop = self._compute_slice_bounds(index)
 
         cls = type(self)
-        new_set = cls(capacity=stop - start)
+        owner = self._view.owner if self._view is not None else self
+        if self._view is not None:
+            parent_indices = self._view.indices
+            if parent_indices and isinstance(parent_indices[0], slice):
+                parent_start = parent_indices[0].start if parent_indices[0].start is not None else 0
+                abs_start = parent_start + start
+                abs_stop = parent_start + stop
+            else:
+                abs_start = start
+                abs_stop = stop
+            prefix = self._view.prefix
+        else:
+            abs_start = start
+            abs_stop = stop
+            prefix = ""
 
-        for path, _ in self.schema().tree_iter():
-            new_set._zarr_group[path][:] = self._zarr_group[path][start:stop]
-
+        new_set = cls.__new__(cls)
+        new_set._capacity = stop - start
+        new_set._zarr_group = owner._zarr_group
+        new_set._storage_provider = owner._storage_provider
+        new_set._view = _StorageView(owner=owner, indices=(slice(abs_start, abs_stop),), prefix=prefix)
         return new_set
 
     def _set_el(self, index: int, value: T) -> None:
@@ -357,10 +380,18 @@ class Set(Generic[T], SchemaConvertible):
                 f"Cannot assign a Set of capacity {len(value)} to a slice of length {slice_length}"
             )
 
-        for path, _ in self.schema().tree_iter():
-            self._zarr_group[path][start:stop] = value._zarr_group[path][:]
+        owner = self._view.owner if self._view is not None else self
+        prefix = self._view.prefix if self._view is not None else ""
+        if self._view is not None and self._view.indices and isinstance(self._view.indices[0], slice):
+            parent_start = self._view.indices[0].start if self._view.indices[0].start is not None else 0
+            start = parent_start + start
+            stop = parent_start + stop
 
-    def _get_leave_slice(self, path: str):
+        for path, _ in self.schema().tree_iter():
+            full_key = f"{prefix}{path}"
+            owner._zarr_group[full_key][start:stop] = value._get_leaf_array(path)
+
+    def _get_leaf_slice(self, path: str):
         """Get a slice of the underlying Zarr array for a given path, delegating to owner set if this is a proxy view."""
         if not path in self.schema().fields:
             raise KeyError(f"Name '{path}' not found in struct {self.item_type().__name__}.")
@@ -369,6 +400,7 @@ class Set(Generic[T], SchemaConvertible):
         if not isinstance(entry, (_ArraySetEntry, _ArrayEntry)):
             raise TypeError(f"Field '{path}' is not an array field and cannot be sliced.")
 
+        owner = self._view.owner if self._view is not None else self
         if self._view is not None:
             full_key = f"{self._view.prefix}{path}"
             indices = self._view.indices
@@ -376,9 +408,27 @@ class Set(Generic[T], SchemaConvertible):
             full_key = path
             indices = slice(None)
 
-        return self._zarr_group[full_key][indices]
+        return owner._zarr_group[full_key][indices]
 
-        
+    def _set_leaf_slice(self, path: str, value: np.ndarray):
+        """Set a slice of the underlying Zarr array for a given path, delegating to owner set if this is a proxy view."""
+        if not path in self.schema().fields:
+            raise KeyError(f"Name '{path}' not found in struct {self.item_type().__name__}.")
+
+        entry = self.schema().fields[path]
+        if not isinstance(entry, (_ArraySetEntry, _ArrayEntry)):
+            raise TypeError(f"Field '{path}' is not an array field and cannot be sliced.")
+
+        owner = self._view.owner if self._view is not None else self
+        if self._view is not None:
+            full_key = f"{self._view.prefix}{path}"
+            indices = self._view.indices
+        else:
+            full_key = path
+            indices = slice(None)
+
+        owner._zarr_group[full_key][indices] = np.asarray(value)
+
 
     def __len__(self):
         return self._capacity
@@ -405,11 +455,14 @@ class Set(Generic[T], SchemaConvertible):
         if isinstance(key, slice):
             return self._get_slice(key)
         elif isinstance(key, str):
-            return self._get_leave_slice(key)
+            return self._get_leaf_slice(key)
         else:
             return self._get_el(self._normalize_index(key))
 
     def __setitem__(self, key, value):
         if isinstance(key, slice):
             return self._set_slice(key, value)
-        self._set_el(self._normalize_index(key), value)
+        elif isinstance(key, str):
+            return self._set_leaf_slice(key, value)
+        else:
+            return self._set_el(self._normalize_index(key), value)

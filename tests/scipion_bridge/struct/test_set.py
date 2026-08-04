@@ -602,7 +602,7 @@ def test_set_concat():
     assert combined[2].voltage_kv == 100.0
 
 
-def test_set_string_slicing():
+def test_set_string_slicing_getitem():
     class Particle(B.Struct):
         pixels: B.Array[float, 16, 16]
 
@@ -632,8 +632,40 @@ def test_set_string_slicing():
     assert np.allclose(sub_batched_pixels[1], p2_pixels)
 
 
+def test_set_string_slicing_setitem():
+    class Particle(B.Struct):
+        pixels: B.Array[float, 16, 16]
+
+    s = B.Set[Particle](capacity=3)
+
+    new_pixels = np.zeros((3, 16, 16), dtype=np.float32)
+    new_pixels[0] = 10.0
+    new_pixels[1] = 20.0
+    new_pixels[2] = 30.0
+
+    # Set batched array via string indexing on Set
+    s["pixels"] = new_pixels
+
+    # Check individual element access
+    assert np.allclose(s[0].pixels, new_pixels[0])
+    assert np.allclose(s[1].pixels, new_pixels[1])
+    assert np.allclose(s[2].pixels, new_pixels[2])
+
+
+    # Test setting via string slicing on a Set slice view
+    sub_pixels = np.zeros((2, 16, 16), dtype=np.float32)
+    sub_pixels[0] = 50.0
+    sub_pixels[1] = 60.0
+
+    s[1:3]["pixels"] = sub_pixels
+
+    assert np.allclose(s[0].pixels, new_pixels[0])
+    assert np.allclose(s[1].pixels, sub_pixels[0])
+    assert np.allclose(s[2].pixels, sub_pixels[1])
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
     container = configure_default_env()
 
-    test_set_string_slicing()
+    test_set_string_slicing_setitem()

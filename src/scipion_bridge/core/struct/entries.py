@@ -15,7 +15,7 @@ import numpy as np
 from dataclasses import dataclass
 from functools import reduce
 from enum import Enum
-from typing import Optional, Tuple, Any, TYPE_CHECKING, Type
+from typing import Optional, Tuple, Any, TYPE_CHECKING, Type, Union
 
 from dependency_injector.wiring import Provide, inject
 from ...backend.standalone.container import Container
@@ -34,8 +34,9 @@ class _StorageView:
     """Encapsulates proxy view metadata for indexed Struct/Set instances."""
 
     owner: Any
-    indices: Tuple[int, ...]
+    indices: Tuple[Union[int, slice], ...]
     prefix: str = ""
+
 
     def child_view(self, name: str) -> _StorageView:
         """Create a child view with an appended path prefix."""
