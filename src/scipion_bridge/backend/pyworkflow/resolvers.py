@@ -1,6 +1,7 @@
 """Type resolvers converting PyWorkflow/pwem objects (Particle, etc.) to scipion-bridge types."""
 
 import sys
+import uuid
 from typing import Dict
 import numpy as np
 
@@ -44,13 +45,21 @@ def register_pyworkflow_resolvers():
         backend: ProtFlexBase = metadata["pyworkflow_protocol"]
 
         # Create the Scipion 3 SetOfParticlesFlex
-        outImgSet = backend._createSetOfParticlesFlex(progName=PROG_NAME)
+        output_name = metadata.get("pyworkflow_output_name") or uuid.uuid4().hex
+        stack_path = backend._getExtraPath(f"output_{output_name}.mrcs")
+        outImgSet = backend._createSetOfParticlesFlex(suffix=output_name, progName=PROG_NAME)
         outImgSet.getFlexInfo().setProgName(PROG_NAME)
 
-        for particle in value:
+        ih = ImageHandler()
+        for i, particle in enumerate(value, start=1):
+            img_array = np.array(particle.pixels, dtype=np.float32)
+            img = ih.createImage()
+            img.setData(img_array)
+            ih.write(img, (i, stack_path))
+
             outParticle = emobj.ParticleFlex(progName=PROG_NAME)
             outParticle.getFlexInfo().setProgName(PROG_NAME)
-            
+            outParticle.setLocation(i, stack_path)
             outParticle.setZFlex(particle.embeddings.tolist())
             outImgSet.append(outParticle)
 

@@ -178,7 +178,7 @@ def convert_protocol_to_scipion3_protocol(
             protocol.setup()
 
         def _writeOutputDataHandler(self, outputData):
-            
+
             outputs = {}
             for key, value in outputData.items():
                 pyworkflowDtype = find_output_pointer_class(type(value))
@@ -186,7 +186,10 @@ def convert_protocol_to_scipion3_protocol(
                 output = resolve.current_registry().resolve(
                     value,
                     astype=pyworkflowDtype,
-                    metadata={"pyworkflow_protocol": self},
+                    metadata={
+                        "pyworkflow_protocol": self,
+                        "pyworkflow_output_name": key,
+                    },
                 )
 
                 outputs[key] = output
