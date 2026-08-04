@@ -60,6 +60,36 @@ class Source(Op):
             "Source node must be compiled via sources_map lookup."
         )
 
+class ReduceOutputOp(Op):
+    """Reduce operation node that accumulates input values into a single output."""
+
+    def __init__(self):
+        super().__init__(upstream=None)
+
+    def _reduce_func(self, acc: Any, x: Any) -> Any:
+        if isinstance(x, FlushSignal):
+            return x
+
+        for k, value in x.items():
+            if not isinstance(value, struct.Set):
+                raise ValueError(
+                    f"ReduceOutputOp expects input values to be of type struct.Set, got {type(value)} for key '{k}'."
+                )
+
+            if k in acc:
+                acc[k] = struct.Set.concat(acc[k], value)
+            else:
+                acc[k] = value
+
+        return acc
+
+    def transform(self, stream: Stream) -> Stream:
+        return stream.accumulate(
+            self._reduce_func,
+            start={},
+            returns_state=False,
+        )
+
 
 class MapOp(Op):
     """Mapping operation node."""

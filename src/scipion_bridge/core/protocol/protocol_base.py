@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import get_type_hints, get_origin, get_args, Any, Type, OrderedDict
 
-from ..streaming.ops import Op
+from ..streaming.ops import Op, ReduceOutputOp
 from .fields import Field, Input
 
 from ..utils.ast import parse_ast
@@ -63,6 +63,13 @@ class Protocol(metaclass=abc.ABCMeta):
     def setup(self):
         """Optional setup method for protocol initialization."""
         pass
+
+    def get_pipeline(self) -> Op:
+        """Return the pipeline of operations for this protocol."""
+        return (
+            self.steps()
+            .op(ReduceOutputOp())
+        )
 
     @abc.abstractmethod
     def steps(self) -> Op:

@@ -296,3 +296,4 @@ def test_resolve_namespaces_recursive():
 if __name__ == "__main__":
     # logging.basicConfig(level=logging.DEBUG)
     test_resolve_namespaces_recursive()
+

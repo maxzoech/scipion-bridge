@@ -533,6 +533,8 @@ def resolver(f):
     in_dtype = f.__annotations__["value"]
     out_dtype = f.__annotations__["return"]
 
+    requires_context = "context" in f.__annotations__
+
     namespace = Registry._namespace_from_symbol(
         module=f.__module__,
         qualname=_get_qualname(f.__code__),  # f.__qualname__,

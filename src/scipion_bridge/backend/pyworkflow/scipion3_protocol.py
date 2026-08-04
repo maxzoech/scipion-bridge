@@ -38,7 +38,7 @@ def convert_protocol_to_scipion3_protocol(
         import pyworkflow.protocol.params as params  # type: ignore
         import pyworkflow.object as pywfobj  # type: ignore
         from .resolvers import register_pyworkflow_resolvers
-        from .utils.resolve_graph import find_pointer_class
+        from .utils.resolve_graph import find_pointer_class, find_output_pointer_class
 
         register_pyworkflow_resolvers()
     except ImportError:
@@ -114,16 +114,14 @@ def convert_protocol_to_scipion3_protocol(
                 k: get_args(v)[0] for k, v in protocol._configuration.inputs.items()
             }
 
-            steps_node = protocol.steps()
-            if steps_node is not None:
-                if not isinstance(steps_node, Sink):
-                    steps_node = steps_node.sink(print)
-                self._stepsPipeline = Pipeline.from_sink(steps_node)
+            execSteps = protocol.get_pipeline()
+
+            if execSteps is not None:
+                execSteps = execSteps.sink(self._writeOutputDataHandler)
+                self._stepsPipeline = Pipeline.from_sink(execSteps)
+
             else:
                 self._stepsPipeline = None
-
-
-
 
         def _defineParams(self, form):
 
@@ -175,6 +173,15 @@ def convert_protocol_to_scipion3_protocol(
         def _runProtocolProlog(self):
             protocol.setup()
 
+        def _writeOutputDataHandler(self, outputData):
+            # This method is called when the protocol produces output data.
+            # You can implement logic here to handle the output data, such as saving it to disk,
+            # sending it to another service, or processing it further.
+            for key, value in outputData.items():
+                pyworkflowDtype = find_output_pointer_class(type(value))
+                print(f"Output data received for key '{key}': {value} (len: {len(value)}, resolved to Scipion type: {pyworkflowDtype})")
+
+
         def _submitDataStep(self, argname: str, inputData: Union[Any, List[Any]]):
             if not isinstance(inputData, list):
                 raise NotImplementedError
@@ -189,6 +196,8 @@ def convert_protocol_to_scipion3_protocol(
                     argname: bridgeType([bridgeValue])
                 }
                 self._stepsPipeline.send(**args)
+
+            print("Finished submitting data step for input:", argname)
 
 
 
