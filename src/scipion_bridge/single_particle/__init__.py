@@ -1,4 +1,4 @@
-from .particle import Particle
+from .particle import Particle, FlexParticle
 from .proxies import ParticleStackProxy
 
 from ..core.typed.resolve import lift_resolvers
@@ -8,5 +8,6 @@ lift_resolvers(resolvers)
 
 __all__ = [
     "Particle",
+    "FlexParticle",
     "ParticleStackProxy",
 ]

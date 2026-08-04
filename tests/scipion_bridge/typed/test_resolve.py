@@ -55,6 +55,7 @@ def test_unresolvable_types_error():
         _ = func(2.5)
 
 
+
 def test_resolved_func():
 
     @sb.resolver
@@ -296,4 +297,5 @@ def test_resolve_namespaces_recursive():
 if __name__ == "__main__":
     # logging.basicConfig(level=logging.DEBUG)
     test_resolve_namespaces_recursive()
+
 

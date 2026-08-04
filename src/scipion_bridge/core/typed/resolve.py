@@ -35,7 +35,7 @@ if sys.version_info < (3, 11):
         RuntimeWarning,
     )
 
-ResolveStep = namedtuple("ResolveStep", ("func", "description"))
+ResolveStep = namedtuple("ResolveStep", ("func", "requires_metadata", "description"))
 ResolveContext = namedtuple(
     "ResolveContext", ("registry", "namespaces", "caller_namespace", "recursion_level")
 )
@@ -48,6 +48,7 @@ Intermediate = TypeVar("Intermediate", default=Any)
 if TYPE_CHECKING:
     Resolve = Union[Target, Intermediate]
 else:
+
     class Resolve(Generic[Target, Intermediate]):
         pass  # Marker Type
 
@@ -56,7 +57,7 @@ def _downcast(x):
     return x
 
 
-def _passthrough(x):
+def _passthrough(x, metadata=None):
     return x
 
 
@@ -226,6 +227,7 @@ class Registry:
         target: Type[Origin],
         resolver: Callable,
         namespace: Optional[str] = None,
+        requires_metadata: bool = False,
     ):
 
         if namespace is None:
@@ -263,7 +265,12 @@ class Registry:
                 # print(f"Add downcast: {subclass} -> {dtype} in {__package__}, {weight}")
 
         self.graph.add_edge(
-            origin, target, resolver=resolver, weight=0, module=namespace
+            origin,
+            target,
+            resolver=resolver,
+            weight=0,
+            module=namespace,
+            requires_metadata=requires_metadata,
         )
 
         # Add edges to downcast data
@@ -284,10 +291,14 @@ class Registry:
             u, v = edge
             fn = data["resolver"]
             mod = data["module"]
+            metadata = data.get("requires_metadata", False)
+
+            metadata_desc = " (requires metadata)" if metadata else ""
 
             return ResolveStep(
                 fn,
-                f"{u.__qualname__} -> {v.__qualname__}: {fn.__qualname__} ({mod})",
+                metadata,
+                f"{u.__qualname__} -> {v.__qualname__}: {fn.__qualname__} ({mod}{metadata_desc})",
             )
 
         if origin == target:
@@ -295,7 +306,7 @@ class Registry:
 
         selected_edges = [
             (u, v, e)
-            for u, v, e in self.graph.edges(data=True) # type: ignore
+            for u, v, e in self.graph.edges(data=True)  # type: ignore
             if e["module"] in namespace
         ]
         subgraph = nx.DiGraph(selected_edges)
@@ -331,7 +342,7 @@ class Registry:
             for u, v in zip(path, path[1:])
         ]
 
-        def resolver_fn(value: Origin) -> Target:
+        def resolver_fn(value: Origin, *, metadata: Optional[Any] = None) -> Target:
             if not isinstance(value, origin):
                 raise TypeError("The input value for did not match origin data type")
 
@@ -339,7 +350,11 @@ class Registry:
             for step in steps:
                 logging.debug(step.description)
 
-                x = step.func(x)  # type: ignore
+                # Pass the metadata if the resolver requires it
+                if step.requires_metadata:
+                    x = step.func(x, metadata=metadata)  # type: ignore
+                else:
+                    x = step.func(x)  # type: ignore
 
             if not isinstance(x, target):
                 resolve_desc = "\n".join([step.description for step in steps])
@@ -357,6 +372,7 @@ class Registry:
         value,
         astype: Type[Target],
         intermediate: Optional[Type[Intermediate]] = None,
+        metadata: Optional[Any] = None,
     ) -> Target:
 
         def _find_module(value: Any) -> Optional[str]:
@@ -458,7 +474,7 @@ class Registry:
             search_time = end_search - start
             search_time_ms = search_time * 1_000
 
-            resolved = resolve_fn(value)
+            resolved = resolve_fn(value, metadata=metadata)
             end = time.time()
 
         total = end - start
@@ -470,7 +486,7 @@ class Registry:
         )
 
         return resolved
-        
+
     def lift_resolvers(self, origin_module_name: str, target_module_name: str):
         # Assert that the target module is actually imports the module from which
         # we want to lift the resolvers from.
@@ -482,7 +498,7 @@ class Registry:
         # the parent module is always visible when resolving types
         assert origin_module_name.startswith(target_module_name)
 
-        for _, _, attr in self.graph.edges(data=True): # type: ignore
+        for _, _, attr in self.graph.edges(data=True):  # type: ignore
             if attr["module"] == origin_module_name:
                 attr["module"] = target_module_name
 
@@ -518,6 +534,7 @@ class Registry:
 DEFAULT_REGISTRY = Registry()
 CURRENT_CTX: Optional[ResolveContext] = None
 
+
 def current_registry() -> Registry:
     global CURRENT_CTX
 
@@ -533,7 +550,7 @@ def resolver(f):
     in_dtype = f.__annotations__["value"]
     out_dtype = f.__annotations__["return"]
 
-    requires_context = "context" in f.__annotations__
+    requires_metadata = "metadata" in f.__annotations__
 
     namespace = Registry._namespace_from_symbol(
         module=f.__module__,
@@ -543,18 +560,28 @@ def resolver(f):
 
     # print(f"Registering resolver {f.__qualname__} for {in_dtype.__qualname__} -> {out_dtype.__qualname__} in namespace '{namespace}'")
 
-    current_registry().add_resolver(in_dtype, out_dtype, f, namespace)
+    current_registry().add_resolver(
+        in_dtype, out_dtype, f, namespace, requires_metadata
+    )
 
     return f
 
-def resolve(
-        value,
-        astype: Type[Target],
-        intermediate: Optional[Type[Intermediate]] = None,
-    ) -> Target:
-    return current_registry().resolve(value, astype=astype, intermediate=intermediate)
 
-def lift_resolvers(*modules: types.ModuleType, target: Optional[types.ModuleType] = None):
+def resolve(
+    value,
+    astype: Type[Target],
+    intermediate: Optional[Type[Intermediate]] = None,
+) -> Target:
+    return current_registry().resolve(
+        value,
+        astype=astype,
+        intermediate=intermediate,
+    )
+
+
+def lift_resolvers(
+    *modules: types.ModuleType, target: Optional[types.ModuleType] = None
+):
     if target is None:
         # Get the calling module
         frame = inspect.currentframe()
@@ -569,6 +596,7 @@ def lift_resolvers(*modules: types.ModuleType, target: Optional[types.ModuleType
     reg = current_registry()
     for module in modules:
         reg.lift_resolvers(module.__name__, target_module_name)
+
 
 def resolve_params(f: Callable):
 

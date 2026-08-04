@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import importlib
 import pickle
 from functools import partial
 from collections import Counter, defaultdict
@@ -26,9 +27,12 @@ def convert_protocol_to_scipion3_protocol(
     label: str,
     conda_env: str,
 ):
+    print(f"Protocol Module: {protocol.__module__}, Class: {protocol.__class__.__name__}")
+    importlib.import_module(protocol.__module__, __package__)
+
     try:
         import pwem  # type: ignore
-        from pwem.protocols import ProtProcessParticles  # type: ignore
+        from pwem.protocols import ProtProcessParticles, ProtFlexBase  # type: ignore
         from pyworkflow.protocol import ProtStreamingBase # type: ignore
         from pwem.objects import SetOfParticles, SetOfParticlesFlex, ParticleFlex, SetOfVolumes, Volume  # type: ignore
         import pyworkflow.protocol.constants as cons # type: ignore
@@ -98,7 +102,7 @@ def convert_protocol_to_scipion3_protocol(
 
         return param_type, kwargs
 
-    class ScipionProtocolWrapper(ProtProcessParticles, ProtStreamingBase):
+    class ScipionProtocolWrapper(ProtProcessParticles, ProtFlexBase, ProtStreamingBase):
 
         _label = label
         _devStatus = BETA
@@ -174,12 +178,21 @@ def convert_protocol_to_scipion3_protocol(
             protocol.setup()
 
         def _writeOutputDataHandler(self, outputData):
-            # This method is called when the protocol produces output data.
-            # You can implement logic here to handle the output data, such as saving it to disk,
-            # sending it to another service, or processing it further.
+            
+            outputs = {}
             for key, value in outputData.items():
                 pyworkflowDtype = find_output_pointer_class(type(value))
                 print(f"Output data received for key '{key}': {value} (len: {len(value)}, resolved to Scipion type: {pyworkflowDtype})")
+                output = resolve.current_registry().resolve(
+                    value,
+                    astype=pyworkflowDtype,
+                    metadata={"pyworkflow_protocol": self},
+                )
+
+                outputs[key] = output
+
+            # TODO: Infer data relationship here
+            self._defineOutputs(**outputs)
 
 
         def _submitDataStep(self, argname: str, inputData: Union[Any, List[Any]]):
@@ -210,6 +223,8 @@ def convert_protocol_to_scipion3_protocol(
             print("Validate Protocol")
 
         def stepsGeneratorStep(self) -> None:
+            import logging
+            logging.basicConfig(level=logging.DEBUG)
 
             configure_pyworkflow_env(
                 backend=self,
