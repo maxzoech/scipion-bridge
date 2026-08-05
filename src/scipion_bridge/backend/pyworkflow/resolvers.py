@@ -111,18 +111,23 @@ def register_pyworkflow_resolvers():
         # Micro-breakdown of operations inside the loop
         t_tolist_total = 0.0
 
-        for i, particle in enumerate(value, start=1):
+        # Bulk convert the 2D embeddings matrix to nested Python lists upfront
+        t_conv_0 = time.perf_counter()
+        embeddings_list = np.array(value["embeddings"]).tolist()
+        t_tolist_total = time.perf_counter() - t_conv_0
+
+        outImgSet.enableAppend()
+        mapper = outImgSet._getMapper()
+
+        for i, z_flex_list in enumerate(embeddings_list, start=1):
             outParticle = emobj.ParticleFlex(progName=PROG_NAME)
             outParticle.getFlexInfo().setProgName(PROG_NAME)
             outParticle.setLocation(i, stack_path)
-            
-            # Measure list conversion specifically if embeddings is a heavy NumPy array
-            t_conv_0 = time.perf_counter()
-            z_flex_list = particle.embeddings.tolist()
-            t_tolist_total += time.perf_counter() - t_conv_0
-            
             outParticle.setZFlex(z_flex_list)
             outImgSet.append(outParticle)
+
+        outImgSet.write()
+        mapper.commit()
 
         t_loop_total = time.perf_counter() - t_loop_start
 
