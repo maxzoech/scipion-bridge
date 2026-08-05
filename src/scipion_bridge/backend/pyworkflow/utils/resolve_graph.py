@@ -61,7 +61,14 @@ def _resolve_candidate_type_with_warning(
     if not candidates:
         return None
 
-    candidate_list = sorted(list(candidates), key=lambda c: c.__name__)
+    # Filter out subclasses, keeping top-level / base container classes
+    base_candidates = [
+        cls
+        for cls in candidates
+        if not any(issubclass(cls, other) and cls != other for other in candidates)
+    ]
+
+    candidate_list = sorted(base_candidates, key=lambda c: c.__name__)
     if len(candidate_list) > 1:
         names = [c.__name__ for c in candidate_list]
         warnings.warn(

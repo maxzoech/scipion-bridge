@@ -6,8 +6,8 @@ from functools import partial
 from collections import Counter, defaultdict
 import time
 
+from ...core import struct
 from ...core.protocol import Protocol, Field
-from ...core.struct import Set as BridgeSet
 from ...core.typed import resolve
 from ...core.streaming import Pipeline, Sink
 
@@ -17,8 +17,6 @@ from .workflow_container import configure_pyworkflow_env
 from typing import Optional, get_args, Dict, List, Any, get_type_hints, Type, Union
 
 from enum import Enum
-
-from ...core.struct import Set
 
 
 def convert_protocol_to_scipion3_protocol(
@@ -72,7 +70,7 @@ def convert_protocol_to_scipion3_protocol(
                     choices.index(element.default) if element.default in choices else 0
                 ),
             }
-        elif isinstance(dtype, type) and issubclass(dtype, Set):
+        elif isinstance(dtype, type) and issubclass(dtype, struct.Set):
             pointer_class = find_pointer_class(dtype)
 
             if not pointer_class:
@@ -117,15 +115,6 @@ def convert_protocol_to_scipion3_protocol(
             self.inputTypes = {
                 k: get_args(v)[0] for k, v in protocol._configuration.inputs.items()
             }
-
-            execSteps = protocol.get_pipeline()
-
-            if execSteps is not None:
-                execSteps = execSteps.sink(self._writeOutputDataHandler)
-                self._stepsPipeline = Pipeline.from_sink(execSteps)
-
-            else:
-                self._stepsPipeline = None
 
         def _defineParams(self, form):
 
@@ -178,6 +167,7 @@ def convert_protocol_to_scipion3_protocol(
             protocol.setup()
 
         def _writeOutputDataHandler(self, outputData):
+            from .resolvers import PyWorkflowResolutionContext
 
             outputs = {}
             for key, value in outputData.items():
@@ -186,10 +176,11 @@ def convert_protocol_to_scipion3_protocol(
                 output = resolve.current_registry().resolve(
                     value,
                     astype=pyworkflowDtype,
-                    metadata={
-                        "pyworkflow_protocol": self,
-                        "pyworkflow_output_name": key,
-                    },
+                    metadata=PyWorkflowResolutionContext(
+                        self,
+                        output_name=key,
+                        append=True,
+                    ),
                 )
 
                 outputs[key] = output
@@ -203,8 +194,8 @@ def convert_protocol_to_scipion3_protocol(
                 raise NotImplementedError
 
             for sample in inputData:
-                bridgeType: BridgeSet = self.inputTypes[argname]
-                assert isinstance(bridgeType, type) and issubclass(bridgeType, BridgeSet)
+                bridgeType: struct.Set = self.inputTypes[argname]
+                assert isinstance(bridgeType, type) and issubclass(bridgeType, struct.Set)
 
                 bridgeValue = resolve.resolve(sample, bridgeType.item_type())
 
@@ -218,9 +209,8 @@ def convert_protocol_to_scipion3_protocol(
 
 
         def _finalizeOutput(self):
-            self._stepsPipeline.flush()
             print("Finalize the output here...")
-
+            self._stepsPipeline.flush()
 
         def _convertInput(self):
             print("Validate Protocol")
@@ -236,6 +226,16 @@ def convert_protocol_to_scipion3_protocol(
                 modules=[__name__, type(protocol).__module__],
                 packages=["scipion_bridge"],
             )
+
+            # Create pipeline here so that the value provider is injected
+            execSteps = protocol.get_pipeline()
+            
+            if execSteps is not None:
+                execSteps = execSteps.sink(self._writeOutputDataHandler)
+                self._stepsPipeline = Pipeline.from_sink(execSteps)
+
+            else:
+                self._stepsPipeline = None
 
             self._insertFunctionStep(self._validateProtocolSetup)
             self._insertFunctionStep(self._runProtocolProlog)
