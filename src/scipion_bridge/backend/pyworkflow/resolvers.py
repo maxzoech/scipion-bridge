@@ -6,6 +6,7 @@ import uuid
 from typing import Dict
 import numpy as np
 import mrcfile
+import time
 
 from dataclasses import dataclass
 from typing import Optional, Any
@@ -20,6 +21,7 @@ try:
     HAS_PWEM = True
 except ImportError:
     HAS_PWEM = False
+    ProtFlexBase = Any
 
 PROG_NAME = "scipion_bridge"
 
@@ -92,18 +94,44 @@ def register_pyworkflow_resolvers():
             f"output_{output_name}_{stack_uuid}.mrcs"
         )
 
+        t0 = time.perf_counter()
+        pixels_arr = np.array(value["pixels"], dtype=np.float32)
+        t_array_conv = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
         mrcfile.write(
             stack_path,
-            np.array(value["pixels"], dtype=np.float32),
+            pixels_arr,
             overwrite=False,
         )
+        
+        t_mrc_write = time.perf_counter() - t0
+        t_loop_start = time.perf_counter()
+
+        # Micro-breakdown of operations inside the loop
+        t_tolist_total = 0.0
 
         for i, particle in enumerate(value, start=1):
             outParticle = emobj.ParticleFlex(progName=PROG_NAME)
             outParticle.getFlexInfo().setProgName(PROG_NAME)
             outParticle.setLocation(i, stack_path)
-            outParticle.setZFlex(particle.embeddings.tolist())
+            
+            # Measure list conversion specifically if embeddings is a heavy NumPy array
+            t_conv_0 = time.perf_counter()
+            z_flex_list = particle.embeddings.tolist()
+            t_tolist_total += time.perf_counter() - t_conv_0
+            
+            outParticle.setZFlex(z_flex_list)
             outImgSet.append(outParticle)
+
+        t_loop_total = time.perf_counter() - t_loop_start
+
+        print(f"\n--- Execution Benchmark ---")
+        print(f"NumPy Array Conversion : {t_array_conv * 1000:8.3f} ms")
+        print(f"MRC File Write (Disk) : {t_mrc_write * 1000:8.3f} ms")
+        print(f"Particle Loop Total    : {t_loop_total * 1000:8.3f} ms")
+        print(f"  └─ .tolist() portion : {t_tolist_total * 1000:8.3f} ms")
+        print(f"Total Time             : {(t_array_conv + t_mrc_write + t_loop_total) * 1000:8.3f} ms\n")
 
         return outImgSet
 

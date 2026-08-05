@@ -172,7 +172,6 @@ def convert_protocol_to_scipion3_protocol(
             outputs = {}
             for key, value in outputData.items():
                 pyworkflowDtype = find_output_pointer_class(type(value))
-                print(f"Output data received for key '{key}': {value} (len: {len(value)}, resolved to Scipion type: {pyworkflowDtype})")
                 output = resolve.current_registry().resolve(
                     value,
                     astype=pyworkflowDtype,

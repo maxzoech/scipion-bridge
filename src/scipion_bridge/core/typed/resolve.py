@@ -571,11 +571,13 @@ def resolve(
     value,
     astype: Type[Target],
     intermediate: Optional[Type[Intermediate]] = None,
+    metadata: Optional[Any] = None,
 ) -> Target:
     return current_registry().resolve(
         value,
         astype=astype,
         intermediate=intermediate,
+        metadata=metadata,
     )
 
 
