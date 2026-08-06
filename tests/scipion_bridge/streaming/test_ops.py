@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.streaming.ops import Source, MapOp, ChunkOp
+from scipion_bridge.core.streaming.ops import Source, MapOp, ChunkOp, MinChunkOp
 from scipion_bridge.core.streaming.pipeline import Pipeline
 
 
@@ -169,6 +169,54 @@ def test_chunk_op_flush_empty_queue():
     assert len(received) == 0  # Empty queue -> nothing emitted on flush
 
 
+def test_min_chunk_buffers_and_emits_complete_set():
+    received = []
+
+    source = Source("items")
+    sink_node = source.min_chunk(5).sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
+    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+
+    stream.send(items=B.Set[Particle]([p1, p2]))
+    assert len(received) == 0  # 2 elements < 5 -> buffered
+
+    p3 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3))
+    p4 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 4.0, metadata=Metadata(foo=4))
+    p5 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 5.0, metadata=Metadata(foo=5))
+    p6 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 6.0, metadata=Metadata(foo=6))
+
+    # Send set of 4 (total capacity = 2 + 4 = 6 >= 5) -> emits complete set of 6 without splitting
+    stream.send(items=B.Set[Particle]([p3, p4, p5, p6]))
+
+    assert len(received) == 1
+    result = received[0]
+    assert isinstance(result, B.Set)
+    assert len(result) == 6
+
+
+def test_min_chunk_flush():
+    received = []
+
+    source = Source("items")
+    sink_node = source.min_chunk(5).sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
+    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+
+    stream.send(items=B.Set[Particle]([p1, p2]))
+    assert len(received) == 0  # 2 elements < 5 -> buffered
+
+    stream.flush()
+
+    assert len(received) == 1
+    flushed = received[0]
+    assert isinstance(flushed, B.Set)
+    assert len(flushed) == 2
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
     configure_default_env()
@@ -178,3 +226,6 @@ if __name__ == "__main__":
     test_map_op_transform_struct()
     test_chunk_op_flush_partial_set()
     test_chunk_op_flush_empty_queue()
+    test_min_chunk_buffers_and_emits_complete_set()
+    test_min_chunk_flush()
+

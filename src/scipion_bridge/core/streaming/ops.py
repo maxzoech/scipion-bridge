@@ -26,6 +26,9 @@ class Op(Node):
     def chunk(self, size: int) -> "ChunkOp":
         return self.op(ChunkOp(size))
 
+    def min_chunk(self, size: int) -> "MinChunkOp":
+        return self.op(MinChunkOp(size))
+
     def sink(self, callback: Callable[[Any], Any]) -> Sink:
         """Attach a terminal Sink node and return it."""
         sink_node = Sink(callback)
@@ -178,3 +181,55 @@ class ChunkOp(Op):
             start=([], 0),
             returns_state=True,
         ).flatten()
+
+
+class MinChunkOp(Op):
+    """
+    Buffers struct.Set containers until the total element count is >= min_size,
+    then emits the complete combined set without splitting.
+    """
+
+    def __init__(self, min_size: int, upstream: Optional[List[Node]] = None):
+        super().__init__(upstream=upstream)
+        self.min_size = min_size
+
+    def _accumulate_min_chunks(
+        self,
+        state: Tuple[List[struct.Set], int],
+        new_set: Union[struct.Set, FlushSignal],
+    ) -> Tuple[Tuple[List[struct.Set], int], List[Union[struct.Set, FlushSignal]]]:
+        queue, capacity = state
+
+        if isinstance(new_set, FlushSignal):
+            emitted: List[Union[struct.Set, FlushSignal]] = []
+            if queue:
+                emitted.append(
+                    queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
+                )
+            emitted.append(FLUSH)
+            return ([], 0), emitted
+
+        if not isinstance(new_set, struct.Set):
+            raise ValueError("Input for MinChunkOp must be a struct.Set")
+
+        if len(new_set) > 0:
+            queue.append(new_set)
+            capacity += len(new_set)
+
+        emitted: List[Union[struct.Set, FlushSignal]] = []
+
+        if capacity >= self.min_size:
+            emitted.append(
+                queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
+            )
+            queue, capacity = [], 0
+
+        return (queue, capacity), emitted
+
+    def transform(self, stream: Stream) -> Stream:
+        return stream.accumulate(
+            self._accumulate_min_chunks,
+            start=([], 0),
+            returns_state=True,
+        ).flatten()
+
