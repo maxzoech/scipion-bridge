@@ -104,6 +104,14 @@ def register_pyworkflow_resolvers():
         return particle_set
 
     @resolver
+    def resolve_set_of_particles_to_bridge_particles(
+            value: emobj.SetOfParticlesFlex,
+            metadata: Optional[PyWorkflowResolutionContext] = None,
+        ) -> struct.Set[spa.FlexParticle]:
+
+        raise NotImplementedError
+
+    @resolver
     def resolve_embeddings_to_flex_particles(
         value: struct.Set[spa.FlexParticle],
         metadata: PyWorkflowResolutionContext,

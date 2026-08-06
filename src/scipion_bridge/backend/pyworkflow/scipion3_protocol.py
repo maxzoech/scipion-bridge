@@ -26,15 +26,17 @@ def convert_protocol_to_scipion3_protocol(
     label: str,
     conda_env: str,
 ):
-    print(f"Protocol Module: {protocol.__module__}, Class: {protocol.__class__.__name__}")
+    print(
+        f"Protocol Module: {protocol.__module__}, Class: {protocol.__class__.__name__}"
+    )
     importlib.import_module(protocol.__module__, __package__)
 
     try:
         import pwem  # type: ignore
         from pwem.protocols import ProtProcessParticles, ProtFlexBase  # type: ignore
-        from pyworkflow.protocol import ProtStreamingBase # type: ignore
+        from pyworkflow.protocol import ProtStreamingBase  # type: ignore
         from pwem.objects import SetOfParticles, SetOfParticlesFlex, ParticleFlex, SetOfVolumes, Volume  # type: ignore
-        import pyworkflow.protocol.constants as cons # type: ignore
+        import pyworkflow.protocol.constants as cons  # type: ignore
         from pyworkflow.constants import BETA  # type: ignore
         from pyworkflow.plugin import Domain  # type: ignore
         from pwem.constants import ALIGN_PROJ, ALIGN_NONE  # type: ignore
@@ -167,7 +169,6 @@ def convert_protocol_to_scipion3_protocol(
 
             form.addParallelSection(threads=2, mpi=1)
 
-
         def _validateProtocolSetup(self):
             protocol.validate_protocol_configuration()
 
@@ -176,6 +177,7 @@ def convert_protocol_to_scipion3_protocol(
 
         def _writeOutputDataHandler(self, outputData):
             from .resolvers import PyWorkflowResolutionContext
+            import pyworkflow.object as pywfobj  # type: ignore
 
             outputs = {}
             for key, value in outputData.items():
@@ -192,9 +194,18 @@ def convert_protocol_to_scipion3_protocol(
 
                 outputs[key] = output
 
-            # TODO: Infer data relationship here
-            self._defineOutputs(**outputs)
+            for key, output in outputs.items():
+                if isinstance(output, pywfobj.Set):
+                    self._updateOutputSet(key, output, state=pywfobj.Set.STREAM_OPEN)
+                    output.close()
+                else:
+                    self._defineOutputs(**{key: output})
+                    self._store(output)
 
+                for input_name in self.inputTypes:
+                    source = getattr(self, input_name, None)
+                    if source and source.hasValue():
+                        self._defineSourceRelation(source, output)
 
         def _submitDataStep(self, argname: str, inputData: Union[Any, List[Any]]):
             if isinstance(inputData, struct.Set):
@@ -205,17 +216,19 @@ def convert_protocol_to_scipion3_protocol(
 
             print("Finished submitting data step for input:", argname)
 
-
-
         def _finalizeOutput(self):
-            print("Finalize the output here...")
-            self._stepsPipeline.flush()
+            print("Finalizing protocol outputs...")
+            if self._stepsPipeline is not None:
+                self._stepsPipeline.flush()
+                
+            self._closeOutputSet()
 
         def _convertInput(self):
             print("Validate Protocol")
 
         def stepsGeneratorStep(self) -> None:
             import logging
+
             logging.basicConfig(level=logging.DEBUG)
 
             profilerOutput = self._getExtraPath("profiler_trace.html")
@@ -231,7 +244,7 @@ def convert_protocol_to_scipion3_protocol(
 
             # Create pipeline here so that the value provider is injected
             execSteps = protocol.get_pipeline()
-            
+
             if execSteps is not None:
                 execSteps = execSteps.sink(self._writeOutputDataHandler)
                 self._stepsPipeline = Pipeline.from_sink(execSteps)
@@ -257,11 +270,8 @@ def convert_protocol_to_scipion3_protocol(
             stepDeps = []
 
             while True:
-                
-                inputs = {
-                    k: getattr(self, k).get()
-                    for k in self.inputTypes.keys()
-                }
+
+                inputs = {k: getattr(self, k).get() for k in self.inputTypes.keys()}
 
                 with self._lock:
                     inputIDs = {
@@ -274,7 +284,7 @@ def convert_protocol_to_scipion3_protocol(
                 }
 
                 if all(inputsAreFinished.values()):
-                    self._insertFunctionStep("_finalizeOutput", prerequisites=stepDeps)
+                    self._insertFunctionStep(self._finalizeOutput, prerequisites=stepDeps)
                     break
 
                 for name, inputSet in inputs.items():
@@ -291,14 +301,18 @@ def convert_protocol_to_scipion3_protocol(
                         unprocessed_ids=list(nonProcessedIds),
                     )
 
-                    bridgeSet = resolve.resolve(inputSet, self.inputTypes[name], metadata=ctx)
+                    bridgeSet = resolve.resolve(
+                        inputSet, self.inputTypes[name], metadata=ctx
+                    )
                     self.itemIdReadList[name].extend(nonProcessedIds)
 
-                    dataStep = self._insertFunctionStep("_submitDataStep", name, bridgeSet)
+                    dataStep = self._insertFunctionStep(
+                        self._submitDataStep, name, bridgeSet
+                    )
                     stepDeps.append(dataStep)
 
                 time.sleep(self.__scipion_bridge_param_polling_freq)
-                
+
                 for inputSet in inputs.values():
                     if inputSet.isStreamOpen():
                         with self._lock:
@@ -306,7 +320,6 @@ def convert_protocol_to_scipion3_protocol(
 
             profiler.stop()
             profiler.write_html(profilerOutput)
-            
 
     # Copy the module and class name from the source protocol so Scipion class registration finds it
     ScipionProtocolWrapper.__module__ = protocol.__module__
