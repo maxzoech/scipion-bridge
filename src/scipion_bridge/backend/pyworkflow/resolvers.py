@@ -9,9 +9,8 @@ import mrcfile
 import time
 
 from dataclasses import dataclass
-from typing import Optional, Any
-
-from tqdm import tqdm
+from collections import defaultdict
+from typing import Optional, Any, Dict, List, Tuple, Sequence
 
 try:
     import pwem.objects as emobj  # type: ignore
@@ -32,6 +31,7 @@ class PyWorkflowResolutionContext:
     protocol: ProtFlexBase
     output_name: Optional[str]
     append: bool
+    unprocessed_ids: Optional[Sequence[int]] = None
 
 
 def register_pyworkflow_resolvers():
@@ -58,6 +58,50 @@ def register_pyworkflow_resolvers():
             )
 
         return spa.Particle(pixels=pixel_data)
+
+    def _build_id_where_clause(ids: Sequence[int]) -> str:
+        """Build a fast SQL WHERE clause (BETWEEN for contiguous ranges, IN for arbitrary IDs)."""
+        lo, hi = min(ids), max(ids)
+        if len(ids) == (hi - lo + 1):
+            return f"id BETWEEN {lo} AND {hi}"
+        return f"id IN ({','.join(map(str, ids))})"
+
+    @resolver
+    def resolve_set_of_particles_to_bridge_particles(
+        value: emobj.SetOfParticles,
+        metadata: Optional[PyWorkflowResolutionContext] = None,
+    ) -> struct.Set[spa.Particle]:
+        """Fast resolver converting Scipion SetOfParticles directly to scipion-bridge Set[Particle]."""
+        ids = metadata.unprocessed_ids if metadata else None
+        where_clause = _build_id_where_clause(ids) if ids else None
+
+        db = value._getMapper().db
+        raw_rows = db.selectAll(where=where_clause, iterate=False)
+
+        num_particles = len(raw_rows)
+        if num_particles == 0:
+            return struct.Set[spa.Particle](capacity=0)
+
+        # Resolve active SQLite column keys once upfront
+        row_keys = set(raw_rows[0].keys()) if hasattr(raw_rows[0], "keys") else set()
+        filename_key = next((k for k in (db._getRealCol("_filename"), "_filename") if k in row_keys), None)
+        idx_key = next((k for k in (db._getRealCol("_index"), "_index") if k in row_keys), None)
+
+        # Instantiate target set and load pixels directly via ImageHandler
+        pixels = np.zeros((num_particles, 128, 128), dtype=np.float32)
+        ih = ImageHandler()
+
+        for pos, row in enumerate(raw_rows):
+            assert filename_key is not None
+
+            filename = row[filename_key] if filename_key else None
+            idx = row[idx_key] if idx_key else 1
+            pixels[pos] = ih.read((idx, filename)).getData()
+
+        particle_set = struct.Set[spa.Particle](capacity=num_particles)
+        particle_set["pixels"] = pixels
+    
+        return particle_set
 
     @resolver
     def resolve_embeddings_to_flex_particles(
@@ -94,27 +138,15 @@ def register_pyworkflow_resolvers():
             f"output_{output_name}_{stack_uuid}.mrcs"
         )
 
-        t0 = time.perf_counter()
         pixels_arr = np.array(value["pixels"], dtype=np.float32)
-        t_array_conv = time.perf_counter() - t0
 
-        t0 = time.perf_counter()
         mrcfile.write(
             stack_path,
             pixels_arr,
             overwrite=False,
         )
-        
-        t_mrc_write = time.perf_counter() - t0
-        t_loop_start = time.perf_counter()
 
-        # Micro-breakdown of operations inside the loop
-        t_tolist_total = 0.0
-
-        # Bulk convert the 2D embeddings matrix to nested Python lists upfront
-        t_conv_0 = time.perf_counter()
         embeddings_list = np.array(value["embeddings"]).tolist()
-        t_tolist_total = time.perf_counter() - t_conv_0
 
         outImgSet.enableAppend()
         mapper = outImgSet._getMapper()
@@ -128,15 +160,6 @@ def register_pyworkflow_resolvers():
 
         outImgSet.write()
         mapper.commit()
-
-        t_loop_total = time.perf_counter() - t_loop_start
-
-        print(f"\n--- Execution Benchmark ---")
-        print(f"NumPy Array Conversion : {t_array_conv * 1000:8.3f} ms")
-        print(f"MRC File Write (Disk) : {t_mrc_write * 1000:8.3f} ms")
-        print(f"Particle Loop Total    : {t_loop_total * 1000:8.3f} ms")
-        print(f"  └─ .tolist() portion : {t_tolist_total * 1000:8.3f} ms")
-        print(f"Total Time             : {(t_array_conv + t_mrc_write + t_loop_total) * 1000:8.3f} ms\n")
 
         return outImgSet
 

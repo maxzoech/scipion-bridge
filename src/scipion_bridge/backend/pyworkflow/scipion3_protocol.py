@@ -5,6 +5,7 @@ import pickle
 from functools import partial
 from collections import Counter, defaultdict
 import time
+from pyinstrument import Profiler
 
 from ...core import struct
 from ...core.protocol import Protocol, Field
@@ -189,19 +190,11 @@ def convert_protocol_to_scipion3_protocol(
 
 
         def _submitDataStep(self, argname: str, inputData: Union[Any, List[Any]]):
-            if not isinstance(inputData, list):
-                raise NotImplementedError
-
-            for sample in inputData:
-                bridgeType: struct.Set = self.inputTypes[argname]
-                assert isinstance(bridgeType, type) and issubclass(bridgeType, struct.Set)
-
-                bridgeValue = resolve.resolve(sample, bridgeType.item_type())
-
-                args = {
-                    argname: bridgeType([bridgeValue])
-                }
+            if isinstance(inputData, struct.Set):
+                args = {argname: inputData}
                 self._stepsPipeline.send(**args)
+            else:
+                raise NotImplementedError
 
             print("Finished submitting data step for input:", argname)
 
@@ -217,6 +210,9 @@ def convert_protocol_to_scipion3_protocol(
         def stepsGeneratorStep(self) -> None:
             import logging
             logging.basicConfig(level=logging.DEBUG)
+
+            profilerOutput = self._getExtraPath("profiler_trace.html")
+            profiler = Profiler()
 
             configure_pyworkflow_env(
                 backend=self,
@@ -235,6 +231,8 @@ def convert_protocol_to_scipion3_protocol(
 
             else:
                 self._stepsPipeline = None
+
+            profiler.start()
 
             self._insertFunctionStep(self._validateProtocolSetup)
             self._insertFunctionStep(self._runProtocolProlog)
@@ -277,19 +275,19 @@ def convert_protocol_to_scipion3_protocol(
                     if not nonProcessedIds:
                         continue
 
-                    # Form SQL 'IN' clause string for Scipion's underlying SQLite query engine
-                    idListStr = ",".join(map(str, nonProcessedIds))
+                    from .resolvers import PyWorkflowResolutionContext
 
-                    itemsToSubmit = []
-                    for item in inputSet.iterItems(where=f"id IN ({idListStr})"):
-                        objId = item.getObjId()
-                        
-                        itemsToSubmit.append(item.clone())
-                        
-                        # Track read item ID
-                        self.itemIdReadList[name].append(objId)
+                    ctx = PyWorkflowResolutionContext(
+                        protocol=self,
+                        output_name=name,
+                        append=False,
+                        unprocessed_ids=list(nonProcessedIds),
+                    )
 
-                    dataStep = self._insertFunctionStep("_submitDataStep", name, itemsToSubmit)
+                    bridgeSet = resolve.resolve(inputSet, self.inputTypes[name], metadata=ctx)
+                    self.itemIdReadList[name].extend(nonProcessedIds)
+
+                    dataStep = self._insertFunctionStep("_submitDataStep", name, bridgeSet)
                     stepDeps.append(dataStep)
 
                 time.sleep(self.__scipion_bridge_param_polling_freq)
@@ -298,6 +296,10 @@ def convert_protocol_to_scipion3_protocol(
                     if inputSet.isStreamOpen():
                         with self._lock:
                             inputSet.loadAllProperties()  # Refresh stream status
+
+            profiler.stop()
+            profiler.write_html(profilerOutput)
+            
 
     # Copy the module and class name from the source protocol so Scipion class registration finds it
     ScipionProtocolWrapper.__module__ = protocol.__module__

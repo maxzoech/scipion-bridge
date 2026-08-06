@@ -86,7 +86,6 @@ class Struct(SchemaConvertible):
                     name=name,
                     shape=value.shape,
                     dtype=entry.dtype,
-                    overwrite=True
                 )
 
                 buffer.attrs['orig_shape'] = orig_shape

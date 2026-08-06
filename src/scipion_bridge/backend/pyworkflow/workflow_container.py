@@ -2,17 +2,22 @@ import os
 import logging
 from typing import List, Sequence
 from pathlib import Path
+from enum import Enum
 import string
 import random
 
 from ...core.environment.cmd_exec import ShellExecProvider
 from ...core.environment.temp_files import TemporaryFilesProvider
 from ...core.environment.storage import ArrayStorageProvider
+from ...core.environment.protocol_config import ProtocolConfigurationProvider
 from ...core.environment.domain import Domain
-
+from ...core.protocol.protocol_base import (
+    _ProtocolTypeConfiguration,
+    ProtocolConfiguration,
+)
 from ..standalone.container import Container
-from typing import Optional, Any
 
+from typing import Optional, Any, Dict, Type, Union, get_args
 
 class _PyWorkflowExecProvider(ShellExecProvider):
 
@@ -64,10 +69,36 @@ class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
         return path
 
 
+class _UncompressedZarrGroupWrapper:
+    """Wrapper over zarr.Group ensuring datasets created on it have compression disabled by default."""
+
+    def __init__(self, group, compressor=None):
+        self._group = group
+        self._compressor = compressor
+
+    def create_dataset(self, name: str, shape: tuple, dtype: Any, **kwargs: Any):
+        kwargs.setdefault("compressor", self._compressor)
+        return self._group.create_dataset(name, shape=shape, dtype=dtype, **kwargs)
+
+    def create_array(self, name: str, shape: tuple, dtype: Any, **kwargs: Any):
+        kwargs.setdefault("compressor", self._compressor)
+        return self._group.create_dataset(name, shape=shape, dtype=dtype, **kwargs)
+
+    def __getitem__(self, name: str):
+        return self._group[name]
+
+    def __setitem__(self, name: str, value: Any):
+        self._group[name] = value
+
+    def __contains__(self, name: str):
+        return name in self._group
+
+
 class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
 
-    def __init__(self, backend=None):
+    def __init__(self, backend=None, compressor=None):
         self.backend = backend
+        self.compressor = compressor
 
     def create_group(self, shape_prefix: tuple = ()) -> Any:
         try:
@@ -82,9 +113,11 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
             from zarr.storage import LocalStore
 
             store = LocalStore()
-            return zarr.group(store=store)
+            group = zarr.group(store=store)
         except (ImportError, AttributeError):
-            return zarr.group()
+            group = zarr.group()
+
+        return _UncompressedZarrGroupWrapper(group, compressor=self.compressor)
 
     def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
         if not arrays:
@@ -100,14 +133,6 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
 
         return target
 
-
-from enum import Enum
-from typing import Optional, Any, Dict, Type, Union, get_args
-from ...core.environment.protocol_config import ProtocolConfigurationProvider
-from ...core.protocol.protocol_base import (
-    _ProtocolTypeConfiguration,
-    ProtocolConfiguration,
-)
 
 
 def convert_scipion_to_python(val: Any, dtype: Type) -> Any:

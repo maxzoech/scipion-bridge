@@ -53,7 +53,7 @@ class NumPyStorageGroup:
     def __init__(self):
         self._arrays: Dict[str, NumPyStorageArray] = {}
 
-    def create_dataset(self, name: str, shape: Tuple[int, ...], dtype: Any, overwrite: bool = True) -> NumPyStorageArray:
+    def create_dataset(self, name: str, shape: Tuple[int, ...], dtype: Any) -> NumPyStorageArray:
         arr = NumPyStorageArray(shape, dtype)
         self._arrays[name] = arr
         return arr
