@@ -14,13 +14,13 @@ from typing import Optional, Any, Dict, List, Tuple, Sequence
 
 try:
     import pwem.objects as emobj  # type: ignore
-    from pwem.protocols import ProtFlexBase
+    from pwem.protocols import ProtFlexBase  # type: ignore
     from pwem.emlib.image import ImageHandler  # type: ignore
 
     HAS_PWEM = True
 except ImportError:
     HAS_PWEM = False
-    ProtFlexBase = Any
+    ProtFlexBase = Any  # type: ignore
 
 PROG_NAME = "scipion_bridge"
 
@@ -28,7 +28,7 @@ PROG_NAME = "scipion_bridge"
 @dataclass
 class PyWorkflowResolutionContext:
 
-    protocol: ProtFlexBase
+    protocol: ProtFlexBase # type: ignore
     output_name: Optional[str]
     append: bool
     unprocessed_ids: Optional[Sequence[int]] = None

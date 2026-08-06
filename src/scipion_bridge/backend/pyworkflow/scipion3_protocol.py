@@ -101,11 +101,18 @@ def convert_protocol_to_scipion3_protocol(
 
         return param_type, kwargs
 
+    output_types = {
+        k: find_output_pointer_class(v) for k, v in protocol.outputs().items()
+    }
+
+    valid_outputs = {k: v for k, v in output_types.items() if v is not None}
+    Outputs = Enum("Outputs", valid_outputs)
+
     class ScipionProtocolWrapper(ProtProcessParticles, ProtFlexBase, ProtStreamingBase):
 
         _label = label
         _devStatus = BETA
-        # _possibleOutputs = Outputs
+        _possibleOutputs = Outputs
         # stepsExecutionMode = cons.STEPS_PARALLEL # We want to run the steps sequentially
 
         def __init__(self, **kwargs):

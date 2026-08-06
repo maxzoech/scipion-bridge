@@ -38,6 +38,9 @@ class BasicProtocol(Protocol):
     # Fields
     state: int = 42
 
+    def outputs(self):
+        return {}
+
     def steps(self):
         pass
 
@@ -57,7 +60,10 @@ def test_protocol_untyped_state():
         class UntypedStateProtocol(Protocol):
             state = 42
 
-            def run(self, inputs: int):
+            def outputs(self):
+                return {}
+
+            def steps(self):
                 pass
 
 
@@ -73,6 +79,9 @@ def test_convert_scipion_to_python_enum_with_protocol_configuration():
 
     class EnumProtocol(Protocol):
         color: B.Field[Color] = B.Field(default=Color.RED)
+
+        def outputs(self):
+            return {}
 
         def steps(self):
             pass

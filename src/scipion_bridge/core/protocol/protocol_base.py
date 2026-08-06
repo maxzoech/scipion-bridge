@@ -6,7 +6,7 @@ import abc
 
 from dataclasses import dataclass
 from itertools import chain
-from typing import get_type_hints, get_origin, get_args, Any, Type, OrderedDict
+from typing import Dict, get_type_hints, get_origin, get_args, Any, Type, OrderedDict
 
 from ..streaming.ops import Op, ReduceOutputOp
 from .fields import Field, Input
@@ -66,10 +66,30 @@ class Protocol(metaclass=abc.ABCMeta):
 
     def get_pipeline(self) -> Op:
         """Return the pipeline of operations for this protocol."""
+        def _verify_outputs(outputs: Dict):
+            if not isinstance(outputs, dict):
+                raise ValueError("Pipeline output needs to be a dictionary")
+
+            output_types = self.outputs()
+
+            for key, value in outputs.items():
+                if key not in output_types:
+                    raise ValueError(f"Output '{key}' is not in declared outputs.")
+
+                if not isinstance(value, output_types[key]):
+                    raise ValueError(f"Declared output for key '{key}' does not match declared type")
+
+            return outputs
+
         return (
             self.steps()
+            .map(_verify_outputs)
             .op(ReduceOutputOp())
         )
+
+    @abc.abstractmethod
+    def outputs(self) -> Dict[str, Type]:
+        pass
 
     @abc.abstractmethod
     def steps(self) -> Op:
