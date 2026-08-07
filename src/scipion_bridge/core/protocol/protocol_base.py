@@ -77,7 +77,10 @@ class Protocol(metaclass=abc.ABCMeta):
                     raise ValueError(f"Output '{key}' is not in declared outputs.")
 
                 if not isinstance(value, output_types[key]):
-                    raise ValueError(f"Declared output for key '{key}' does not match declared type")
+                    raise TypeError(
+                        f"Type mismatch for output key '{key}': "
+                        f"expected {output_types[key]}, got '{type(value)}' ({value!r})"
+                    )
 
             return outputs
 

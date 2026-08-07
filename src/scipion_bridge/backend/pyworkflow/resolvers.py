@@ -66,12 +66,11 @@ def register_pyworkflow_resolvers():
             return f"id BETWEEN {lo} AND {hi}"
         return f"id IN ({','.join(map(str, ids))})"
 
-    @resolver
-    def resolve_set_of_particles_to_bridge_particles(
+    def _extract_particles_base(
         value: emobj.SetOfParticles,
         metadata: Optional[PyWorkflowResolutionContext] = None,
-    ) -> struct.Set[spa.Particle]:
-        """Fast resolver converting Scipion SetOfParticles directly to scipion-bridge Set[Particle]."""
+    ) -> Tuple[List[Any], np.ndarray, set]:
+        """Helper extracting raw database rows, pre-loaded pixels array, and row column keys."""
         ids = metadata.unprocessed_ids if metadata else None
         where_clause = _build_id_where_clause(ids) if ids else None
 
@@ -80,36 +79,60 @@ def register_pyworkflow_resolvers():
 
         num_particles = len(raw_rows)
         if num_particles == 0:
-            return struct.Set[spa.Particle](capacity=0)
+            return raw_rows, np.zeros((0, 128, 128), dtype=np.float32), set()
 
-        # Resolve active SQLite column keys once upfront
         row_keys = set(raw_rows[0].keys()) if hasattr(raw_rows[0], "keys") else set()
         filename_key = next((k for k in (db._getRealCol("_filename"), "_filename") if k in row_keys), None)
         idx_key = next((k for k in (db._getRealCol("_index"), "_index") if k in row_keys), None)
 
-        # Instantiate target set and load pixels directly via ImageHandler
-        pixels = np.zeros((num_particles, 128, 128), dtype=np.float32)
+        pixels = np.empty((num_particles, 128, 128), dtype=np.float32)
         ih = ImageHandler()
 
         for pos, row in enumerate(raw_rows):
-            assert filename_key is not None
-
             filename = row[filename_key] if filename_key else None
             idx = row[idx_key] if idx_key else 1
-            pixels[pos] = ih.read((idx, filename)).getData()
+            if filename:
+                pixels[pos] = ih.read((idx, filename)).getData()
 
-        particle_set = struct.Set[spa.Particle](capacity=num_particles)
-        particle_set["pixels"] = pixels
-    
-        return particle_set
+        return raw_rows, pixels, row_keys
 
     @resolver
     def resolve_set_of_particles_to_bridge_particles(
-            value: emobj.SetOfParticlesFlex,
-            metadata: Optional[PyWorkflowResolutionContext] = None,
-        ) -> struct.Set[spa.FlexParticle]:
+        value: emobj.SetOfParticles,
+        metadata: Optional[PyWorkflowResolutionContext] = None,
+    ) -> struct.Set[spa.Particle]:
+        """Fast resolver converting Scipion SetOfParticles directly to scipion-bridge Set[Particle]."""
+        raw_rows, pixels, _ = _extract_particles_base(value, metadata)
+        particle_set = struct.Set[spa.Particle](capacity=len(raw_rows))
+        if len(raw_rows) > 0:
+            particle_set["pixels"] = pixels
+        return particle_set
 
-        raise NotImplementedError
+    @resolver
+    def resolve_set_of_particles_flex_to_bridge_particles(
+        value: emobj.SetOfParticlesFlex,
+        metadata: Optional[PyWorkflowResolutionContext] = None,
+    ) -> struct.Set[spa.FlexParticle]:
+        """Fast resolver converting Scipion SetOfParticlesFlex directly to scipion-bridge Set[FlexParticle]."""
+        raw_rows, pixels, _ = _extract_particles_base(value, metadata)
+        num_particles = len(raw_rows)
+        
+        if num_particles == 0:
+            return struct.Set[spa.FlexParticle](capacity=0)
+
+        db = value._getMapper().db
+        zflex_key = db._getRealCol("_zFlex")
+
+        embeddings = np.array(
+            [np.fromstring(row[zflex_key], sep=",") for row in raw_rows],
+            dtype=np.float32,
+        )
+
+        particle_set = struct.Set[spa.FlexParticle](capacity=num_particles)
+        particle_set["pixels"] = pixels
+        particle_set["embeddings"] = embeddings
+
+        return particle_set
 
     @resolver
     def resolve_embeddings_to_flex_particles(

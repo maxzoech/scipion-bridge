@@ -26,9 +26,6 @@ def convert_protocol_to_scipion3_protocol(
     label: str,
     conda_env: str,
 ):
-    print(
-        f"Protocol Module: {protocol.__module__}, Class: {protocol.__class__.__name__}"
-    )
     importlib.import_module(protocol.__module__, __package__)
 
     try:
@@ -115,7 +112,7 @@ def convert_protocol_to_scipion3_protocol(
         _label = label
         _devStatus = BETA
         _possibleOutputs = Outputs
-        # stepsExecutionMode = cons.STEPS_PARALLEL # We want to run the steps sequentially
+        stepsExecutionMode = cons.STEPS_PARALLEL
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
@@ -179,58 +176,70 @@ def convert_protocol_to_scipion3_protocol(
             from .resolvers import PyWorkflowResolutionContext
             import pyworkflow.object as pywfobj  # type: ignore
 
-            outputs = {}
-            for key, value in outputData.items():
-                pyworkflowDtype = find_output_pointer_class(type(value))
-                output = resolve.current_registry().resolve(
-                    value,
-                    astype=pyworkflowDtype,
-                    metadata=PyWorkflowResolutionContext(
-                        self,
-                        output_name=key,
-                        append=True,
-                    ),
+            with self._lock:
+                outputs = {}
+                for key, value in outputData.items():
+                    pyworkflowDtype = find_output_pointer_class(type(value))
+                    output = resolve.current_registry().resolve(
+                        value,
+                        astype=pyworkflowDtype,
+                        metadata=PyWorkflowResolutionContext(
+                            self,
+                            output_name=key,
+                            append=True,
+                        ),
+                    )
+
+                    outputs[key] = output
+
+                for key, output in outputs.items():
+                    if isinstance(output, pywfobj.Set):
+                        self._updateOutputSet(
+                            key, output, state=pywfobj.Set.STREAM_OPEN
+                        )
+                    else:
+                        self._defineOutputs(**{key: output})
+                        self._store(output)
+
+                    for input_name in self.inputTypes:
+                        source = getattr(self, input_name, None)
+                        if source and source.hasValue():
+                            self._defineSourceRelation(source, output)
+
+        def _submitDataStep(
+            self, argname: str, inputSet: Any, unprocessed_ids: List[Any]
+        ):
+            from .resolvers import PyWorkflowResolutionContext
+
+            ctx = PyWorkflowResolutionContext(
+                protocol=self,
+                output_name=argname,
+                append=False,
+                unprocessed_ids=unprocessed_ids,
+            )
+
+            with self._lock:
+                bridgeSet = resolve.resolve(
+                    inputSet, self.inputTypes[argname], metadata=ctx
                 )
 
-                outputs[key] = output
-
-            for key, output in outputs.items():
-                if isinstance(output, pywfobj.Set):
-                    self._updateOutputSet(key, output, state=pywfobj.Set.STREAM_OPEN)
-                    output.close()
-                else:
-                    self._defineOutputs(**{key: output})
-                    self._store(output)
-
-                for input_name in self.inputTypes:
-                    source = getattr(self, input_name, None)
-                    if source and source.hasValue():
-                        self._defineSourceRelation(source, output)
-
-        def _submitDataStep(self, argname: str, inputData: Union[Any, List[Any]]):
-            if isinstance(inputData, struct.Set):
-                args = {argname: inputData}
+            if isinstance(bridgeSet, struct.Set):
+                args = {argname: bridgeSet}
                 self._stepsPipeline.send(**args)
             else:
                 raise NotImplementedError
 
-            print("Finished submitting data step for input:", argname)
-
         def _finalizeOutput(self):
-            print("Finalizing protocol outputs...")
             if self._stepsPipeline is not None:
                 self._stepsPipeline.flush()
-                
-            self._closeOutputSet()
+
+            with self._lock:
+                self._closeOutputSet()
 
         def _convertInput(self):
-            print("Validate Protocol")
+            pass
 
         def stepsGeneratorStep(self) -> None:
-            import logging
-
-            logging.basicConfig(level=logging.DEBUG)
-
             profilerOutput = self._getExtraPath("profiler_trace.html")
             profiler = Profiler()
 
@@ -254,29 +263,62 @@ def convert_protocol_to_scipion3_protocol(
 
             profiler.start()
 
-            self._insertFunctionStep(self._validateProtocolSetup)
-            self._insertFunctionStep(self._runProtocolProlog)
+            validateStep = self._insertFunctionStep(
+                self._validateProtocolSetup,
+                prerequisites=[],
+            )
+            prologStep = self._insertFunctionStep(
+                self._runProtocolProlog,
+                prerequisites=[],
+            )
 
-            self._insertFunctionStep(self._convertInput)
+            convertStep = self._insertFunctionStep(
+                self._convertInput,
+                prerequisites=[],
+            )
 
             def _isFinished(key: str, *, inputs, inputIDs) -> bool:
                 inputSet = inputs[key]
                 readIDs = self.itemIdReadList[key]
 
-                return not inputSet.isStreamOpen() and Counter(readIDs) == Counter(
-                    inputIDs[key]
-                )
+                if inputSet is None:
+                    is_finished = False
+                else:
+                    is_closed = (
+                        inputSet.isStreamClosed()
+                        if hasattr(inputSet, "isStreamClosed")
+                        else False
+                    )
+                    is_finished = is_closed and Counter(readIDs) == Counter(
+                        inputIDs[key]
+                    )
 
+                return is_finished
+
+            previousDataStepDeps = [
+                validateStep,
+                prologStep,
+                convertStep,
+            ]  # The first step has setup as dependency
             stepDeps = []
+            iteration = 0
 
             while True:
+                iteration += 1
 
-                inputs = {k: getattr(self, k).get() for k in self.inputTypes.keys()}
+                inputs = {}
+                for k in self.inputTypes.keys():
+                    param_attr = getattr(self, k, None)
+                    param_val = param_attr.get() if param_attr is not None else None
+                    inputs[k] = param_val
 
                 with self._lock:
-                    inputIDs = {
-                        k: set(v.getUniqueValues("id")) for k, v in inputs.items()
-                    }
+                    inputIDs = {}
+                    for k, v in inputs.items():
+                        if v is not None and hasattr(v, "getUniqueValues"):
+                            inputIDs[k] = set(v.getUniqueValues("id"))
+                        else:
+                            inputIDs[k] = set()
 
                 inputsAreFinished = {
                     k: _isFinished(k, inputs=inputs, inputIDs=inputIDs)
@@ -284,37 +326,42 @@ def convert_protocol_to_scipion3_protocol(
                 }
 
                 if all(inputsAreFinished.values()):
-                    self._insertFunctionStep(self._finalizeOutput, prerequisites=stepDeps)
+                    self._insertFunctionStep(
+                        self._finalizeOutput, prerequisites=stepDeps
+                    )
                     break
 
                 for name, inputSet in inputs.items():
+                    if inputSet is None:
+                        continue
+
                     nonProcessedIds = inputIDs[name] - set(self.itemIdReadList[name])
+
                     if not nonProcessedIds:
                         continue
 
-                    from .resolvers import PyWorkflowResolutionContext
-
-                    ctx = PyWorkflowResolutionContext(
-                        protocol=self,
-                        output_name=name,
-                        append=False,
-                        unprocessed_ids=list(nonProcessedIds),
-                    )
-
-                    bridgeSet = resolve.resolve(
-                        inputSet, self.inputTypes[name], metadata=ctx
-                    )
+                    unprocessed_ids = list(nonProcessedIds)
                     self.itemIdReadList[name].extend(nonProcessedIds)
 
                     dataStep = self._insertFunctionStep(
-                        self._submitDataStep, name, bridgeSet
+                        self._submitDataStep,
+                        name,
+                        inputSet,
+                        unprocessed_ids,
+                        prerequisites=previousDataStepDeps,
                     )
+
+                    previousDataStepDeps.append(dataStep)
                     stepDeps.append(dataStep)
 
                 time.sleep(self.__scipion_bridge_param_polling_freq)
 
                 for inputSet in inputs.values():
-                    if inputSet.isStreamOpen():
+                    if (
+                        inputSet is not None
+                        and hasattr(inputSet, "isStreamOpen")
+                        and inputSet.isStreamOpen()
+                    ):
                         with self._lock:
                             inputSet.loadAllProperties()  # Refresh stream status
 
