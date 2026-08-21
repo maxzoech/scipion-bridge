@@ -41,7 +41,7 @@ class _PyWorkflowExecProvider(ShellExecProvider):
 
         self._conda_activation_cmd = f"{base_env_act_cmd} {act_cmd} && "
 
-    def run(self, func_name: str, domain: "Domain", args: List[str], run_args):
+    def run(self, func_name: str, domain: "Domain", args: List[str], run_args) -> int:
         del run_args
 
         cmd = " ".join(args)
@@ -49,6 +49,8 @@ class _PyWorkflowExecProvider(ShellExecProvider):
             self.backend.runJob(self._conda_activation_cmd, cmd, numberOfMpi=1)
         else:
             self.backend.runJob(cmd, "", numberOfMpi=1)
+
+        return 0
 
 
 class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
@@ -63,7 +65,10 @@ class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
     def new_temporary_file(self, suffix: Optional[str]) -> os.PathLike:
         N = 15
         filename = "".join(random.choices(string.ascii_lowercase + string.digits, k=N))
-        path = (self.temp_path / filename).with_suffix(suffix)
+        path = self.temp_path / filename
+
+        if suffix is not None:
+            path = path.with_suffix(suffix)
 
         logging.debug(f"Creating new temporary file at {path}")
         return path
@@ -110,7 +115,7 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
             )
 
         try:
-            from zarr.storage import LocalStore
+            from zarr.storage import LocalStore # type: ignore
 
             store = LocalStore()
             group = zarr.group(store=store)
@@ -185,7 +190,7 @@ class _PyWorkflowProtocolConfigurationProvider(ProtocolConfigurationProvider):
         val = getattr(self.backend, name)
         dtype = self._get_dtype(name)
 
-        return convert_scipion_to_python(val, dtype)
+        return convert_scipion_to_python(val, dtype)  # type: ignore[arg-type]
 
 
 def configure_pyworkflow_env(

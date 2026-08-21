@@ -13,8 +13,8 @@ def _get_scipion_env_info() -> Tuple[List[Any], Tuple[Type, ...], Tuple[Type, ..
 
     try:
         import pwem.objects as emobj  # type: ignore
-        base_set = (emobj.EMSet, pywfobj.Set)
-        base_obj = (emobj.EMObject, pywfobj.Object)
+        base_set: Tuple[Type, ...] = (emobj.EMSet, pywfobj.Set)
+        base_obj: Tuple[Type, ...] = (emobj.EMObject, pywfobj.Object)
         modules = [emobj, pywfobj]
     except ImportError:
         base_set = (pywfobj.Set,)

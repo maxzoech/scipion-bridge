@@ -1,13 +1,14 @@
-from typing import Optional, List, Dict, Callable, Any, Type, Union, Tuple
+from typing import Optional, List, Dict, Callable, Any, Type, Union, Tuple, TypeVar
 from functools import partial, reduce
 from pyrsistent import pdeque, PDeque
 
-from streamz import Stream
 from scipion_bridge.core.struct import Struct
 from scipion_bridge.core import struct
 
-from .node import Node, FlushSignal, FLUSH
+from .node import Node, FlushSignal, FLUSH, Stream
 from .sink import Sink
+
+_NodeT = TypeVar("_NodeT", bound=Node)
 
 
 class Op(Node):
@@ -15,7 +16,7 @@ class Op(Node):
     Intermediate operation node that allows chaining downstream operations.
     """
 
-    def op(self, node: Node) -> Node:
+    def op(self, node: _NodeT) -> _NodeT:
         """Connect a downstream node to this op."""
         node.upstream.append(self)
         return node
@@ -92,8 +93,8 @@ class ReduceOutputOp(Op):
 
         return acc
 
-    def transform(self, stream: Stream) -> Stream:
-        return stream.accumulate(
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].accumulate(
             self._reduce_func,
             start={},
             returns_state=False,
@@ -112,8 +113,8 @@ class MapOp(Op):
             return x
         return self.func(x)
 
-    def transform(self, stream: Stream) -> Stream:
-        return stream.map(self._map_func)
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].map(self._map_func)
 
 
 class ChunkOp(Op):
@@ -131,9 +132,10 @@ class ChunkOp(Op):
         new_set: Union[struct.Set, FlushSignal],
     ) -> Tuple[Tuple[List[struct.Set], int], List[Union[struct.Set, FlushSignal]]]:
         queue, capacity = state
+        emitted: List[Union[struct.Set, FlushSignal]]
 
         if isinstance(new_set, FlushSignal):
-            emitted: List[Union[struct.Set, FlushSignal]] = []
+            emitted = []
             if queue:
                 leftover = (
                     queue[0]
@@ -152,7 +154,7 @@ class ChunkOp(Op):
             queue.append(new_set)
             capacity += len(new_set)
 
-        emitted: List[Union[struct.Set, FlushSignal]] = []
+        emitted = []
 
         while capacity >= self.chunk_size:
             accumulated: List[struct.Set] = []
@@ -181,8 +183,8 @@ class ChunkOp(Op):
 
         return (queue, capacity), emitted
 
-    def transform(self, stream: Stream) -> Stream:
-        return stream.accumulate(
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].accumulate(
             self._accumulate_chunks,
             start=([], 0),
             returns_state=True,
@@ -205,9 +207,10 @@ class MinChunkOp(Op):
         new_set: Union[struct.Set, FlushSignal],
     ) -> Tuple[Tuple[List[struct.Set], int], List[Union[struct.Set, FlushSignal]]]:
         queue, capacity = state
+        emitted: List[Union[struct.Set, FlushSignal]]
 
         if isinstance(new_set, FlushSignal):
-            emitted: List[Union[struct.Set, FlushSignal]] = []
+            emitted = []
             if queue:
                 emitted.append(
                     queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
@@ -222,7 +225,7 @@ class MinChunkOp(Op):
             queue.append(new_set)
             capacity += len(new_set)
 
-        emitted: List[Union[struct.Set, FlushSignal]] = []
+        emitted = []
 
         if capacity >= self.min_size:
             emitted.append(
@@ -232,8 +235,8 @@ class MinChunkOp(Op):
 
         return (queue, capacity), emitted
 
-    def transform(self, stream: Stream) -> Stream:
-        return stream.accumulate(
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].accumulate(
             self._accumulate_min_chunks,
             start=([], 0),
             returns_state=True,
@@ -267,9 +270,10 @@ class CollectOp(Op):
         new_set: Union[struct.Set, FlushSignal],
     ) -> Tuple[Tuple[List[struct.Set], int, bool], List[Union[struct.Set, FlushSignal]]]:
         queue, capacity, done = state
+        emitted: List[Union[struct.Set, FlushSignal]]
 
         if isinstance(new_set, FlushSignal):
-            emitted: List[Union[struct.Set, FlushSignal]] = []
+            emitted = []
             if queue:
                 res = (
                     queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
@@ -290,7 +294,7 @@ class CollectOp(Op):
             queue.append(new_set)
             capacity += len(new_set)
 
-        emitted: List[Union[struct.Set, FlushSignal]] = []
+        emitted = []
 
         if self.count is not None and capacity >= self.count:
             res = (
@@ -303,8 +307,8 @@ class CollectOp(Op):
 
         return (queue, capacity, False), emitted
 
-    def transform(self, stream: Stream) -> Stream:
-        return stream.accumulate(
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].accumulate(
             self._accumulate_collect,
             start=([], 0, False),
             returns_state=True,

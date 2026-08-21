@@ -105,7 +105,7 @@ def convert_protocol_to_scipion3_protocol(
     }
 
     valid_outputs = {k: v for k, v in output_types.items() if v is not None}
-    Outputs = Enum("Outputs", valid_outputs)
+    Outputs = Enum("Outputs", valid_outputs)  # type: ignore[misc]
 
     class ScipionProtocolWrapper(ProtProcessParticles, ProtFlexBase, ProtStreamingBase):
 
@@ -180,6 +180,11 @@ def convert_protocol_to_scipion3_protocol(
                 outputs = {}
                 for key, value in outputData.items():
                     pyworkflowDtype = find_output_pointer_class(type(value))
+                    if pyworkflowDtype is None:
+                        raise TypeError(
+                            f"No Scipion output pointer class found for type {type(value)}"
+                        )
+
                     output = resolve.current_registry().resolve(
                         value,
                         astype=pyworkflowDtype,
@@ -225,7 +230,8 @@ def convert_protocol_to_scipion3_protocol(
 
             if isinstance(bridgeSet, struct.Set):
                 args = {argname: bridgeSet}
-                self._stepsPipeline.send(**args)
+                if self._stepsPipeline is not None:
+                    self._stepsPipeline.send(**args)
             else:
                 raise NotImplementedError
 
@@ -255,8 +261,8 @@ def convert_protocol_to_scipion3_protocol(
             execSteps = protocol.get_pipeline()
 
             if execSteps is not None:
-                execSteps = execSteps.sink(self._writeOutputDataHandler)
-                self._stepsPipeline = Pipeline.from_sink(execSteps)
+                pipeline_sink = execSteps.sink(self._writeOutputDataHandler)
+                self._stepsPipeline = Pipeline.from_sink(pipeline_sink)
 
             else:
                 self._stepsPipeline = None
@@ -300,7 +306,7 @@ def convert_protocol_to_scipion3_protocol(
                 prologStep,
                 convertStep,
             ]  # The first step has setup as dependency
-            stepDeps = []
+            stepDeps: List[Any] = []
             iteration = 0
 
             while True:

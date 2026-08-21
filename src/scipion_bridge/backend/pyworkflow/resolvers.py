@@ -10,17 +10,27 @@ import time
 
 from dataclasses import dataclass
 from collections import defaultdict
-from typing import Optional, Any, Dict, List, Tuple, Sequence
+from typing import Optional, Any, Dict, List, Tuple, Sequence, cast
 
 try:
     import pwem.objects as emobj  # type: ignore
+    from pwem.objects import Particle, SetOfParticles, SetOfParticlesFlex, ParticleFlex  # type: ignore
     from pwem.protocols import ProtFlexBase  # type: ignore
     from pwem.emlib.image import ImageHandler  # type: ignore
 
     HAS_PWEM = True
 except ImportError:
     HAS_PWEM = False
-    ProtFlexBase = Any  # type: ignore
+    class _DynamicStub:
+        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+        def __getattr__(self, item: str) -> Any: return None
+        def __len__(self) -> int: return 0
+    class Particle(_DynamicStub): pass  # type: ignore
+    class SetOfParticles(_DynamicStub): pass  # type: ignore
+    class SetOfParticlesFlex(_DynamicStub): pass  # type: ignore
+    class ParticleFlex(_DynamicStub): pass  # type: ignore
+    class ProtFlexBase(_DynamicStub): pass  # type: ignore
+    class ImageHandler(_DynamicStub): pass  # type: ignore
 
 PROG_NAME = "scipion_bridge"
 
@@ -45,12 +55,12 @@ def register_pyworkflow_resolvers():
 
     @resolver
     def resolve_scipion_particle_to_bridge_particle(
-        value: emobj.Particle,
+        value: Particle,
     ) -> spa.Particle:
         """Convert a Scipion/pwem Particle object to a scipion-bridge Particle struct."""
         if value.getFileName():
             ih = ImageHandler()
-            img = ih.read(value)
+            img: Any = ih.read(value)
             pixel_data = img.getData().astype(np.float32)
         else:
             raise ValueError(
@@ -67,7 +77,7 @@ def register_pyworkflow_resolvers():
         return f"id IN ({','.join(map(str, ids))})"
 
     def _extract_particles_base(
-        value: emobj.SetOfParticles,
+        value: Any,
         metadata: Optional[PyWorkflowResolutionContext] = None,
     ) -> Tuple[List[Any], np.ndarray, set]:
         """Helper extracting raw database rows, pre-loaded pixels array, and row column keys."""
@@ -92,13 +102,13 @@ def register_pyworkflow_resolvers():
             filename = row[filename_key] if filename_key else None
             idx = row[idx_key] if idx_key else 1
             if filename:
-                pixels[pos] = ih.read((idx, filename)).getData()
+                pixels[pos] = cast(Any, ih.read((idx, filename))).getData()
 
         return raw_rows, pixels, row_keys
 
     @resolver
     def resolve_set_of_particles_to_bridge_particles(
-        value: emobj.SetOfParticles,
+        value: SetOfParticles,
         metadata: Optional[PyWorkflowResolutionContext] = None,
     ) -> struct.Set[spa.Particle]:
         """Fast resolver converting Scipion SetOfParticles directly to scipion-bridge Set[Particle]."""
@@ -110,7 +120,7 @@ def register_pyworkflow_resolvers():
 
     @resolver
     def resolve_set_of_particles_flex_to_bridge_particles(
-        value: emobj.SetOfParticlesFlex,
+        value: SetOfParticlesFlex,
         metadata: Optional[PyWorkflowResolutionContext] = None,
     ) -> struct.Set[spa.FlexParticle]:
         """Fast resolver converting Scipion SetOfParticlesFlex directly to scipion-bridge Set[FlexParticle]."""
@@ -138,13 +148,13 @@ def register_pyworkflow_resolvers():
     def resolve_embeddings_to_flex_particles(
         value: struct.Set[spa.FlexParticle],
         metadata: PyWorkflowResolutionContext,
-    ) -> emobj.SetOfParticlesFlex:
+    ) -> SetOfParticlesFlex:
         if metadata is None:
             raise ValueError(
                 "The Scipion Protocol is required as context to resolve Embeddings to SetOfParticlesFlex."
             )
 
-        def _get_exisiting_set() -> Optional[emobj.SetOfParticlesFlex]:
+        def _get_exisiting_set() -> Optional[SetOfParticlesFlex]:
             if metadata.output_name is not None:
                 return getattr(metadata.protocol, metadata.output_name, None)
             else:
@@ -156,7 +166,7 @@ def register_pyworkflow_resolvers():
 
         if outImgSet is not None and metadata.append == True:
             start_index = len(outImgSet)
-            value = value[start_index:]
+            value = cast(struct.Set[spa.FlexParticle], value[start_index:])
         else:
             outImgSet = metadata.protocol._createSetOfParticlesFlex(
                 suffix=f"_{output_name}", progName=PROG_NAME
@@ -183,7 +193,7 @@ def register_pyworkflow_resolvers():
         mapper = outImgSet._getMapper()
 
         for i, z_flex_list in enumerate(embeddings_list, start=1):
-            outParticle = emobj.ParticleFlex(progName=PROG_NAME)
+            outParticle = ParticleFlex(progName=PROG_NAME)
             outParticle.getFlexInfo().setProgName(PROG_NAME)
             outParticle.setLocation(i, stack_path)
             outParticle.setZFlex(z_flex_list)

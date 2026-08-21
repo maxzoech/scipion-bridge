@@ -15,6 +15,7 @@ def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackPr
     import starfile
 
     new_proxy = ParticleStackProxy.new_temporary_proxy()
+    assert isinstance(new_proxy, ParticleStackProxy)
 
     num_el = len(value)
     pixel_data = value["pixels"]

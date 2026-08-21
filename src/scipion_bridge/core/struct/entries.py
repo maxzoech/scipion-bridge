@@ -126,6 +126,7 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
                         shape_prefix=shape_prefix
                     )
                 elif isinstance(field, _ArraySetEntry) or (isinstance(field, _ArrayEntry) and field.is_static):
+                    assert field.min_shape is not None
                     group.create_dataset(
                         name=path,
                         shape=(*shape_prefix, *field.min_shape),
@@ -189,20 +190,13 @@ class _ArrayEntryBase(Entry):
 
     dtype: np.dtype
     storage: _ArrayLocation
+    min_shape: Optional[Tuple[int, ...]] = None
+    max_shape: Optional[Tuple[int, ...]] = None
+    preferred_shape: Optional[Tuple[int, ...]] = None
 
     @property
     @abc.abstractmethod
     def entry_name(self) -> str:
-        ...
-
-    @property
-    @abc.abstractmethod
-    def min_shape(self) -> Optional[Tuple[int, ...]]:
-        ...
-
-    @property
-    @abc.abstractmethod
-    def max_shape(self) -> Optional[Tuple[int, ...]]:
         ...
 
     @property
@@ -228,8 +222,8 @@ class _ArrayEntry(_ArrayEntryBase):
     dtype: np.dtype
     storage: _ArrayLocation
     preferred_shape: Optional[Tuple[int, ...]] = None
-    min_shape: Optional[Tuple[int]] = None
-    max_shape: Optional[Tuple[int]] = None
+    min_shape: Optional[Tuple[int, ...]] = None
+    max_shape: Optional[Tuple[int, ...]] = None
 
     @property
     def entry_name(self):
@@ -244,21 +238,14 @@ class _ArraySetEntry(_ArrayEntryBase):
     storage: _ArrayLocation
     shape: Tuple[int, ...]
 
+    def __post_init__(self):
+        self.min_shape = self.shape
+        self.max_shape = self.shape
+        self.preferred_shape = self.shape
+
     @property
     def is_static(self) -> bool:
         return True
-
-    @property
-    def min_shape(self) -> Tuple[int, ...]:
-        return self.shape
-
-    @property
-    def max_shape(self) -> Tuple[int, ...]:
-        return self.shape
-
-    @property
-    def preferred_shape(self) -> Tuple[int, ...]:
-        return self.shape
 
     @property
     def entry_name(self):

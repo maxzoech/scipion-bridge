@@ -1,15 +1,16 @@
 import os
+from typing import Any
 import numpy as np
 from . import base
 
 
 class VolumeVisualizer(base.Visualizer):
 
-    def show(self, path: os.PathLike):
+    def show(self, data: Any):
         import k3d  # type: ignore
         import xmippLib # type: ignore
 
-        volume = xmippLib.Image(path)
+        volume = xmippLib.Image(data)
         plt_volume = k3d.volume(volume.getData().astype(np.float32))
 
         plot = k3d.plot()

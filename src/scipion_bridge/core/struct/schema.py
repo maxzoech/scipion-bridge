@@ -5,6 +5,7 @@ derived from a Struct class definition.  ``create_schema`` is the public
 factory that builds a Schema from a Struct type.
 """
 
+import types
 import numpy as np
 import typing
 from dataclasses import dataclass
@@ -32,8 +33,8 @@ class Array(Generic[T]):
 
     _bridge_array_marker = True
 
-    __runtime_args__ = tuple()
-    _generic_cache: Dict = {}
+    __runtime_args__: Tuple[Any, ...] = ()
+    _generic_cache: Dict[Any, Any] = {}
 
     @classmethod
     def __class_getitem__(cls, params):
@@ -41,11 +42,11 @@ class Array(Generic[T]):
 
         # Use Generic[T] behavior for TypeVars for type checkers
         if any(isinstance(t, TypeVar) for t in raw_args):
-            return super().__class_getitem__((raw_args[0],))
+            return types.GenericAlias(cls, (raw_args[0],))
 
         # TODO: Correctly handle forward-declared references
         if any(isinstance(t, (str, ForwardRef)) for t in raw_args):
-            return super().__class_getitem__((raw_args[0],))
+            return types.GenericAlias(cls, (raw_args[0],))
 
         dtype = raw_args[0]
         if len(raw_args) > 1:
@@ -186,7 +187,6 @@ def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
         key_path = k if root is None else f"{root}.{k}"
 
         if is_array_marker(v):
-            v: Array = v
             elem_type = v.dtype()
             is_serializable[key_path] = _supports_array_storage(elem_type)
         elif isinstance(v, type) and issubclass(v, SchemaConvertible):
@@ -234,7 +234,7 @@ def create_schema(cls: Type) -> Schema:
 
         # origin = typing.get_origin(dtype)
         if is_array_marker(field):
-            v: Array = field
+            v: Any = field
             elem_type = v.dtype()
 
             if (

@@ -66,7 +66,7 @@ def find_shortest_path(
         return path_1 + path_2[1:]
 
     if origin not in graph.nodes or destination not in graph.nodes:
-        raise nx.exception.NodeNotFound()
+        raise nx.NodeNotFound()
 
     predecessors = {}
     heap = [container_builder(graph, origin, None, 0)]

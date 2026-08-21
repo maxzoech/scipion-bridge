@@ -5,6 +5,7 @@ N-dimensional Zarr arrays across the outer capacity dimension.
 """
 
 from __future__ import annotations
+import types
 from typing import (
     Type,
     Generic,
@@ -17,6 +18,7 @@ from typing import (
     Optional,
     Sequence,
     overload,
+    TYPE_CHECKING,
 )
 try:
     from typing import Self
@@ -37,6 +39,9 @@ from .entries import (
 from .schema import Schema
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .struct import Struct
 
 
 def _convert_array_entry(entry: _ArrayEntry) -> Entry:
@@ -83,7 +88,7 @@ def generate_set_schema(cls: Type) -> Schema:
     return Schema(fields)
 
 
-T = TypeVar("T")
+T = TypeVar("T", bound="Struct")
 
 
 class Set(Generic[T], SchemaConvertible):
@@ -95,9 +100,9 @@ class Set(Generic[T], SchemaConvertible):
     """
 
     __runtime_args__ = None
-    _generic_cache: Dict = {}
+    _generic_cache: Dict[Any, Any] = {}
 
-    def configure_array_storage(self) -> Any:
+    def configure_array_storage(self, *args: Any, **kwargs: Any) -> Any:
         """Pre-allocate array storage for the configured set capacity."""
         return super().configure_array_storage(shape_prefix=(self._capacity,))
 
@@ -163,7 +168,7 @@ class Set(Generic[T], SchemaConvertible):
                 )
 
         total_capacity = sum(len(s) for s in sets)
-        target_cls = Set[target_item_type]
+        target_cls = Set[target_item_type]  # type: ignore[valid-type]
         concatenated_set = target_cls(capacity=total_capacity)
 
         provider = first_set._storage_provider
@@ -190,11 +195,11 @@ class Set(Generic[T], SchemaConvertible):
 
         # Use Generic[T] behavior for TypeVars for type checkers
         if any(isinstance(t, TypeVar) for t in type_args):
-            return super().__class_getitem__((params[0],))
+            return types.GenericAlias(cls, (type_args[0],))
 
         # TODO: Correctly handle forward-declared references
         if any(isinstance(t, (str, ForwardRef)) for t in type_args):
-            return super().__class_getitem__((params[0],))
+            return types.GenericAlias(cls, (type_args[0],))
 
         cache_key = (cls, params)
         if cache_key in Set._generic_cache:
@@ -401,12 +406,13 @@ class Set(Generic[T], SchemaConvertible):
             raise TypeError(f"Field '{path}' is not an array field and cannot be sliced.")
 
         owner = self._view.owner if self._view is not None else self
+        indices: Tuple[Union[int, slice], ...]
         if self._view is not None:
             full_key = f"{self._view.prefix}{path}"
             indices = self._view.indices
         else:
             full_key = path
-            indices = slice(None)
+            indices = (slice(None),)
 
         return owner._zarr_group[full_key][indices]
 
@@ -420,12 +426,13 @@ class Set(Generic[T], SchemaConvertible):
             raise TypeError(f"Field '{path}' is not an array field and cannot be sliced.")
 
         owner = self._view.owner if self._view is not None else self
+        indices: Tuple[Union[int, slice], ...]
         if self._view is not None:
             full_key = f"{self._view.prefix}{path}"
             indices = self._view.indices
         else:
             full_key = path
-            indices = slice(None)
+            indices = (slice(None),)
 
         owner._zarr_group[full_key][indices] = np.asarray(value)
 

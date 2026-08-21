@@ -167,7 +167,7 @@ class Proxy(metaclass=ProxyMetaclass):
             temp_file = Path(f"{base_path}{file_ext}")
             arc_manager.register_temporary_file(temp_file)
         else:
-            temp_file = temp_file_provider.new_temporary_file(file_ext)
+            temp_file = Path(temp_file_provider.new_temporary_file(file_ext))
             arc_manager.register_temporary_file(temp_file)
 
         return cls(temp_file, managed=True)
@@ -268,7 +268,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
     def get_referenced_paths(cls, path_str: str) -> List[Path]:
         """Return the list of child proxy paths associated with this ProxyGroup class."""
         base_name, _ = os.path.splitext(path_str)
-        return list(cls.get_field_paths(base_name).values())
+        return list(cls.get_field_paths(Path(base_name)).values())
 
     @classmethod
     def from_func_param(cls, param: FuncParam) -> "ProxyGroup":
@@ -334,7 +334,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         children = ", ".join(f"{k}={v.path.name}" for k, v in self._proxies.items())
         return f"<{self.__class__.__name__} base='{self.base_path}' ({children}) [{is_owned}]>"
 
-    def __del__(self):
+    def __del__(self, *args: Any, **kwargs: Any):
         # ProxyGroup does not directly manage the base_path via ARC.
         # Child proxies handle their own reference-counted cleanup.
         pass
@@ -379,7 +379,7 @@ else:
         pass  # Marker Type
 
 
-def proxify(f: Callable[P, R]) -> Callable[P, R]:
+def proxify(f: Callable[..., Any]) -> Callable[..., Any]:
 
     signature = inspect.signature(f)
 
@@ -387,7 +387,7 @@ def proxify(f: Callable[P, R]) -> Callable[P, R]:
         cls = param.dtype if param.dtype is not None else Proxy
 
         if issubclass(cls, Proxy):
-            return cls.from_func_param(param)
+            return cast(Type[Proxy], cls).from_func_param(param)
         else:
             raise TypeError(
                 f"Cannot create proxy from FuncParam with dtype {cls.__name__}"
@@ -450,7 +450,7 @@ def proxify(f: Callable[P, R]) -> Callable[P, R]:
         else:
             return tuple(return_vals)
 
-    return wrapped
+    return cast(Callable[..., Any], wrapped)
 
 
 @resolver

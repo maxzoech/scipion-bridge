@@ -25,6 +25,7 @@ class Struct(SchemaConvertible):
     Array and scalar values are stored internally in `_zarr_group`.
     """
 
+    _cached_schema: Optional[Schema] = None
     _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
 
     @classmethod
@@ -32,7 +33,7 @@ class Struct(SchemaConvertible):
         from .schema import Array
         return Array[params]
 
-    def configure_array_storage(self) -> Any:
+    def configure_array_storage(self, *args: Any, **kwargs: Any) -> Any:
         """Initialize storage group for standalone Struct instances."""
         return super().configure_array_storage()
 
@@ -48,10 +49,12 @@ class Struct(SchemaConvertible):
         return _validate_struct_datatypes(cls, root=key_path)
 
     @classmethod
-    @cache
     def schema(cls) -> Schema:
         """Return the cached Schema describing the field layout of this Struct class."""
-        return create_schema(cls)
+        if getattr(cls, "_cached_schema", None) is None:
+            cls._cached_schema = create_schema(cls)
+        assert cls._cached_schema is not None
+        return cls._cached_schema
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize a Struct instance, setting initial field values from keyword arguments."""
@@ -104,7 +107,8 @@ class Struct(SchemaConvertible):
         if isinstance(entry, _StructEntry):
             child = entry.struct_cls()
         elif isinstance(entry, _SchemaSetEntry):
-            child = Set[entry.item_type](capacity=entry.capacity)
+            assert entry.item_type is not None and entry.capacity is not None
+            child = Set[entry.item_type](capacity=entry.capacity)  # type: ignore[name-defined, arg-type]
         else:
             raise NotImplementedError(f"Cannot instantiate nested field for entry type {entry}")
 

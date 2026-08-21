@@ -1,7 +1,5 @@
-from .node import Node, FlushSignal
+from .node import Node, FlushSignal, Stream
 from typing import Callable, Any, Optional, List
-
-from streamz import Stream
 
 
 class Sink(Node):
@@ -18,5 +16,5 @@ class Sink(Node):
             return None
         return self.callback(item)
 
-    def transform(self, stream: Stream) -> Stream:
-        return stream.sink(self._sink_callback)
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].sink(self._sink_callback)

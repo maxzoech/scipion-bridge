@@ -11,13 +11,10 @@ from typing import (
     Type,
 )
 
-import streamz
-from streamz import Stream
-
 from scipion_bridge.core.struct import Struct, Set
 from .ops import Source, FlushSignal, FLUSH
 from .sink import Sink
-from .node import Node
+from .node import Node, Stream
 
 T = TypeVar("T", bound=Union[Struct, Set, Any])
 
