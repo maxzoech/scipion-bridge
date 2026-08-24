@@ -1,6 +1,5 @@
-from .entries import Entry
-from .schema import Array
-from .struct import Struct
+from .schema import Entry
+from .struct import Struct, Array
 from .set import Set
 
 __all__ = [

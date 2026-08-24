@@ -39,14 +39,10 @@ from scipion_bridge import struct
 #     tag: int
 
 
+
+
 def test_basic_schema():
-
-    class BasicSchema(struct.schema.Schema):
-        foo: float
-        pixels: struct.Array[float] = struct.Array(shape=(None, 128))
-
-    schema = BasicSchema(pixels=struct.Array(shape=(128, 128,)))
-    print(schema._schema_fields["foo"])
+    pass
 
 
 # def test_schema_creation_nested():

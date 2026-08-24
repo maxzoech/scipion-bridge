@@ -1,130 +1,178 @@
+import abc
+from dataclasses import dataclass
+
 import numpy as np
 
-from typing import (
-    Self,
-    Type,
-    Any,
-    Tuple,
-    Dict,
-    Optional,
-    Union,
-    Set,
-    TypeVar,
-    Generic,
-    Tuple,
-    Iterator,
-    Callable,
-    ForwardRef,
-    get_origin,
-)
-
-from ..utils.format import format_list
-from ..utils.marker import Marker
-
-from .entries import (
-    Entry,
-    SchemaConvertible,
-    _ArrayEntry,
-    _ArrayLocation,
-)
-
-from ._type_checks import is_array_marker
-
-T = TypeVar("T")
+from typing import Iterator, Optional, Dict, Tuple, Type, Union
 
 
-class Array(Marker[T]):
+class Entry(metaclass=abc.ABCMeta):
+    """Abstract base for all schema field entries."""
+
+    @property
+    @abc.abstractmethod
+    def is_static(self) -> bool:
+        """True when the entry's shape is fully known at schema-creation time."""
+        ...
+
+    @abc.abstractmethod
+    def format_entry(self, name: str) -> str:
+        """Return a human-readable label for *name* used by ``print_tree``."""
+        ...
+
+    @property
+    def children(self) -> Optional["Schema"]:
+        """Return the nested schema if this entry contains children, else None."""
+        return None
+
+
+class _ArrayEntryBase(Entry):
+    """Shared behaviour for all array-backed entry types."""
+
+    dtype: np.dtype
+    shape: Tuple[Union[int, None], ...]
 
     def __init__(
         self,
-        dtype: Optional[np.dtype] = None,
-        *,
+        dtype: np.dtype,
         shape: Tuple[Union[int, None], ...],
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
-        super().__init__(dtype)
+        super().__init__(**kwargs)
+        self.dtype = dtype
+        self.shape = tuple(shape)
 
-        self.shape = shape
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+    @property
+    @abc.abstractmethod
+    def entry_name(self) -> str:
+        ...
 
+    @property
+    def is_static(self) -> bool:
+        """Static if all dimensions are defined integers (no None / dynamic dims)."""
+        return all(isinstance(dim, int) and dim >= 0 for dim in self.shape)
 
-def _is_array_type(cls: Type) -> bool:
-    try:
-        dt = np.dtype(cls)
-        return dt.kind != "O"
-    except (TypeError, ValueError):
+    def format_entry(self, name: str) -> str:
+        dtype_str = self.dtype.name if hasattr(self.dtype, "name") else str(self.dtype)
+        shape_str = list(self.shape)
+
+        return f"{name}: {self.entry_name}[{dtype_str}], shape: {shape_str})"
+
+class _ArrayEntry(_ArrayEntryBase):
+    """An array field whose shape may or may not be fully static."""
+
+    def __init__(
+        self,
+        dtype: np.dtype,
+        shape: Tuple[Union[int, None], ...],
+    ) -> None:
+        super().__init__(dtype=dtype, shape=shape)
+
+    @property
+    def entry_name(self) -> str:
+        return "Array"
+
+class _ArraySetEntry(_ArrayEntryBase):
+    """A fixed-shape array field inside a Set context."""
+
+    def __init__(
+        self,
+        dtype: np.dtype,
+        shape: Tuple[int, ...],
+    ) -> None:
+        # Enforce that ArraySet only receives fully concrete integer dimensions
+        if any(dim is None or dim < 0 for dim in shape):
+            raise ValueError(f"ArraySet shape must be fully static, got: {shape}")
+
+        super().__init__(dtype=dtype, shape=shape)
+
+    @property
+    def is_static(self) -> bool:
+        return True
+
+    @property
+    def entry_name(self) -> str:
+        return "ArraySet"
+
+class _RaggedArraySetEntry(_ArrayEntryBase):
+    """A variable-shape array field inside a Set."""
+
+    def __init__(
+        self,
+        dtype: np.dtype,
+        shape: Tuple[Union[int, None], ...],
+    ) -> None:
+        super().__init__(dtype=dtype, shape=shape)
+
+    @property
+    def is_static(self) -> bool:
         return False
 
+    @property
+    def entry_name(self) -> str:
+        return "RaggedArraySet"
 
+class _StructEntry(Entry):
+    """Wraps a nested struct type and its schema for record instantiation."""
+
+    def __init__(self, schema: "Schema", struct_cls: Optional[Type] = None) -> None:
+        super().__init__()
+        self.schema = schema
+        self.struct_cls = struct_cls
+
+    @property
+    def is_static(self) -> bool:
+        return False #self.schema.is_static
+
+    @property
+    def children(self) -> "Schema":
+        return self.schema
+
+    def format_entry(self, name: str) -> str:
+        return f"{name} (struct)"
+    
+
+class _SchemaSetEntry(_StructEntry):
+    """Wraps a Set[Foo] container entry capable of instantiating Foo elements."""
+
+    def __init__(
+        self,
+        schema: "Schema",
+        struct_cls: Optional[Type] = None,
+        capacity: Optional[int] = None,
+    ) -> None:
+        super().__init__(schema=schema, struct_cls=struct_cls)
+        self.capacity = capacity
+
+    @property
+    def is_static(self) -> bool:
+        return False #self.schema.is_static and self.capacity is not None
+
+    def format_entry(self, name: str) -> str:
+        size_str = self.capacity if self.capacity is not None else "dynamic"
+        cls_name = self.struct_cls.__name__ if self.struct_cls else "struct"
+        return f"{name}: Set[{cls_name}](size: {size_str})"
+
+
+@dataclass
 class Schema:
+    """A tree of :class:`Entry` objects describing the storage layout of a Struct."""
 
-    _schema_fields: dict[str, Array]
+    fields: Dict[str, Entry]
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
+    @property
+    def is_static(self) -> bool:
+        """True when every field in the schema has a fixed shape."""
+        return all(entry.is_static for entry in self.fields.values())
 
-        cls_name = cls.__name__
-        annotations = getattr(cls, "__annotations__", {})
-        fields: dict[str, Array] = {}
-
-        for field_name, field_type in annotations.items():
-            origin_cls = get_origin(field_type)
-            default_val = getattr(cls, field_name, None)
-
-            if _is_array_type(field_type):
-                fields[field_name] = Array(
-                    dtype=np.dtype(field_type),
-                    shape=(),
-                    _scalar_type=field_type,
-                )
-
-            elif origin_cls is Array:
-                if not default_val:
-                    raise ValueError(
-                        f"Field '{field_name}' in '{cls_name}' is typed as '{field_type}', "
-                        f"but is missing a default Array specification. "
-                        f"Expected: {field_name}: {field_type} = Array(shape=(...))"
-                    )
-
-                fields[field_name] = default_val
-
+    def tree_iter(self, root: str = "") -> Iterator[Tuple[str, Entry]]:
+        """Yield (path, entry) for all leaf entries in the schema."""
+        for field_name, entry in self.fields.items():
+            path = f"{root}.{field_name}" if root else field_name
+            if entry.children is not None:
+                yield from entry.children.tree_iter(root=path)
             else:
-                raise TypeError(
-                    f"Invalid type annotation '{cls!r}' for field '{field_name}' in Schema '{cls}'. "
-                    f"Expected a primitive numeric/scalar type (e.g., float, int, bool) or an Array type (e.g., Array[float]), "
-                    f"but got an unsupported or non-convertible type."
-                )
-
-        cls._schema_fields = fields
-
-    def __init__(self, **fields: Any) -> None:
-        for name, value in fields.items():
-            setattr(self, name, value)
-
-
-# @dataclass
-# class Schema:
-#     """A tree of :class:`Entry` objects describing the storage layout of a Struct."""
-
-#     fields: Dict[str, Entry]
-
-#     def entries(self) -> Set[str]:
-#         return set(self.fields.field_names())
-
-#     @property
-#     def is_static(self) -> bool:
-#         """True when every field in the schema has a fixed shape."""
-#         return all(entry.is_static for entry in self.fields.values())
-
-#     def tree_iter(self, root: str = "") -> Iterator[Tuple[str, Entry]]:
-#         """Yield (path, entry) for all leaf entries in the schema."""
-#         for field_name, entry in self.fields.items():
-#             path = f"{root}.{field_name}" if root else field_name
-#             if entry.children is not None:
-#                 yield from entry.children.tree_iter(root=path)
-#             else:
-#                 yield path, entry
+                yield path, entry
 
 #     def iter_leaves(self, prefix: str = "") -> Iterator[Tuple[str, Entry]]:
 #         """Yield (path, entry) for all leaf entries in the schema."""
@@ -137,27 +185,27 @@ class Schema:
 #             for path, entry in self.iter_leaves(prefix=prefix)
 #         }
 
-#     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
-#         """Print the schema in a hierarchical tree format."""
-#         header = typename if typename is not None else "/"
-#         if self.is_static:
-#             header += " (static size)"
+    def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
+        """Print the schema in a hierarchical tree format."""
+        header = typename if typename is not None else "/"
+        if self.is_static:
+            header += " (static size)"
 
-#         print(header)
+        print(header)
 
-#         def _print_node(schema: "Schema", prefix: str = ""):
-#             items = list(schema.fields.items())
-#             for i, (field_name, entry) in enumerate(items):
-#                 is_last = (i == len(items) - 1)
-#                 connector = "└── " if is_last else "├── "
+        def _print_node(schema: "Schema", prefix: str = ""):
+            items = list(schema.fields.items())
+            for i, (field_name, entry) in enumerate(items):
+                is_last = (i == len(items) - 1)
+                connector = "└── " if is_last else "├── "
 
-#                 print(f"{prefix}{connector}{entry.format_entry(field_name)}")
+                print(f"{prefix}{connector}{entry.format_entry(field_name)}")
 
-#                 if entry.children is not None:
-#                     extension = "    " if is_last else "│   "
-#                     _print_node(entry.children, prefix + extension)
+                if entry.children is not None:
+                    extension = "    " if is_last else "│   "
+                    _print_node(entry.children, prefix + extension)
 
-#         _print_node(self)
+        _print_node(self)
 
 
 # # ---------------------------------------------------------------------------

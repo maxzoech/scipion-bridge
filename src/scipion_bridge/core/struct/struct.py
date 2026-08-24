@@ -1,165 +1,121 @@
-"""Struct base class implementation.
-
-A Struct is a schema-driven container backed by Zarr storage. Struct classes
-define their field layouts via type annotations. Fields are stored internally
-in a Zarr group and can be accessed or mutated via standard Python attribute access.
-"""
-
-try:
-    from functools import cache
-except ImportError:
-    from functools import lru_cache as cache
 import numpy as np
 
 from .schema import Schema
-from .entries import Entry, _ArrayEntry, _StructEntry, _SchemaSetEntry, SchemaConvertible, _StorageView
-from .set import Set
+from typing import Type, TypeVar, Tuple, Union, Any, Optional, get_origin
 
-from typing import Any, Optional
+from .storage import SchemaArrayStorage
+from ..utils.marker import Marker
+from ..utils.type_annotation import has_untyped_class_definitions
+
+T = TypeVar("T")
+
+def _is_array_type(cls: Type) -> bool:
+    try:
+        dt = np.dtype(cls)
+        return dt.kind != "O"
+    except (TypeError, ValueError):
+        return False
+
+class Array(Marker[T]):
+
+    def __init__(
+        self,
+        dtype: Optional[np.dtype] = None,
+        *,
+        shape: Tuple[Union[int, None], ...],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(dtype)
+
+        self.shape = shape
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
 
-class Struct(SchemaConvertible):
-    """Base class for schema-defined data structures backed by array storage.
+    def validate(self, other: "Array") -> None:
+        """Checks if another Array specification can be assigned to this marker.
 
-    Subclasses define fields via type annotations (e.g. ``voltage_kv: float``).
-    Array and scalar values are stored internally in `_zarr_group`.
-    """
+        Raises:
+            TypeError: If `other` is not an Array marker or has incompatible dtypes.
+            ValueError: If rank differs or a static dimension would be overwritten.
+        """
+        if not isinstance(other, Array):
+            raise TypeError(
+                f"Expected an Array marker specification, but got '{type(other).__name__}'."
+            )
 
-    _cached_schema: Optional[Schema] = None
-    _bridge_struct_marker = True  # Sentinel used by _type_checks.is_struct_type()
+        if len(self.shape) != len(other.shape):
+            raise ValueError(
+                f"Rank mismatch: cannot assign Array with rank {len(other.shape)} "
+                f"(shape={list(other.shape)}) to target with rank {len(self.shape)} "
+                f"(shape={list(self.shape)})."
+            )
 
-    @classmethod
-    def __class_getitem__(cls, params):
-        from .schema import Array
-        return Array[params]
-
-    def configure_array_storage(self, *args: Any, **kwargs: Any) -> Any:
-        """Initialize storage group for standalone Struct instances."""
-        return super().configure_array_storage()
-
-    @classmethod
-    def to_schema_entry(cls) -> _StructEntry:
-        """Convert this Struct class into a ``_StructEntry`` for parent schemas."""
-        return _StructEntry(struct_cls=cls, schema=cls.schema())
-
-    @classmethod
-    def _validate_as_field(cls, key_path: str) -> dict:
-        """Validate that all fields of this Struct support array serialization."""
-        from .schema import _validate_struct_datatypes
-        return _validate_struct_datatypes(cls, root=key_path)
-
-    @classmethod
-    def schema(cls) -> Schema:
-        """Return the cached Schema describing the field layout of this Struct class."""
-        if getattr(cls, "_cached_schema", None) is None:
-            cls._cached_schema = create_schema(cls)
-        assert cls._cached_schema is not None
-        return cls._cached_schema
-
-    def __init__(self, **kwargs: Any) -> None:
-        """Initialize a Struct instance, setting initial field values from keyword arguments."""
-        super().__init__()
-        self._view: Optional[_StorageView] = None
-
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Intercept field assignment to write values into the underlying Zarr storage."""
-        if name.startswith("_"):
-            super().__setattr__(name, value)
-            return
-
-        schema = type(self).schema()
-        if name not in schema.entries() or isinstance(value, SchemaConvertible):
-            super().__setattr__(name, value)
-        else:
-            input_has_shape = hasattr(value, "shape") or hasattr(value, "__len__")
-
-            entry = schema.fields[name]
-            if isinstance(entry, _ArrayEntry) and entry.is_static:
-                orig_val = np.array(value).astype(entry.dtype)
-                value = np.array(value).astype(entry.dtype)
-                orig_shape = value.shape
-
-                value = np.reshape(value, [-1])
-                is_scalar = not input_has_shape and value.size == 1
-
-                buffer = self._zarr_group.create_dataset(
-                    name=name,
-                    shape=value.shape,
-                    dtype=entry.dtype,
+        for axis, (expected_dim, incoming_dim) in enumerate(zip(self.shape, other.shape)):
+            if expected_dim is not None and incoming_dim != expected_dim:
+                raise ValueError(
+                    f"Dimension mismatch at axis {axis}: static dimension {expected_dim} "
+                    f"cannot be overwritten by {incoming_dim} "
+                    f"(target shape={list(self.shape)}, incoming shape={list(other.shape)})."
                 )
 
-                buffer.attrs['orig_shape'] = orig_shape
-                buffer.attrs['is_scalar'] = is_scalar
+class Struct(SchemaArrayStorage):
 
-                buffer[:] = value
+    _schema_specs: dict[str, Array]
 
-                if self._view is not None:
-                    storage_key = f"{self._view.prefix}{name}"
-                    self._view.owner._zarr_group[storage_key][self._view.indices] = orig_val
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+
+        cls_name = cls.__name__
+        annotations = getattr(cls, "__annotations__", {})
+        fields: dict[str, Array] = {}
+
+        if has_untyped_class_definitions(cls):
+            raise TypeError(
+                f"Schema class '{cls_name}' contains class-level attributes missing type annotations. "
+                f"All fields in a Schema must be explicitly annotated. "
+                f"Example: 'field_name: int = 0' instead of 'field_name = 0'."
+            )
+
+        for field_name, field_type in annotations.items():
+            default_val = getattr(cls, field_name, None)
+
+            if _is_array_type(field_type):
+                fields[field_name] = Array(
+                    dtype=np.dtype(field_type),
+                    shape=(),
+                    _scalar_type=field_type,
+                )
+
+            elif isinstance(field_type, type) and issubclass(field_type, Array):
+                if not default_val:
+                    raise ValueError(
+                        f"Field '{field_name}' in '{cls_name}' is typed as '{field_type}', "
+                        f"but is missing a default Array specification. "
+                        f"Expected: {field_name}: {field_type} = Array(shape=(...))"
+                    )
+
+                fields[field_name] = default_val
+
             else:
-                raise NotImplementedError(f"Setting entry {entry} not supported")
+                raise TypeError(
+                    f"Invalid type annotation '{cls!r}' for field '{field_name}' in Schema '{cls}'. "
+                    f"Expected a primitive numeric/scalar type (e.g., float, int, bool) or an Array type (e.g., Array[float]), "
+                    f"but got an unsupported or non-convertible type."
+                )
 
-    def _instantiate_nested_field(self, name: str, entry: Entry) -> Any:
-        """Lazily instantiate and populate a child Struct or Set for a nested schema field."""
-        if isinstance(entry, _StructEntry):
-            child = entry.struct_cls()
-        elif isinstance(entry, _SchemaSetEntry):
-            assert entry.item_type is not None and entry.capacity is not None
-            child = Set[entry.item_type](capacity=entry.capacity)  # type: ignore[name-defined, arg-type]
-        else:
-            raise NotImplementedError(f"Cannot instantiate nested field for entry type {entry}")
+        cls._schema_specs = fields
 
-        if self._view is not None:
-            child._view = self._view.child_view(name)
 
-        prefix = f"{name}."
-        for leaf_path, _ in entry.schema.tree_iter():
-            full_key = f"{prefix}{leaf_path}"
-            if full_key in self._zarr_group:
-                child._zarr_group[leaf_path] = np.array(self._zarr_group[full_key])
+    def __init__(self, **fields: Any) -> None:
+        for name, value in fields.items():
+            schema_spec = self._schema_specs[name]
 
-        super().__setattr__(name, child)
-        return child
-
-    def __getattribute__(self, name: str) -> Any:
-        """Intercept attribute access to read values lazily from underlying Zarr storage."""
-        if name.startswith("_"):
-            return super().__getattribute__(name)
-
-        schema = type(self).schema()
-        attrs = set(schema.entries())
-
-        if name not in attrs:
-            return super().__getattribute__(name)
-
-        entry = schema.fields[name]
-        if isinstance(entry, (_StructEntry, _SchemaSetEntry)):
-            try:
-                return super().__getattribute__(name)
-            except AttributeError:
-                return self._instantiate_nested_field(name, entry)
-
-        if self._view is not None:
-            storage_key = f"{self._view.prefix}{name}"
-            buffer = self._view.owner._zarr_group[storage_key][self._view.indices]
-        else:
-            try:
-                buffer = self._zarr_group[name]
-            except KeyError:
-                raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-        
-        value = np.array(buffer)
-
-        if hasattr(buffer, "attrs") and "orig_shape" in buffer.attrs and "is_scalar" in buffer.attrs:
-            orig_shape = buffer.attrs['orig_shape']
-            is_scalar = buffer.attrs['is_scalar']
-
-            value = value.reshape(orig_shape)
+            if not isinstance(value, Array):
+                raise TypeError(
+                    f"Field '{name}' expects an Array marker, but got '{type(value).__name__}'."
+                )
             
-            if is_scalar:
-                value = value.item()
+            schema_spec.validate(value)
 
-        return value
+            setattr(self, name, value)
