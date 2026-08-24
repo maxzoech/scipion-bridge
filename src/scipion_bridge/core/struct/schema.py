@@ -5,6 +5,15 @@ import numpy as np
 
 from typing import Iterator, Optional, Dict, Tuple, Type, Union
 
+class SchemaConvertable(metaclass=abc.ABCMeta):
+
+    @abc.abstractmethod
+    def convert_to_entry(self) -> "Entry":
+        ...
+
+    @abc.abstractmethod
+    def is_static(self) -> bool:
+        ...
 
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
@@ -112,17 +121,16 @@ class _RaggedArraySetEntry(_ArrayEntryBase):
     def entry_name(self) -> str:
         return "RaggedArraySet"
 
-class _StructEntry(Entry):
+class _SchemaEntry(Entry):
     """Wraps a nested struct type and its schema for record instantiation."""
 
-    def __init__(self, schema: "Schema", struct_cls: Optional[Type] = None) -> None:
+    def __init__(self, schema: "Schema") -> None:
         super().__init__()
         self.schema = schema
-        self.struct_cls = struct_cls
 
     @property
     def is_static(self) -> bool:
-        return False #self.schema.is_static
+        return self.schema.is_static
 
     @property
     def children(self) -> "Schema":
@@ -132,16 +140,15 @@ class _StructEntry(Entry):
         return f"{name} (struct)"
     
 
-class _SchemaSetEntry(_StructEntry):
+class _SchemaSetEntry(_SchemaEntry):
     """Wraps a Set[Foo] container entry capable of instantiating Foo elements."""
 
     def __init__(
         self,
         schema: "Schema",
-        struct_cls: Optional[Type] = None,
         capacity: Optional[int] = None,
     ) -> None:
-        super().__init__(schema=schema, struct_cls=struct_cls)
+        super().__init__(schema=schema)
         self.capacity = capacity
 
     @property
@@ -150,7 +157,7 @@ class _SchemaSetEntry(_StructEntry):
 
     def format_entry(self, name: str) -> str:
         size_str = self.capacity if self.capacity is not None else "dynamic"
-        cls_name = self.struct_cls.__name__ if self.struct_cls else "struct"
+        cls_name = self.schema.dtype.__name__ if self.schema.dtype else "struct"
         return f"{name}: Set[{cls_name}](size: {size_str})"
 
 
@@ -158,6 +165,7 @@ class _SchemaSetEntry(_StructEntry):
 class Schema:
     """A tree of :class:`Entry` objects describing the storage layout of a Struct."""
 
+    dtype: Optional[Type]
     fields: Dict[str, Entry]
 
     @property

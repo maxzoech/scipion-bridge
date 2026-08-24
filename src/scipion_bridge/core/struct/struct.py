@@ -1,8 +1,8 @@
 import numpy as np
+from typing import Type, TypeVar, Tuple, Union, Any, Optional
 
-from .schema import Schema
-from typing import Type, TypeVar, Tuple, Union, Any, Optional, get_origin
-
+from . import schema
+from .schema import SchemaConvertable
 from .storage import SchemaArrayStorage
 from ..utils.marker import Marker
 from ..utils.type_annotation import has_untyped_class_definitions
@@ -16,7 +16,7 @@ def _is_array_type(cls: Type) -> bool:
     except (TypeError, ValueError):
         return False
 
-class Array(Marker[T]):
+class Array(Marker[T], schema.SchemaConvertable):
 
     def __init__(
         self,
@@ -31,8 +31,15 @@ class Array(Marker[T]):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    def is_static(self) -> bool:
+        """Returns True if all shape dimensions are defined integers (no None or dynamic dims)."""
+        return all(isinstance(dim, int) and dim >= 0 for dim in self.shape)
 
-    def validate(self, other: "Array") -> None:
+    def convert_to_entry(self) -> schema.Entry:
+        assert self.dtype is not None
+        return schema._ArrayEntry(self.dtype, shape=self.shape)
+
+    def validate(self, other: Any) -> None:
         """Checks if another Array specification can be assigned to this marker.
 
         Raises:
@@ -59,16 +66,16 @@ class Array(Marker[T]):
                     f"(target shape={list(self.shape)}, incoming shape={list(other.shape)})."
                 )
 
-class Struct(SchemaArrayStorage):
+class Struct(SchemaArrayStorage, SchemaConvertable):
 
-    _schema_specs: dict[str, Array]
+    _schema_specs: dict[str, SchemaConvertable]
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
         cls_name = cls.__name__
         annotations = getattr(cls, "__annotations__", {})
-        fields: dict[str, Array] = {}
+        fields: dict[str, schema.SchemaConvertable] = {}
 
         if has_untyped_class_definitions(cls):
             raise TypeError(
@@ -96,7 +103,17 @@ class Struct(SchemaArrayStorage):
                     )
 
                 fields[field_name] = default_val
+            elif isinstance(field_type, type) and issubclass(field_type, schema.SchemaConvertable):
+                if default_val is None:
+                    default_val = field_type()
 
+                if not isinstance(default_val, SchemaConvertable):
+                    raise TypeError(
+                        f"Field '{field_name}' in '{cls_name}' expects a default value of type '{field_type.__name__}' "
+                        f"(subclass of SchemaConvertable), but got '{type(default_val).__name__}'."
+                    )
+                
+                fields[field_name] = default_val
             else:
                 raise TypeError(
                     f"Invalid type annotation '{cls!r}' for field '{field_name}' in Schema '{cls}'. "
@@ -106,16 +123,27 @@ class Struct(SchemaArrayStorage):
 
         cls._schema_specs = fields
 
-
     def __init__(self, **fields: Any) -> None:
         for name, value in fields.items():
             schema_spec = self._schema_specs[name]
 
-            if not isinstance(value, Array):
-                raise TypeError(
-                    f"Field '{name}' expects an Array marker, but got '{type(value).__name__}'."
-                )
-            
-            schema_spec.validate(value)
+            if isinstance(value, Array):
+                value.validate(schema_spec)
 
             setattr(self, name, value)
+
+        self.schema = self._create_schema()
+
+    def is_static(self) -> bool:
+        return all(f.is_static for f in self.schema.fields.values())
+
+    def _create_schema(self) -> schema.Schema:
+        return schema.Schema(
+            dtype=type(self),
+            fields={k: v.convert_to_entry() for k, v in self._schema_specs.items()}
+        )
+
+    def convert_to_entry(self) -> schema.Entry:
+        return schema._SchemaEntry(
+            schema=self._create_schema(),
+        )

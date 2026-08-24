@@ -9,15 +9,15 @@ class SimpleStruct(B.Struct):
     val_bool: bool
 
 
-# class Foo(B.Struct):
-#     a: np.complex64
-#     b: float
+class Foo(B.Struct):
+    a: np.complex64
+    b: float
 
 
-# class CTF(B.Struct):
-#     voltage_kv: float
-#     amplitude_contrast: float
-#     foo: Foo
+class CTF(B.Struct):
+    voltage_kv: float
+    amplitude_contrast: float
+    foo: Foo
 
 
 # class Particle(B.Struct):
@@ -28,8 +28,13 @@ class SimpleStruct(B.Struct):
 
 def test_simple_struct():
 
-    print(SimpleStruct._schema_specs)
+    struct = SimpleStruct()
+    struct.schema.print_tree()
 
+def test_nested_struct():
+
+    struct = CTF()
+    struct.schema.print_tree()
 
 if __name__ == "__main__":
-    test_simple_struct()
+    test_nested_struct()
