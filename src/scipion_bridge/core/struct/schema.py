@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from typing import Iterator, Optional, Dict, Tuple, Type, Union
+from typing import Iterator, Optional, Dict, Tuple, Type, Union, Any
 
 class SchemaConvertable(metaclass=abc.ABCMeta):
 
@@ -13,6 +13,11 @@ class SchemaConvertable(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def is_static(self) -> bool:
+        ...
+
+    @abc.abstractmethod
+    def default(self, value: Optional[Any] = None) -> "SchemaConvertable":
+        """Creates a default instance (if value is None) or validates and binds an override value."""
         ...
 
 class Entry(metaclass=abc.ABCMeta):

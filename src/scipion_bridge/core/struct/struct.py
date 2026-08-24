@@ -9,12 +9,14 @@ from ..utils.type_annotation import has_untyped_class_definitions
 
 T = TypeVar("T")
 
+
 def _is_array_type(cls: Type) -> bool:
     try:
         dt = np.dtype(cls)
         return dt.kind != "O"
     except (TypeError, ValueError):
         return False
+
 
 class Array(Marker[T], schema.SchemaConvertable):
 
@@ -37,7 +39,7 @@ class Array(Marker[T], schema.SchemaConvertable):
 
     def convert_to_entry(self) -> schema.Entry:
         assert self.dtype is not None
-        return schema._ArrayEntry(self.dtype, shape=self.shape)
+        return schema._ArrayEntry(np.dtype(self.dtype), shape=self.shape)
 
     def validate(self, other: Any) -> None:
         """Checks if another Array specification can be assigned to this marker.
@@ -53,18 +55,35 @@ class Array(Marker[T], schema.SchemaConvertable):
 
         if len(self.shape) != len(other.shape):
             raise ValueError(
-                f"Rank mismatch: cannot assign Array with rank {len(other.shape)} "
-                f"(shape={list(other.shape)}) to target with rank {len(self.shape)} "
-                f"(shape={list(self.shape)})."
+                f"Rank mismatch: cannot assign Array with rank {len(self.shape)} "
+                f"(shape={list(self.shape)}) to target with rank {len(other.shape)} "
+                f"(shape={list(other.shape)})."
             )
 
-        for axis, (expected_dim, incoming_dim) in enumerate(zip(self.shape, other.shape)):
+        for axis, (incoming_dim, expected_dim) in enumerate(
+            zip(self.shape, other.shape)
+        ):
             if expected_dim is not None and incoming_dim != expected_dim:
                 raise ValueError(
                     f"Dimension mismatch at axis {axis}: static dimension {expected_dim} "
                     f"cannot be overwritten by {incoming_dim} "
-                    f"(target shape={list(self.shape)}, incoming shape={list(other.shape)})."
+                    f"(target shape={list(other.shape)}, incoming shape={list(self.shape)})."
                 )
+
+    def default(self, value: Optional[Any] = None) -> "Array":
+        if value is None:
+            return Array(dtype=self.dtype, shape=self.shape)
+
+        if not isinstance(value, Array):
+            raise TypeError(
+                f"Expected an Array marker specification, but got '{type(value).__name__}'."
+            )
+
+        value.validate(self)
+        if value.dtype is None:
+            value._dtype = self.dtype
+        return value
+
 
 class Struct(SchemaArrayStorage, SchemaConvertable):
 
@@ -103,7 +122,9 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
                     )
 
                 fields[field_name] = default_val
-            elif isinstance(field_type, type) and issubclass(field_type, schema.SchemaConvertable):
+            elif isinstance(field_type, type) and issubclass(
+                field_type, schema.SchemaConvertable
+            ):
                 if default_val is None:
                     default_val = field_type()
 
@@ -112,7 +133,7 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
                         f"Field '{field_name}' in '{cls_name}' expects a default value of type '{field_type.__name__}' "
                         f"(subclass of SchemaConvertable), but got '{type(default_val).__name__}'."
                     )
-                
+
                 fields[field_name] = default_val
             else:
                 raise TypeError(
@@ -124,15 +145,26 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
         cls._schema_specs = fields
 
     def __init__(self, **fields: Any) -> None:
-        for name, value in fields.items():
-            schema_spec = self._schema_specs[name]
+        extra_keys = set(fields) - set(self._schema_specs)
+        if extra_keys:
+            raise TypeError(
+                f"'{type(self).__name__}' got unexpected keyword argument(s): {list(extra_keys)}"
+            )
 
-            if isinstance(value, Array):
-                value.validate(schema_spec)
-
-            setattr(self, name, value)
+        for name, spec in self._schema_specs.items():
+            setattr(self, name, spec.default(fields.get(name)))
 
         self.schema = self._create_schema()
+
+    def default(self, value: Optional[Any] = None) -> "Struct":
+        if value is None:
+            return type(self)()
+
+        if not isinstance(value, type(self)):
+            raise TypeError(
+                f"Expected field of type '{type(self).__name__}', but got '{type(value).__name__}'."
+            )
+        return value
 
     def is_static(self) -> bool:
         return all(f.is_static for f in self.schema.fields.values())
@@ -140,7 +172,10 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
     def _create_schema(self) -> schema.Schema:
         return schema.Schema(
             dtype=type(self),
-            fields={k: v.convert_to_entry() for k, v in self._schema_specs.items()}
+            fields={
+                k: getattr(self, k).convert_to_entry()
+                for k in self._schema_specs.keys()
+            },
         )
 
     def convert_to_entry(self) -> schema.Entry:
