@@ -11,7 +11,7 @@ except ImportError:
     from functools import lru_cache as cache
 import numpy as np
 
-from .schema import create_schema, Schema
+from .schema import Schema
 from .entries import Entry, _ArrayEntry, _StructEntry, _SchemaSetEntry, SchemaConvertible, _StorageView
 from .set import Set
 

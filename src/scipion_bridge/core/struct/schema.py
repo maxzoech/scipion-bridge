@@ -1,18 +1,26 @@
-"""Schema definition and construction.
-
-A Schema is a tree of Entry objects that describes the storage layout
-derived from a Struct class definition.  ``create_schema`` is the public
-factory that builds a Schema from a Struct type.
-"""
-
-import types
 import numpy as np
-import typing
-from dataclasses import dataclass
-from typing import Type, Any, Dict, Optional, Set, TypeVar, Generic, Tuple, Iterator, Callable, ForwardRef
 
-from ..utils.type_annotation import has_untyped_class_definitions
+from typing import (
+    Self,
+    Type,
+    Any,
+    Tuple,
+    Dict,
+    Optional,
+    Union,
+    Set,
+    TypeVar,
+    Generic,
+    Tuple,
+    Iterator,
+    Callable,
+    ForwardRef,
+    get_origin,
+)
+
 from ..utils.format import format_list
+from ..utils.marker import Marker
+
 from .entries import (
     Entry,
     SchemaConvertible,
@@ -22,242 +30,235 @@ from .entries import (
 
 from ._type_checks import is_array_marker
 
-# ---------------------------------------------------------------------------
-# Array generic marker
-# ---------------------------------------------------------------------------
-
 T = TypeVar("T")
 
-class Array(Generic[T]):
-    """Type annotation marker for variable-shape array fields."""
 
-    _bridge_array_marker = True
+class Array(Marker[T]):
 
-    __runtime_args__: Tuple[Any, ...] = ()
-    _generic_cache: Dict[Any, Any] = {}
+    def __init__(
+        self,
+        dtype: Optional[np.dtype] = None,
+        *,
+        shape: Tuple[Union[int, None], ...],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(dtype)
 
-    @classmethod
-    def __class_getitem__(cls, params):
-        raw_args = params if isinstance(params, tuple) else (params,)
-
-        # Use Generic[T] behavior for TypeVars for type checkers
-        if any(isinstance(t, TypeVar) for t in raw_args):
-            return types.GenericAlias(cls, (raw_args[0],))
-
-        # TODO: Correctly handle forward-declared references
-        if any(isinstance(t, (str, ForwardRef)) for t in raw_args):
-            return types.GenericAlias(cls, (raw_args[0],))
-
-        dtype = raw_args[0]
-        if len(raw_args) > 1:
-            if isinstance(raw_args[1], (list, tuple)):
-                shape_tuple = tuple(raw_args[1])
-            else:
-                shape_tuple = tuple(raw_args[1:])
-        else:
-            shape_tuple = ()
-
-        cache_key = (cls, dtype, shape_tuple)
-        if cache_key in Array._generic_cache:
-            return Array._generic_cache[cache_key]
-
-        dtype_name = getattr(dtype, "__name__", str(dtype))
-        if shape_tuple:
-            if len(raw_args) > 1 and isinstance(raw_args[1], (list, tuple)):
-                shape_str = f"[{', '.join(str(s) for s in shape_tuple)}]"
-            else:
-                shape_str = ", ".join(str(s) for s in shape_tuple)
-            new_cls_name = f"{cls.__name__}[{dtype_name}, {shape_str}]"
-        else:
-            new_cls_name = f"{cls.__name__}[{dtype_name}]"
-
-        runtime_args = (dtype, *shape_tuple)
-
-        new_cls = type(
-            new_cls_name,
-            (cls,),
-            {
-                "__module__": cls.__module__,
-                "__runtime_args__": runtime_args,
-                "__origin__": cls,
-                "__args__": (dtype,),
-            },
-        )
-
-        Array._generic_cache[cache_key] = new_cls
-        return new_cls
-
-    @classmethod
-    def dtype(cls) -> Type:
-        if len(cls.__runtime_args__) == 0:
-            raise TypeError(
-                f"Missing data type parameter for {cls.__name__}. "
-                f"Please specify it explicitly (e.g., {cls.__name__}[int] or {cls.__name__}[float])."
-            )
-
-        return cls.__runtime_args__[0]
-
-    @classmethod
-    def shape(cls) -> Tuple[int, ...]:
-        return cls.__runtime_args__[1:]
+        self.shape = shape
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
 
-@dataclass
-class Schema:
-    """A tree of :class:`Entry` objects describing the storage layout of a Struct."""
-
-    fields: Dict[str, Entry]
-
-    def entries(self) -> Set[str]:
-        return set(self.fields.keys())
-
-    @property
-    def is_static(self) -> bool:
-        """True when every field in the schema has a fixed shape."""
-        return all(entry.is_static for entry in self.fields.values())
-
-    def tree_iter(self, root: str = "") -> Iterator[Tuple[str, Entry]]:
-        """Yield (path, entry) for all leaf entries in the schema."""
-        for key, entry in self.fields.items():
-            path = f"{root}.{key}" if root else key
-            if entry.children is not None:
-                yield from entry.children.tree_iter(root=path)
-            else:
-                yield path, entry
-
-    def iter_leaves(self, prefix: str = "") -> Iterator[Tuple[str, Entry]]:
-        """Yield (path, entry) for all leaf entries in the schema."""
-        yield from self.tree_iter(root=prefix)
-
-    def map_leaves(self, func: Callable[[str, Entry], Any], prefix: str = "") -> Dict[str, Any]:
-        """Apply func to all leaf entries, returning a dictionary mapping path -> result."""
-        return {
-            path: func(path, entry)
-            for path, entry in self.iter_leaves(prefix=prefix)
-        }
-
-    def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
-        """Print the schema in a hierarchical tree format."""
-        header = typename if typename is not None else "/"
-        if self.is_static:
-            header += " (static size)"
-
-        print(header)
-
-        def _print_node(schema: "Schema", prefix: str = ""):
-            items = list(schema.fields.items())
-            for i, (key, entry) in enumerate(items):
-                is_last = (i == len(items) - 1)
-                connector = "└── " if is_last else "├── "
-
-                print(f"{prefix}{connector}{entry.format_entry(key)}")
-
-                if entry.children is not None:
-                    extension = "    " if is_last else "│   "
-                    _print_node(entry.children, prefix + extension)
-
-        _print_node(self)
-
-
-# ---------------------------------------------------------------------------
-# Validation helpers
-# ---------------------------------------------------------------------------
-
-def _supports_array_storage(dtype: Type):
-    """Return whether *dtype* can be stored in an array backend."""
-    if isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
-        return _validate_struct_datatypes(dtype, root=dtype.__qualname__)
-
+def _is_array_type(cls: Type) -> bool:
     try:
-        return not np.dtype(dtype).hasobject
-    except TypeError:
+        dt = np.dtype(cls)
+        return dt.kind != "O"
+    except (TypeError, ValueError):
         return False
 
 
-def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
-    """Recursively validate that all fields in *cls* support array storage."""
-    is_serializable = {}
+class Schema:
 
-    attributes = {k: v for k, v in typing.get_type_hints(cls).items() if not k.startswith("_")}
-    for k, v in attributes.items():
-        key_path = k if root is None else f"{root}.{k}"
+    _schema_fields: dict[str, Array]
 
-        if is_array_marker(v):
-            elem_type = v.dtype()
-            is_serializable[key_path] = _supports_array_storage(elem_type)
-        elif isinstance(v, type) and issubclass(v, SchemaConvertible):
-            nested = v._validate_as_field(key_path)
-            is_serializable.update(nested)
-        else:
-            is_serializable[key_path] = _supports_array_storage(v)
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
 
-    return is_serializable
+        cls_name = cls.__name__
+        annotations = getattr(cls, "__annotations__", {})
+        fields: dict[str, Array] = {}
 
+        for field_name, field_type in annotations.items():
+            origin_cls = get_origin(field_type)
+            default_val = getattr(cls, field_name, None)
 
-# ---------------------------------------------------------------------------
-# Schema construction
-# ---------------------------------------------------------------------------
+            if _is_array_type(field_type):
+                fields[field_name] = Array(
+                    dtype=np.dtype(field_type),
+                    shape=(),
+                    _scalar_type=field_type,
+                )
 
-def create_schema(cls: Type) -> Schema:
-    """Build a :class:`Schema` from a Struct class definition.
+            elif origin_cls is Array:
+                if not default_val:
+                    raise ValueError(
+                        f"Field '{field_name}' in '{cls_name}' is typed as '{field_type}', "
+                        f"but is missing a default Array specification. "
+                        f"Expected: {field_name}: {field_type} = Array(shape=(...))"
+                    )
 
-    Validates that all fields have type annotations and that their types
-    support array serialization before constructing the schema tree.
-    """
-    # Reject classes with untyped attributes (e.g. ``x = 10``)
-    if has_untyped_class_definitions(cls):
-        raise TypeError(
-            f"The struct {cls.__qualname__} declares attributes without type annotations."
-        )
+                fields[field_name] = default_val
 
-    # Verify that all types can be serialized
-    is_serializable = _validate_struct_datatypes(cls)
-    if not all(is_serializable.values()):
-        incompatible_attrs = [k for k, v in is_serializable.items() if v == False]
-
-        attr_str = "attribute" if len(incompatible_attrs) == 1 else "attributes"
-        incompatible_list = format_list(incompatible_attrs)
-
-        raise TypeError(
-            f"The {attr_str} '{incompatible_list}' cannot be declared in struct "
-            f"'{cls.__qualname__}' because it does not support array serialization."
-        )
-
-    def _convert(field: Type) -> Entry:
-        # SchemaConvertible types (Struct, Set) know how to produce their own entry
-        if isinstance(field, type) and issubclass(field, SchemaConvertible):
-            return field.to_schema_entry()
-
-        # origin = typing.get_origin(dtype)
-        if is_array_marker(field):
-            v: Any = field
-            elem_type = v.dtype()
-
-            if (
-                all(isinstance(x, int) for x in v.shape()) and 
-                len(v.shape()) > 0
-            ):
-                static_shape = v.shape()
             else:
-                static_shape = None
+                raise TypeError(
+                    f"Invalid type annotation '{cls!r}' for field '{field_name}' in Schema '{cls}'. "
+                    f"Expected a primitive numeric/scalar type (e.g., float, int, bool) or an Array type (e.g., Array[float]), "
+                    f"but got an unsupported or non-convertible type."
+                )
 
-            return _ArrayEntry(
-                np.dtype(elem_type),
-                _ArrayLocation.AUTOMATIC,
-                min_shape=static_shape,
-                max_shape=static_shape,
-                preferred_shape=None,
-            )
-        
-        return _ArrayEntry(
-            np.dtype(field),
-            _ArrayLocation.AUTOMATIC,
-            min_shape=(1,),
-            max_shape=(1,),
-            preferred_shape=None,
-        )
+        cls._schema_fields = fields
 
-    attributes = {k: v for k, v in typing.get_type_hints(cls).items() if not k.startswith("_")}
-    return Schema(
-        fields={k: _convert(v) for k, v in attributes.items()}
-    )
+    def __init__(self, **fields: Any) -> None:
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
+# @dataclass
+# class Schema:
+#     """A tree of :class:`Entry` objects describing the storage layout of a Struct."""
+
+#     fields: Dict[str, Entry]
+
+#     def entries(self) -> Set[str]:
+#         return set(self.fields.field_names())
+
+#     @property
+#     def is_static(self) -> bool:
+#         """True when every field in the schema has a fixed shape."""
+#         return all(entry.is_static for entry in self.fields.values())
+
+#     def tree_iter(self, root: str = "") -> Iterator[Tuple[str, Entry]]:
+#         """Yield (path, entry) for all leaf entries in the schema."""
+#         for field_name, entry in self.fields.items():
+#             path = f"{root}.{field_name}" if root else field_name
+#             if entry.children is not None:
+#                 yield from entry.children.tree_iter(root=path)
+#             else:
+#                 yield path, entry
+
+#     def iter_leaves(self, prefix: str = "") -> Iterator[Tuple[str, Entry]]:
+#         """Yield (path, entry) for all leaf entries in the schema."""
+#         yield from self.tree_iter(root=prefix)
+
+#     def map_leaves(self, func: Callable[[str, Entry], Any], prefix: str = "") -> Dict[str, Any]:
+#         """Apply func to all leaf entries, returning a dictionary mapping path -> result."""
+#         return {
+#             path: func(path, entry)
+#             for path, entry in self.iter_leaves(prefix=prefix)
+#         }
+
+#     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
+#         """Print the schema in a hierarchical tree format."""
+#         header = typename if typename is not None else "/"
+#         if self.is_static:
+#             header += " (static size)"
+
+#         print(header)
+
+#         def _print_node(schema: "Schema", prefix: str = ""):
+#             items = list(schema.fields.items())
+#             for i, (field_name, entry) in enumerate(items):
+#                 is_last = (i == len(items) - 1)
+#                 connector = "└── " if is_last else "├── "
+
+#                 print(f"{prefix}{connector}{entry.format_entry(field_name)}")
+
+#                 if entry.children is not None:
+#                     extension = "    " if is_last else "│   "
+#                     _print_node(entry.children, prefix + extension)
+
+#         _print_node(self)
+
+
+# # ---------------------------------------------------------------------------
+# # Validation helpers
+# # ---------------------------------------------------------------------------
+
+# def _supports_array_storage(cls: Type):
+#     """Return whether *cls* can be stored in an array backend."""
+#     if isinstance(cls, type) and issubclass(cls, SchemaConvertible):
+#         return _validate_struct_datatypes(cls, root=cls.__qualname__)
+
+#     try:
+#         return not np.cls(cls).hasobject
+#     except TypeError:
+#         return False
+
+
+# def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
+#     """Recursively validate that all fields in *cls* support array storage."""
+#     is_serializable = {}
+
+#     attributes = {k: v for k, v in typing.get_type_hints(cls).items() if not k.startswith("_")}
+#     for k, v in attributes.items():
+#         field_name_path = k if root is None else f"{root}.{k}"
+
+#         if is_array_marker(v):
+#             elem_type = v.cls()
+#             is_serializable[field_name_path] = _supports_array_storage(elem_type)
+#         elif isinstance(v, type) and issubclass(v, SchemaConvertible):
+#             nested = v._validate_as_field(field_name_path)
+#             is_serializable.update(nested)
+#         else:
+#             is_serializable[field_name_path] = _supports_array_storage(v)
+
+#     return is_serializable
+
+
+# # ---------------------------------------------------------------------------
+# # Schema construction
+# # ---------------------------------------------------------------------------
+
+# def create_schema(cls: Type) -> Schema:
+#     """Build a :class:`Schema` from a Struct class definition.
+
+#     Validates that all fields have type annotations and that their types
+#     support array serialization before constructing the schema tree.
+#     """
+#     # Reject classes with untyped attributes (e.g. ``x = 10``)
+#     if has_untyped_class_definitions(cls):
+#         raise TypeError(
+#             f"The struct {cls.__qualname__} declares attributes without type annotations."
+#         )
+
+#     # Verify that all types can be serialized
+#     is_serializable = _validate_struct_datatypes(cls)
+#     if not all(is_serializable.values()):
+#         incompatible_attrs = [k for k, v in is_serializable.items() if v == False]
+
+#         attr_str = "attribute" if len(incompatible_attrs) == 1 else "attributes"
+#         incompatible_list = format_list(incompatible_attrs)
+
+#         raise TypeError(
+#             f"The {attr_str} '{incompatible_list}' cannot be declared in struct "
+#             f"'{cls.__qualname__}' because it does not support array serialization."
+#         )
+
+#     def _convert(field: Type) -> Entry:
+#         # SchemaConvertible types (Struct, Set) know how to produce their own entry
+#         if isinstance(field, type) and issubclass(field, SchemaConvertible):
+#             return field.to_schema_entry()
+
+#         # origin = typing.get_origin(cls)
+#         if is_array_marker(field):
+#             v: Any = field
+#             elem_type = v.cls()
+
+#             if (
+#                 all(isinstance(x, int) for x in v.shape()) and
+#                 len(v.shape()) > 0
+#             ):
+#                 static_shape = v.shape()
+#             else:
+#                 static_shape = None
+
+#             return _ArrayEntry(
+#                 np.cls(elem_type),
+#                 _ArrayLocation.AUTOMATIC,
+#                 min_shape=static_shape,
+#                 max_shape=static_shape,
+#                 preferred_shape=None,
+#             )
+
+#         return _ArrayEntry(
+#             np.cls(field),
+#             _ArrayLocation.AUTOMATIC,
+#             min_shape=(1,),
+#             max_shape=(1,),
+#             preferred_shape=None,
+#         )
+
+#     attributes = {k: v for k, v in typing.get_type_hints(cls).items() if not k.startswith("_")}
+#     return Schema(
+#         fields={k: _convert(v) for k, v in attributes.items()}
+#     )
