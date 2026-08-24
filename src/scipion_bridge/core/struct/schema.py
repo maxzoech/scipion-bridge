@@ -102,10 +102,6 @@ class Array(Generic[T]):
         return cls.__runtime_args__[1:]
 
 
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Schema:
     """A tree of :class:`Entry` objects describing the storage layout of a Struct."""
