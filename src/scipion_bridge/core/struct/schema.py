@@ -8,6 +8,11 @@ from typing import Iterator, Optional, Dict, Tuple, Type, Union, Any
 class SchemaConvertable(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
+    def validate(self, other: Any) -> None:
+        """Validate that another instance matches this specification's type and structure."""
+        ...
+
+    @abc.abstractmethod
     def convert_to_entry(self) -> "Entry":
         ...
 
@@ -16,9 +21,26 @@ class SchemaConvertable(metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
-    def default(self, value: Optional[Any] = None) -> "SchemaConvertable":
-        """Creates a default instance (if value is None) or validates and binds an override value."""
+    def hydrate(self, context: Optional[Dict[Any, Any]] = None) -> "SchemaConvertable":
+        """Hydrate this object with dimension bindings from context."""
         ...
+
+    def bind(
+        self,
+        value: Optional[Any] = None,
+        context: Optional[Dict[Any, Any]] = None,
+    ) -> "SchemaConvertable":
+        """Validate and bind an incoming override value, or hydrate defaults."""
+        if value is None:
+            return self.hydrate(context)
+        
+        self.validate(value)
+        
+        return value
+
+    def default(self) -> "SchemaConvertable":
+        """Creates a default instance."""
+        return self.hydrate({})
 
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
@@ -95,7 +117,7 @@ class _ArraySetEntry(_ArrayEntryBase):
         shape: Tuple[int, ...],
     ) -> None:
         # Enforce that ArraySet only receives fully concrete integer dimensions
-        if any(dim is None or dim < 0 for dim in shape):
+        if any(dim is None for dim in shape):
             raise ValueError(f"ArraySet shape must be fully static, got: {shape}")
 
         super().__init__(dtype=dtype, shape=shape)
