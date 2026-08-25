@@ -1,8 +1,7 @@
 import numpy as np
 from typing import Type, TypeVar, Tuple, Union, Any, Optional
 
-from . import schema
-from .schema import SchemaConvertible
+from .schema import SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from .storage import SchemaArrayStorage
 from ..utils.marker import Marker
 from ..utils.type_annotation import has_untyped_class_definitions
@@ -10,7 +9,7 @@ from ..utils.type_annotation import has_untyped_class_definitions
 T = TypeVar("T")
 
 
-def _is_array_type(cls: Type) -> bool:
+def _is_supported_scalar_value(cls: Type) -> bool:
     try:
         dt = np.dtype(cls)
         return dt.kind != "O"
@@ -114,7 +113,7 @@ class Dim:
         return id(self)
 
 
-class Array(Marker[T], schema.SchemaConvertible):
+class Array(Marker[T], SchemaConvertible):
 
     def __init__(
         self,
@@ -131,7 +130,7 @@ class Array(Marker[T], schema.SchemaConvertible):
             setattr(self, k, v)
 
     def is_static(self) -> bool:
-        """Returns True if all shape dimensions are defined integers (no None or dynamic dims)."""
+        """Returns True if all shape dimensions are defined integers."""
         return all(dim.is_static for dim in self.shape)
 
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Array":
@@ -144,10 +143,10 @@ class Array(Marker[T], schema.SchemaConvertible):
             **self.options,
         )
 
-    def convert_to_entry(self) -> schema.Entry:
+    def convert_to_entry(self) -> Entry:
         assert self.dtype is not None
         resolved_shape = tuple(dim.resolve_value() for dim in self.shape)
-        return schema._ArrayEntry(np.dtype(self.dtype), shape=resolved_shape)
+        return _ArrayEntry(np.dtype(self.dtype), shape=resolved_shape)
 
     def validate(self, other: Any) -> None:
         """Checks if another Array specification can be assigned to this marker.
@@ -204,7 +203,7 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             )
 
         dim_fields: dict[str, Dim] = {}
-        spec_fields: dict[str, schema.SchemaConvertible] = {}
+        spec_fields: dict[str, SchemaConvertible] = {}
 
         # Inherit specs from base classes in reverse MRO order
         for base in reversed(cls.__mro__):
@@ -216,36 +215,33 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
         for field_name, field_type in annotations.items():
             default_val = getattr(cls, field_name, None)
 
+            # 1. Dimension field
             if field_type is Dim:
                 dim_fields[field_name] = Dim.new(default_val, name=field_name)
 
-            elif _is_array_type(field_type):
+            # 2. Primitive scalar shorthand (float, int, bool -> Array with shape (1,))
+            elif _is_supported_scalar_value(field_type):
                 spec_fields[field_name] = Array(
                     dtype=np.dtype(field_type),
-                    shape=(),
-                    _scalar_type=field_type,
+                    shape=(1,),
                 )
 
-            elif isinstance(field_type, type) and issubclass(field_type, Array):
-                if not default_val:
+            # 3. SchemaConvertible field (Array, Struct, Set)
+            elif isinstance(field_type, type) and issubclass(
+                field_type, SchemaConvertible
+            ):
+                if issubclass(field_type, Array) and not default_val:
                     raise ValueError(
                         f"Field '{field_name}' in '{cls_name}' is typed as '{field_type}', "
                         f"but is missing a default Array specification. "
                         f"Expected: {field_name}: {field_type} = Array(shape=(...))"
                     )
 
-                spec_fields[field_name] = default_val
-
-            elif isinstance(field_type, type) and issubclass(
-                field_type, schema.SchemaConvertible
-            ):
-                if default_val is None:
-                    default_val = field_type()
-
+                default_val = default_val if default_val is not None else field_type()
                 if not isinstance(default_val, SchemaConvertible):
                     raise TypeError(
                         f"Field '{field_name}' in '{cls_name}' expects a default value of type '{field_type.__name__}' "
-                        f"(subclass of SchemaConvertable), but got '{type(default_val).__name__}'."
+                        f"(subclass of SchemaConvertible), but got '{type(default_val).__name__}'."
                     )
 
                 spec_fields[field_name] = default_val
@@ -259,13 +255,6 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
 
         cls._dim_specs = dim_fields
         cls._schema_specs = spec_fields
-
-    def validate(self, other: Any) -> None:
-        """Checks if another Struct specification can be assigned to this marker."""
-        if not isinstance(other, type(self)):
-            raise TypeError(
-                f"Expected field of type '{type(self).__name__}', but got '{type(other).__name__}'."
-            )
 
     def __init__(self, **kwargs: Any) -> None:
         allowed_keys = set(self._schema_specs) | set(self._dim_specs)
@@ -299,6 +288,13 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
 
         self.schema = self._create_schema()
 
+    def validate(self, other: Any) -> None:
+        """Checks if another Struct specification can be assigned to this marker."""
+        if not isinstance(other, type(self)):
+            raise TypeError(
+                f"Expected field of type '{type(self).__name__}', but got '{type(other).__name__}'."
+            )
+
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
         if context is None:
             context = {}
@@ -308,10 +304,8 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             for dim_name, default_dim in self._dim_specs.items()
         }
 
-        for field_name, default_spec in self._schema_specs.items():
-            bound_field = getattr(self, field_name, default_spec)
-            if field_name in self.__dict__ and bound_field is not default_spec:
-                resolved_kwargs[field_name] = bound_field.specialize(context)
+        for field_name in self._schema_specs:
+            resolved_kwargs[field_name] = getattr(self, field_name).specialize(context)
 
         return type(self)(**resolved_kwargs)
 
@@ -321,8 +315,8 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
     def is_static(self) -> bool:
         return all(f.is_static for f in self.schema.fields.values())
 
-    def _create_schema(self) -> schema.Schema:
-        return schema.Schema(
+    def _create_schema(self) -> Schema:
+        return Schema(
             dtype=type(self),
             fields={
                 k: getattr(self, k).convert_to_entry()
@@ -330,7 +324,7 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             },
         )
 
-    def convert_to_entry(self) -> schema.Entry:
-        return schema._SchemaEntry(
+    def convert_to_entry(self) -> Entry:
+        return _SchemaEntry(
             schema=self._create_schema(),
         )

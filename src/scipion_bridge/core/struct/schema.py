@@ -5,6 +5,7 @@ import numpy as np
 
 from typing import Iterator, Optional, Dict, Tuple, Type, Union, Any
 
+
 class SchemaConvertible(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
@@ -13,15 +14,15 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
-    def convert_to_entry(self) -> "Entry":
-        ...
+    def convert_to_entry(self) -> "Entry": ...
 
     @abc.abstractmethod
-    def is_static(self) -> bool:
-        ...
+    def is_static(self) -> bool: ...
 
     @abc.abstractmethod
-    def specialize(self, context: Optional[Dict[Any, Any]] = None) -> "SchemaConvertible":
+    def specialize(
+        self, context: Optional[Dict[Any, Any]] = None
+    ) -> "SchemaConvertible":
         """Specialize this specification with dimension bindings from context."""
         ...
 
@@ -33,7 +34,7 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         """Validate and bind an incoming override value, or specialize defaults."""
         if value is None:
             return self.specialize(context)
-        
+
         self.validate(value)
 
         return value
@@ -41,6 +42,7 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     def default(self) -> "SchemaConvertible":
         """Creates a default instance."""
         return self.specialize({})
+
 
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
@@ -61,6 +63,11 @@ class Entry(metaclass=abc.ABCMeta):
         """Return the nested schema if this entry contains children, else None."""
         return None
 
+    @abc.abstractmethod
+    def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
+        """Transform this entry into its Set-vectorized entry representation."""
+        ...
+
 
 class _ArrayEntryBase(Entry):
     """Shared behaviour for all array-backed entry types."""
@@ -80,12 +87,11 @@ class _ArrayEntryBase(Entry):
 
     @property
     @abc.abstractmethod
-    def entry_name(self) -> str:
-        ...
+    def entry_name(self) -> str: ...
 
     @property
     def is_static(self) -> bool:
-        """Static if all dimensions are defined integers (no None / dynamic dims)."""
+        """Static if all dimensions are defined integers >= 0."""
         return all(isinstance(dim, int) and dim >= 0 for dim in self.shape)
 
     def format_entry(self, name: str) -> str:
@@ -93,6 +99,7 @@ class _ArrayEntryBase(Entry):
         shape_str = list(self.shape)
 
         return f"{name}: {self.entry_name}[{dtype_str}], shape: {shape_str})"
+
 
 class _ArrayEntry(_ArrayEntryBase):
     """An array field whose shape may or may not be fully static."""
@@ -108,19 +115,36 @@ class _ArrayEntry(_ArrayEntryBase):
     def entry_name(self) -> str:
         return "Array"
 
+    def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
+        if self.is_static:
+            return _ArraySetEntry(
+                dtype=self.dtype,
+                shape=self.shape,
+                capacity=capacity,
+            )
+        else:
+            return _RaggedArraySetEntry(
+                dtype=self.dtype,
+                shape=self.shape,
+                capacity=capacity,
+            )
+
+
 class _ArraySetEntry(_ArrayEntryBase):
     """A fixed-shape array field inside a Set context."""
 
     def __init__(
         self,
         dtype: np.dtype,
-        shape: Tuple[int, ...],
+        shape: Tuple[Union[int, None], ...],
+        capacity: Optional[int] = None,
     ) -> None:
         # Enforce that ArraySet only receives fully concrete integer dimensions
         if any(dim is None for dim in shape):
             raise ValueError(f"ArraySet shape must be fully static, got: {shape}")
 
         super().__init__(dtype=dtype, shape=shape)
+        self.capacity = capacity
 
     @property
     def is_static(self) -> bool:
@@ -130,6 +154,12 @@ class _ArraySetEntry(_ArrayEntryBase):
     def entry_name(self) -> str:
         return "ArraySet"
 
+    def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
+        return _ArraySetEntry(
+            dtype=self.dtype, shape=self.shape, capacity=capacity or self.capacity
+        )
+
+
 class _RaggedArraySetEntry(_ArrayEntryBase):
     """A variable-shape array field inside a Set."""
 
@@ -137,8 +167,10 @@ class _RaggedArraySetEntry(_ArrayEntryBase):
         self,
         dtype: np.dtype,
         shape: Tuple[Union[int, None], ...],
+        capacity: Optional[int] = None,
     ) -> None:
         super().__init__(dtype=dtype, shape=shape)
+        self.capacity = capacity
 
     @property
     def is_static(self) -> bool:
@@ -147,6 +179,14 @@ class _RaggedArraySetEntry(_ArrayEntryBase):
     @property
     def entry_name(self) -> str:
         return "RaggedArraySet"
+
+    def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
+        return _RaggedArraySetEntry(
+            dtype=self.dtype,
+            shape=self.shape,
+            capacity=(capacity or self.capacity),
+        )
+
 
 class _SchemaEntry(Entry):
     """Wraps a nested struct type and its schema for record instantiation."""
@@ -165,7 +205,10 @@ class _SchemaEntry(Entry):
 
     def format_entry(self, name: str) -> str:
         return f"{name} (struct)"
-    
+
+    def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
+        return _SchemaEntry(schema=self.schema.to_set_schema(capacity=capacity))
+
 
 class _SchemaSetEntry(_SchemaEntry):
     """Wraps a Set[Foo] container entry capable of instantiating Foo elements."""
@@ -180,12 +223,18 @@ class _SchemaSetEntry(_SchemaEntry):
 
     @property
     def is_static(self) -> bool:
-        return False #self.schema.is_static and self.capacity is not None
+        return False
 
     def format_entry(self, name: str) -> str:
         size_str = self.capacity if self.capacity is not None else "dynamic"
         cls_name = self.schema.dtype.__name__ if self.schema.dtype else "struct"
         return f"{name}: Set[{cls_name}](size: {size_str})"
+
+    def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
+        return _SchemaSetEntry(
+            schema=self.schema.to_set_schema(capacity=capacity),
+            capacity=self.capacity,
+        )
 
 
 @dataclass
@@ -194,6 +243,16 @@ class Schema:
 
     dtype: Optional[Type]
     fields: Dict[str, Entry]
+
+    def to_set_schema(self, capacity: Optional[int] = None) -> "Schema":
+        """Transform this schema into its Set-vectorized representation."""
+        return Schema(
+            dtype=self.dtype,
+            fields={
+                name: entry.to_set_entry(capacity=capacity)
+                for name, entry in self.fields.items()
+            },
+        )
 
     @property
     def is_static(self) -> bool:
@@ -209,16 +268,16 @@ class Schema:
             else:
                 yield path, entry
 
-#     def iter_leaves(self, prefix: str = "") -> Iterator[Tuple[str, Entry]]:
-#         """Yield (path, entry) for all leaf entries in the schema."""
-#         yield from self.tree_iter(root=prefix)
+    #     def iter_leaves(self, prefix: str = "") -> Iterator[Tuple[str, Entry]]:
+    #         """Yield (path, entry) for all leaf entries in the schema."""
+    #         yield from self.tree_iter(root=prefix)
 
-#     def map_leaves(self, func: Callable[[str, Entry], Any], prefix: str = "") -> Dict[str, Any]:
-#         """Apply func to all leaf entries, returning a dictionary mapping path -> result."""
-#         return {
-#             path: func(path, entry)
-#             for path, entry in self.iter_leaves(prefix=prefix)
-#         }
+    #     def map_leaves(self, func: Callable[[str, Entry], Any], prefix: str = "") -> Dict[str, Any]:
+    #         """Apply func to all leaf entries, returning a dictionary mapping path -> result."""
+    #         return {
+    #             path: func(path, entry)
+    #             for path, entry in self.iter_leaves(prefix=prefix)
+    #         }
 
     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
         """Print the schema in a hierarchical tree format."""
@@ -231,7 +290,7 @@ class Schema:
         def _print_node(schema: "Schema", prefix: str = ""):
             items = list(schema.fields.items())
             for i, (field_name, entry) in enumerate(items):
-                is_last = (i == len(items) - 1)
+                is_last = i == len(items) - 1
                 connector = "└── " if is_last else "├── "
 
                 print(f"{prefix}{connector}{entry.format_entry(field_name)}")
@@ -241,4 +300,3 @@ class Schema:
                     _print_node(entry.children, prefix + extension)
 
         _print_node(self)
-

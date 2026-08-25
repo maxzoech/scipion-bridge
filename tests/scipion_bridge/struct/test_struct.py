@@ -63,7 +63,7 @@ def test_simple_struct():
     assert struct.is_static()
     assert struct.schema.is_static
     assert set(struct.schema.fields.keys()) == {"val_int", "val_float", "val_bool"}
-    assert_array_entry(struct.schema.fields["val_int"], ())
+    assert_array_entry(struct.schema.fields["val_int"], (1,))
     struct.schema.print_tree()
 
 
@@ -253,7 +253,7 @@ def test_multi_array_shared_dims_mixed_ranks():
 
     mixed = MixedStruct(batch=10, H=32)
     assert mixed.is_static()
-    assert_array_entry(mixed.schema.fields["scalar"], ())
+    assert_array_entry(mixed.schema.fields["scalar"], (1,))
     assert_array_entry(mixed.schema.fields["vector"], (10,))
     assert_array_entry(mixed.schema.fields["image"], (10, 32, 32))
     assert_array_entry(mixed.schema.fields["fixed_cube"], (10, 3, 32, 64))
@@ -324,6 +324,14 @@ def test_struct_definition_and_init_validation_errors():
     # 5. Unexpected keyword argument in Struct constructor
     with pytest.raises(TypeError, match="got unexpected keyword argument"):
         Particle(unexpected_param=123)
+
+
+@pytest.mark.xfail(reason="Reminder for future: Array should enforce explicit shape/rank and disallow unconfigured Array()")
+def test_array_unconfigured_shape_disallowed_reminder():
+    # Future enforcement: Array() with no shape should raise ValueError
+    with pytest.raises(ValueError, match="shape"):
+        class StructWithUnconfiguredArray(B.Struct):
+            pixels: B.Array[float] = B.Array()
 
 
 if __name__ == "__main__":
