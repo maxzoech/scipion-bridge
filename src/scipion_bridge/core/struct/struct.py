@@ -2,7 +2,7 @@ import numpy as np
 from typing import Type, TypeVar, Tuple, Union, Any, Optional
 
 from . import schema
-from .schema import SchemaConvertable
+from .schema import SchemaConvertible
 from .storage import SchemaArrayStorage
 from ..utils.marker import Marker
 from ..utils.type_annotation import has_untyped_class_definitions
@@ -54,8 +54,8 @@ class Dim:
         
         return self.value
 
-    def hydrate(self, context: Optional[dict[Any, Any]] = None) -> "Dim":
-        """Hydrates this Dim against the given substitution context."""
+    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Dim":
+        """Specializes this Dim against the given substitution context."""
         ctx = context or {}
 
         # Case 1: Direct substitution.
@@ -65,7 +65,7 @@ class Dim:
             target = ctx[self]
             if isinstance(target, Dim):
                 # If target Dim is also mapped in ctx, follow the chain; otherwise preserve the target Dim reference
-                return target.hydrate(ctx) if target in ctx else target
+                return target.specialize(ctx) if target in ctx else target
 
             return Dim(target, name=self.name)
 
@@ -73,7 +73,7 @@ class Dim:
         # Occurs when `self` is not directly in `ctx`, but holds a reference to another Dim in `self.value`
         # (e.g. nested struct Particle.H referencing outer Class2D.H, or square dimension constraints H=Dim(size)).
         if isinstance(self.value, Dim):
-            resolved_target = self.value.hydrate(ctx)
+            resolved_target = self.value.specialize(ctx)
             val = resolved_target if resolved_target.value is not None else self.value
             return Dim(val, name=self.name)
 
@@ -114,7 +114,7 @@ class Dim:
         return id(self)
 
 
-class Array(Marker[T], schema.SchemaConvertable):
+class Array(Marker[T], schema.SchemaConvertible):
 
     def __init__(
         self,
@@ -134,13 +134,13 @@ class Array(Marker[T], schema.SchemaConvertable):
         """Returns True if all shape dimensions are defined integers (no None or dynamic dims)."""
         return all(dim.is_static for dim in self.shape)
 
-    def hydrate(self, context: Optional[dict[Any, Any]] = None) -> "Array":
+    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Array":
         if context is None:
             context = {}
 
         return Array(
             dtype=self.dtype,
-            shape=tuple(dim.hydrate(context) for dim in self.shape),
+            shape=tuple(dim.specialize(context) for dim in self.shape),
             **self.options,
         )
 
@@ -182,12 +182,12 @@ class Array(Marker[T], schema.SchemaConvertable):
                 )
 
     def default(self) -> "Array":
-        return self.hydrate({})
+        return self.specialize({})
 
 
-class Struct(SchemaArrayStorage, SchemaConvertable):
+class Struct(SchemaArrayStorage, SchemaConvertible):
 
-    _schema_specs: dict[str, SchemaConvertable]
+    _schema_specs: dict[str, SchemaConvertible]
     _dim_specs: dict[str, Dim]
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -204,7 +204,7 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
             )
 
         dim_fields: dict[str, Dim] = {}
-        spec_fields: dict[str, schema.SchemaConvertable] = {}
+        spec_fields: dict[str, schema.SchemaConvertible] = {}
 
         # Inherit specs from base classes in reverse MRO order
         for base in reversed(cls.__mro__):
@@ -237,12 +237,12 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
                 spec_fields[field_name] = default_val
 
             elif isinstance(field_type, type) and issubclass(
-                field_type, schema.SchemaConvertable
+                field_type, schema.SchemaConvertible
             ):
                 if default_val is None:
                     default_val = field_type()
 
-                if not isinstance(default_val, SchemaConvertable):
+                if not isinstance(default_val, SchemaConvertible):
                     raise TypeError(
                         f"Field '{field_name}' in '{cls_name}' expects a default value of type '{field_type.__name__}' "
                         f"(subclass of SchemaConvertable), but got '{type(default_val).__name__}'."
@@ -280,43 +280,43 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
         for dim_name, default_dim in self._dim_specs.items():
             if dim_name in kwargs:
                 val = kwargs[dim_name]
-                
+
                 if val is None and default_dim.resolve_value() is not None:
                     raise ValueError(
                         f"Cannot override fixed dimension '{dim_name}' "
                         f"(value={default_dim.resolve_value()}) with None."
                     )
-                hydrated_dim = Dim.new(val, name=dim_name)
+                specialized_dim = Dim.new(val, name=dim_name)
             else:
-                hydrated_dim = default_dim.hydrate(dim_context)
+                specialized_dim = default_dim.specialize(dim_context)
 
-            setattr(self, dim_name, hydrated_dim)
-            dim_context[default_dim] = hydrated_dim
+            setattr(self, dim_name, specialized_dim)
+            dim_context[default_dim] = specialized_dim
 
         for field_name, default_spec in self._schema_specs.items():
-            hydrated_field = default_spec.bind(kwargs.get(field_name), dim_context)
-            setattr(self, field_name, hydrated_field)
+            specialized_field = default_spec.bind(kwargs.get(field_name), dim_context)
+            setattr(self, field_name, specialized_field)
 
         self.schema = self._create_schema()
 
-    def hydrate(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
+    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
         if context is None:
             context = {}
 
         resolved_kwargs: dict[str, Any] = {
-            dim_name: getattr(self, dim_name, default_dim).hydrate(context)
+            dim_name: getattr(self, dim_name, default_dim).specialize(context)
             for dim_name, default_dim in self._dim_specs.items()
         }
 
         for field_name, default_spec in self._schema_specs.items():
             bound_field = getattr(self, field_name, default_spec)
             if field_name in self.__dict__ and bound_field is not default_spec:
-                resolved_kwargs[field_name] = bound_field.hydrate(context)
+                resolved_kwargs[field_name] = bound_field.specialize(context)
 
         return type(self)(**resolved_kwargs)
 
     def default(self) -> "Struct":
-        return self.hydrate({})
+        return self.specialize({})
 
     def is_static(self) -> bool:
         return all(f.is_static for f in self.schema.fields.values())

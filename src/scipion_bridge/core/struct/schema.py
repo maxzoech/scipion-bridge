@@ -5,7 +5,7 @@ import numpy as np
 
 from typing import Iterator, Optional, Dict, Tuple, Type, Union, Any
 
-class SchemaConvertable(metaclass=abc.ABCMeta):
+class SchemaConvertible(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def validate(self, other: Any) -> None:
@@ -21,26 +21,26 @@ class SchemaConvertable(metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
-    def hydrate(self, context: Optional[Dict[Any, Any]] = None) -> "SchemaConvertable":
-        """Hydrate this object with dimension bindings from context."""
+    def specialize(self, context: Optional[Dict[Any, Any]] = None) -> "SchemaConvertible":
+        """Specialize this specification with dimension bindings from context."""
         ...
 
     def bind(
         self,
         value: Optional[Any] = None,
         context: Optional[Dict[Any, Any]] = None,
-    ) -> "SchemaConvertable":
-        """Validate and bind an incoming override value, or hydrate defaults."""
+    ) -> "SchemaConvertible":
+        """Validate and bind an incoming override value, or specialize defaults."""
         if value is None:
-            return self.hydrate(context)
+            return self.specialize(context)
         
         self.validate(value)
-        
+
         return value
 
-    def default(self) -> "SchemaConvertable":
+    def default(self) -> "SchemaConvertible":
         """Creates a default instance."""
-        return self.hydrate({})
+        return self.specialize({})
 
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
@@ -242,106 +242,3 @@ class Schema:
 
         _print_node(self)
 
-
-# # ---------------------------------------------------------------------------
-# # Validation helpers
-# # ---------------------------------------------------------------------------
-
-# def _supports_array_storage(cls: Type):
-#     """Return whether *cls* can be stored in an array backend."""
-#     if isinstance(cls, type) and issubclass(cls, SchemaConvertible):
-#         return _validate_struct_datatypes(cls, root=cls.__qualname__)
-
-#     try:
-#         return not np.cls(cls).hasobject
-#     except TypeError:
-#         return False
-
-
-# def _validate_struct_datatypes(cls: Type[Any], *, root: Optional[str] = None):
-#     """Recursively validate that all fields in *cls* support array storage."""
-#     is_serializable = {}
-
-#     attributes = {k: v for k, v in typing.get_type_hints(cls).items() if not k.startswith("_")}
-#     for k, v in attributes.items():
-#         field_name_path = k if root is None else f"{root}.{k}"
-
-#         if is_array_marker(v):
-#             elem_type = v.cls()
-#             is_serializable[field_name_path] = _supports_array_storage(elem_type)
-#         elif isinstance(v, type) and issubclass(v, SchemaConvertible):
-#             nested = v._validate_as_field(field_name_path)
-#             is_serializable.update(nested)
-#         else:
-#             is_serializable[field_name_path] = _supports_array_storage(v)
-
-#     return is_serializable
-
-
-# # ---------------------------------------------------------------------------
-# # Schema construction
-# # ---------------------------------------------------------------------------
-
-# def create_schema(cls: Type) -> Schema:
-#     """Build a :class:`Schema` from a Struct class definition.
-
-#     Validates that all fields have type annotations and that their types
-#     support array serialization before constructing the schema tree.
-#     """
-#     # Reject classes with untyped attributes (e.g. ``x = 10``)
-#     if has_untyped_class_definitions(cls):
-#         raise TypeError(
-#             f"The struct {cls.__qualname__} declares attributes without type annotations."
-#         )
-
-#     # Verify that all types can be serialized
-#     is_serializable = _validate_struct_datatypes(cls)
-#     if not all(is_serializable.values()):
-#         incompatible_attrs = [k for k, v in is_serializable.items() if v == False]
-
-#         attr_str = "attribute" if len(incompatible_attrs) == 1 else "attributes"
-#         incompatible_list = format_list(incompatible_attrs)
-
-#         raise TypeError(
-#             f"The {attr_str} '{incompatible_list}' cannot be declared in struct "
-#             f"'{cls.__qualname__}' because it does not support array serialization."
-#         )
-
-#     def _convert(field: Type) -> Entry:
-#         # SchemaConvertible types (Struct, Set) know how to produce their own entry
-#         if isinstance(field, type) and issubclass(field, SchemaConvertible):
-#             return field.to_schema_entry()
-
-#         # origin = typing.get_origin(cls)
-#         if is_array_marker(field):
-#             v: Any = field
-#             elem_type = v.cls()
-
-#             if (
-#                 all(isinstance(x, int) for x in v.shape()) and
-#                 len(v.shape()) > 0
-#             ):
-#                 static_shape = v.shape()
-#             else:
-#                 static_shape = None
-
-#             return _ArrayEntry(
-#                 np.cls(elem_type),
-#                 _ArrayLocation.AUTOMATIC,
-#                 min_shape=static_shape,
-#                 max_shape=static_shape,
-#                 preferred_shape=None,
-#             )
-
-#         return _ArrayEntry(
-#             np.cls(field),
-#             _ArrayLocation.AUTOMATIC,
-#             min_shape=(1,),
-#             max_shape=(1,),
-#             preferred_shape=None,
-#         )
-
-#     attributes = {k: v for k, v in typing.get_type_hints(cls).items() if not k.startswith("_")}
-#     return Schema(
-#         fields={k: _convert(v) for k, v in attributes.items()}
-#     )

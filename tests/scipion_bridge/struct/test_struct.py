@@ -94,7 +94,7 @@ def test_dynamic_init():
     class2D.schema.print_tree()
 
 
-def test_unhydrated_dynamic_init():
+def test_unspecialized_dynamic_init():
     class2D = Class2D()
     assert not class2D.is_static()
     assert not class2D.schema.is_static
@@ -131,7 +131,7 @@ def test_struct_with_default_dim_value():
     assert_array_entry(fb_override.schema.fields["pixels"], (128, 128))
 
 
-def test_partial_hydration():
+def test_partial_specialization():
     class Volume(B.Struct):
         D: B.Dim = B.Dim()
         H: B.Dim = B.Dim()
@@ -213,9 +213,33 @@ def test_dynamic_rebinding_with_dim_instance():
     assert not p.is_static()
     assert_array_entry(p.schema.fields["pixels"], (None, None))
 
-    hydrated_p = p.hydrate({runtime_dim: 128})
-    assert hydrated_p.is_static()
-    assert_array_entry(hydrated_p.schema.fields["pixels"], (128, 128))
+    specialized_p = p.specialize({runtime_dim: 128})
+    assert specialized_p.is_static()
+    assert_array_entry(specialized_p.schema.fields["pixels"], (128, 128))
+
+
+def test_specialize_multiple_dims_and_immutability():
+    runtime_h = B.Dim()
+    runtime_w = B.Dim()
+    p = Particle(H=runtime_h, W=runtime_w)
+    assert not p.is_static()
+
+    specialized_p = p.specialize({runtime_h: 128, runtime_w: 128})
+    assert specialized_p.is_static()
+    assert_array_entry(specialized_p.schema.fields["pixels"], (128, 128))
+    # Original remains unmodified (immutability)
+    assert not p.is_static()
+
+
+def test_specialize_default():
+    class FixedBox(B.Struct):
+        size: B.Dim = B.Dim(64)
+        pixels: B.Array[float] = B.Array(shape=(size, size))
+
+    box = FixedBox()
+    default_box = box.default()
+    assert default_box.is_static()
+    assert_array_entry(default_box.schema.fields["pixels"], (64, 64))
 
 
 def test_multi_array_shared_dims_mixed_ranks():
@@ -234,6 +258,8 @@ def test_multi_array_shared_dims_mixed_ranks():
     assert_array_entry(mixed.schema.fields["image"], (10, 32, 32))
     assert_array_entry(mixed.schema.fields["fixed_cube"], (10, 3, 32, 64))
 
+
+    mixed.print_schema()
 
 def test_dim_validation_and_type_errors():
     with pytest.raises(TypeError):
@@ -257,7 +283,7 @@ def test_invalid_field_overrides_raise():
         Particle(pixels="not an array")
 
 
-def test_hydrate_fixed_dim_with_none_fails():
+def test_override_fixed_dim_with_none_fails():
     class FixedBox(B.Struct):
         size: B.Dim = B.Dim(64)
         pixels: B.Array[float] = B.Array(shape=(size, size))
@@ -274,5 +300,31 @@ def test_hydrate_fixed_dim_with_none_fails():
         FixedParticle(pixels=B.Array[float](shape=(None, None)))
 
 
+def test_struct_definition_and_init_validation_errors():
+    # 1. Untyped class definitions
+    with pytest.raises(TypeError, match="contains class-level attributes missing type annotations"):
+        class UntypedStruct(B.Struct):
+            x = 10
+
+    # 2. Missing default Array specification
+    with pytest.raises(ValueError, match="missing a default Array specification"):
+        class MissingArraySpec(B.Struct):
+            pixels: B.Array[float]
+
+    # 3. Invalid default value for nested SchemaConvertible field
+    with pytest.raises(TypeError, match="expects a default value of type 'Particle'"):
+        class InvalidNestedDefault(B.Struct):
+            particle: Particle = "invalid_default" # type: ignore
+
+    # 4. Non-convertible / unsupported type annotation
+    with pytest.raises(TypeError, match="Invalid type annotation"):
+        class UnsupportedTypeStruct(B.Struct):
+            handler: object
+
+    # 5. Unexpected keyword argument in Struct constructor
+    with pytest.raises(TypeError, match="got unexpected keyword argument"):
+        Particle(unexpected_param=123)
+
+
 if __name__ == "__main__":
-    test_dynamic_init()
+    test_multi_array_shared_dims_mixed_ranks()
