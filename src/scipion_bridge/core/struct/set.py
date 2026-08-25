@@ -31,8 +31,9 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         dtype: Optional[Type[T]] = None,
         **kwargs: Any,
     ) -> None:
+        
+        item = kwargs.pop("_item", None)
         super().__init__(dtype=dtype, **kwargs)
-        self._capacity = capacity
 
         if self.dtype is None:
             raise TypeError(
@@ -42,10 +43,17 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
         if not (isinstance(self.dtype, type) and issubclass(self.dtype, Struct)):
             raise TypeError(f"Element of a set has to be of type Struct, got '{self.dtype}'")
-            
-        item_schema = self.dtype().schema
-        assert item_schema is not None
 
+        self._capacity = capacity
+
+        context = { k: Dim.new(v, name=k) for k, v in kwargs.items() }
+        self._item = item if item is not None else self.dtype(**context)
+
+        assert isinstance(self._item, Struct)
+        
+        item_schema = self._item.schema
+        assert item_schema is not None
+        
         self.schema = item_schema.to_set_schema(capacity=self.capacity)
 
     @property
@@ -61,16 +69,26 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         )
 
     def is_static(self) -> bool:
-        return False
+        assert self.schema is not None
+        return self.schema.is_static
 
     def specialize(self, context: Optional[Dict[Any, Any]] = None) -> "Set[T]":
-        specialized_capacity = self._capacity
-        if isinstance(self._capacity, Dim):
-            specialized_capacity = self._capacity.specialize(context)
+        if context is None:
+            context = {}
+
+        # Specialize the capacity Dim if it is dynamic.
+        specialized_capacity = (
+            self._capacity.infer(context) if isinstance(self._capacity, Dim)
+            else context.get(self._capacity, self._capacity)
+        )
+
+        # Specialize the item with calling context
+        specialized_item = self._item.specialize(context)
 
         return type(self)(
             capacity=specialized_capacity,
             dtype=self.dtype,
+            _item=specialized_item,
             **self.options,
         )
 

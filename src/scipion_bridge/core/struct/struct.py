@@ -28,6 +28,8 @@ class Dim:
         self.value = value
         self.name = name
 
+        self._owner = None
+
     def __set_name__(self, owner: Any, name: str) -> None:
         if self.name is None:
             self.name = name
@@ -53,8 +55,8 @@ class Dim:
         
         return self.value
 
-    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Dim":
-        """Specializes this Dim against the given substitution context."""
+    def infer(self, context: Optional[dict[Any, Any]] = None) -> "Dim":
+        """Infer the concrete value of Dim using the given substitution context."""
         ctx = context or {}
 
         # Case 1: Direct substitution.
@@ -64,7 +66,7 @@ class Dim:
             target = ctx[self]
             if isinstance(target, Dim):
                 # If target Dim is also mapped in ctx, follow the chain; otherwise preserve the target Dim reference
-                return target.specialize(ctx) if target in ctx else target
+                return target.infer(ctx) if target in ctx else target
 
             return Dim(target, name=self.name)
 
@@ -72,7 +74,7 @@ class Dim:
         # Occurs when `self` is not directly in `ctx`, but holds a reference to another Dim in `self.value`
         # (e.g. nested struct Particle.H referencing outer Class2D.H, or square dimension constraints H=Dim(size)).
         if isinstance(self.value, Dim):
-            resolved_target = self.value.specialize(ctx)
+            resolved_target = self.value.infer(ctx)
             val = resolved_target if resolved_target.value is not None else self.value
             return Dim(val, name=self.name)
 
@@ -91,7 +93,7 @@ class Dim:
             parts.append(repr(self.value))
         if self.name is not None:
             parts.append(f"name={self.name!r}")
-        return f"{self.__class__.__name__}({', '.join(parts)})"
+        return f"{self.__class__.__name__}({', '.join(parts)}, id: {id(self):#x})"
 
     def __str__(self) -> str:
         val = self.resolve_value()
@@ -139,7 +141,7 @@ class Array(Marker[T], SchemaConvertible):
 
         return Array(
             dtype=self.dtype,
-            shape=tuple(dim.specialize(context) for dim in self.shape),
+            shape=tuple(dim.infer(context) for dim in self.shape),
             **self.options,
         )
 
@@ -277,7 +279,7 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
                     )
                 specialized_dim = Dim.new(val, name=dim_name)
             else:
-                specialized_dim = default_dim.specialize(dim_context)
+                specialized_dim = default_dim.infer(dim_context)
 
             setattr(self, dim_name, specialized_dim)
             dim_context[default_dim] = specialized_dim
@@ -295,14 +297,19 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
                 f"Expected field of type '{type(self).__name__}', but got '{type(other).__name__}'."
             )
 
-    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
+    def specialize(self, context: Optional[dict[Any, Dim]] = None) -> "Struct":
         if context is None:
             context = {}
 
-        resolved_kwargs: dict[str, Any] = {
-            dim_name: getattr(self, dim_name, default_dim).specialize(context)
-            for dim_name, default_dim in self._dim_specs.items()
-        }
+        resolved_kwargs = {}
+        for name, value in self._dim_specs.items():
+            replaced = context.get(name, value).infer(context)
+            resolved_kwargs[name] = replaced
+
+        # resolved_kwargs: dict[str, Any] = {
+        #     dim_name: getattr(self, dim_name, default_dim).infer(context)
+        #     for dim_name, default_dim in self._dim_specs.items()
+        # }
 
         for field_name in self._schema_specs:
             resolved_kwargs[field_name] = getattr(self, field_name).specialize(context)

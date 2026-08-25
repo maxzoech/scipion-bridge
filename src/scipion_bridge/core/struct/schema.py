@@ -221,10 +221,6 @@ class _SchemaSetEntry(_SchemaEntry):
         super().__init__(schema=schema)
         self.capacity = capacity
 
-    @property
-    def is_static(self) -> bool:
-        return False
-
     def format_entry(self, name: str) -> str:
         size_str = self.capacity if self.capacity is not None else "dynamic"
         cls_name = self.schema.dtype.__name__ if self.schema.dtype else "struct"

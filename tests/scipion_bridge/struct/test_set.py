@@ -8,6 +8,7 @@ from scipion_bridge.core.struct.schema import (
     _RaggedArraySetEntry,
     _SchemaSetEntry,
     _SchemaEntry,
+    _ArrayEntryBase
 )
 
 
@@ -124,6 +125,42 @@ def test_set_of_classes2d_schema():
     assert p_schema.fields["pixels"].shape == (128, 128)
     assert isinstance(p_schema.fields["voltage_kv"], _ArraySetEntry)
     assert p_schema.fields["voltage_kv"].shape == (1,)
+
+
+def test_set_specialize_struct_dimensions_and_capacity():
+    """Test specializing struct dimensions within an inner Set and specializing outer Set capacity."""
+    class DynamicParticle(B.Struct):
+        H: B.Dim = B.Dim()
+
+        pixels: B.Array[float] = B.Array(shape=(H, H))
+        voltage_kv: float
+
+    class Class2D(B.Struct):
+        H: B.Dim = B.Dim()
+        num_particles: B.Dim = B.Dim()
+
+        average: B.Array[float] = B.Array(shape=(H, H))
+        particles: B.Set[DynamicParticle] = B.Set[DynamicParticle](
+            capacity=num_particles,
+            H=H,
+        )
+
+    # 1. Specialize a single Class2D instance
+    class2d_specialized = Class2D(H=64)
+    assert class2d_specialized.is_static()
+    assert isinstance(class2d_specialized.schema.fields["average"], _ArrayEntryBase)
+    assert class2d_specialized.schema.fields["average"].shape == (64, 64)
+
+    # Inner particles set has dynamic capacity, but its elements have specialized shape (64, 64)
+    particles_entry = class2d_specialized.schema.fields["particles"]
+    assert isinstance(particles_entry, _SchemaSetEntry)
+    assert particles_entry.capacity is None
+    assert isinstance(particles_entry.schema.fields["pixels"], _ArrayEntryBase)
+    assert particles_entry.schema.fields["pixels"].shape == (64, 64)
+
+    # 2. Specialize outer Set capacity with a dynamic Dim
+    classes_set = B.Set[Class2D](capacity=10, H=128, num_particles=100)
+    classes_set.print_schema()
 
 
 @pytest.mark.xfail(
@@ -422,18 +459,18 @@ def test_nested_set_field_get_set_element():
     assert retrieved_ts0.tilts[2].voltage_kv == 100.0
 
 
-class LeafStruct(B.Struct):
-    val: float
+# class LeafStruct(B.Struct):
+#     val: float
 
 
-class NodeStruct(B.Struct):
-    leaves: B.Set[LeafStruct, 3]
-    bar: int
+# class NodeStruct(B.Struct):
+#     leaves: B.Set[LeafStruct, 3]
+#     bar: int
 
 
-class RootStruct(B.Struct):
-    nodes: B.Set[NodeStruct, 5]
-    foo: float
+# class RootStruct(B.Struct):
+#     nodes: B.Set[NodeStruct, 5]
+#     foo: float
 
 
 @pytest.mark.skip(reason="Data storage and container operations not yet implemented")
@@ -591,8 +628,8 @@ def test_struct_instance_static_arrays():
     assert np.allclose(subset[-1].pixels, data_2)
 
 
-class DeepTiltSeries(B.Struct):
-    tilts: B.Set[StaticParticle, 10]
+# class DeepTiltSeries(B.Struct):
+#     tilts: B.Set[StaticParticle, 10]
 
 
 @pytest.mark.skip(reason="Data storage and container operations not yet implemented")
@@ -731,4 +768,4 @@ def test_set_string_slicing_setitem():
 
 
 if __name__ == "__main__":
-    test_static_struct_set_schema()
+    test_set_specialize_struct_dimensions_and_capacity()
