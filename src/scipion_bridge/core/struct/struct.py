@@ -174,7 +174,7 @@ class Array(Marker[T], schema.SchemaConvertable):
             exp_val = expected_dim.resolve_value()
             in_val = incoming_dim.resolve_value()
 
-            if exp_val is not None and in_val is not None and in_val != exp_val:
+            if exp_val is not None and in_val != exp_val:
                 raise ValueError(
                     f"Dimension mismatch at axis {axis}: static dimension {exp_val} "
                     f"cannot be overwritten by {in_val} "
@@ -279,7 +279,14 @@ class Struct(SchemaArrayStorage, SchemaConvertable):
 
         for dim_name, default_dim in self._dim_specs.items():
             if dim_name in kwargs:
-                hydrated_dim = Dim.new(kwargs[dim_name], name=dim_name)
+                val = kwargs[dim_name]
+                
+                if val is None and default_dim.resolve_value() is not None:
+                    raise ValueError(
+                        f"Cannot override fixed dimension '{dim_name}' "
+                        f"(value={default_dim.resolve_value()}) with None."
+                    )
+                hydrated_dim = Dim.new(val, name=dim_name)
             else:
                 hydrated_dim = default_dim.hydrate(dim_context)
 
