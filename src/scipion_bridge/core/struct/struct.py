@@ -1,6 +1,9 @@
 import numpy as np
 from typing import Type, TypeVar, Tuple, Union, Any, Optional
-from typing_extensions import TypeAlias
+try:
+    from typing import TypeAlias
+except ImportError:
+    from typing_extensions import TypeAlias
 
 from .schema import SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from .storage import SchemaArrayStorage
@@ -66,27 +69,24 @@ class Arg:
         ctx = context or {}
 
         # Case 1: Direct substitution.
-        # Occurs when `self` is a template Dim registered in `ctx` by Struct.__init__
-        # (e.g. Array shape referencing Particle.H when Particle(H=128) is instantiated).
         if self in ctx:
             target = ctx[self]
             if isinstance(target, Arg):
-                # If target Dim is also mapped in ctx, follow the chain; otherwise preserve the target Dim reference
-                return target.infer(ctx) if target in ctx else target
+                if target is not self and target in ctx:
+                    return target.infer(ctx)
+                return target
 
             return Arg(target, name=self.name)
 
         # Case 2: Chained alias / parameter forwarding.
-        # Occurs when `self` is not directly in `ctx`, but holds a reference to another Dim in `self.value`
-        # (e.g. nested struct Particle.H referencing outer Class2D.H, or square dimension constraints H=Dim(size)).
         if isinstance(self._value, Arg):
             resolved_target = self._value.infer(ctx)
-            val = resolved_target if resolved_target._value is not None else self._value
-            return Arg(val, name=self.name)
+            if resolved_target is not self._value:
+                return Arg(resolved_target, name=self.name)
+            return self
 
         # Case 3: Standalone fallback.
-        # Occurs when `self` is an independent literal default (e.g. Dim(64)) or unassigned dynamic Dim (None).
-        return Arg(self._value, name=self.name)
+        return self
 
     @property
     def is_static(self) -> bool:
@@ -143,6 +143,13 @@ class Array(Marker[T], SchemaConvertible):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    @classmethod
+    def default(cls) -> "Array":
+        raise ValueError(
+            "Missing required argument 'shape' for Array. "
+            "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
+        )
+
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Array":
         if context is None:
             context = {}
@@ -196,16 +203,18 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
     _schema_specs: dict[str, SchemaConvertible]
     _dim_specs: dict[str, Dim]
 
+    @classmethod
+    def default(cls) -> "Struct":
+        return cls()
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        def _init_default(dtype: Type):
+        def _init_default(dtype: Type) -> SchemaConvertible:
             if _is_supported_scalar_value(dtype):
                 return Array(dtype=np.dtype(dtype), shape=(1,))
             elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
-                new_subtype = dtype()
-                assert isinstance(new_subtype, SchemaConvertible)
-                return new_subtype.specialize({})
+                return dtype.default()
             else:
                 raise TypeError(
                     f"Unsupported field type {dtype!r}. "
@@ -282,10 +291,18 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
                 specialized_dim = default_dim.infer(dim_context)
 
             setattr(self, dim_name, specialized_dim)
-            dim_context[default_dim] = specialized_dim
+
+            if specialized_dim is not default_dim:
+                dim_context[default_dim] = specialized_dim
 
         for field_name, default_spec in self._schema_specs.items():
-            specialized_field = default_spec.bind(kwargs.get(field_name), dim_context)
+            if field_name in kwargs:
+                incoming_val = kwargs[field_name]
+                default_spec.validate(incoming_val)
+                specialized_field = incoming_val
+            else:
+                specialized_field = default_spec.specialize(dim_context)
+                
             setattr(self, field_name, specialized_field)
 
         self.schema = self._create_schema()
@@ -297,19 +314,31 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
                 f"Expected field of type '{type(self).__name__}', but got '{type(other).__name__}'."
             )
 
-    def specialize(self, context: Optional[dict[Any, Dim]] = None) -> "Struct":
-        if context is None:
-            context = {}
+    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
+        ctx = context or {}
 
-        resolved_kwargs = {}
-        for name, value in self._dim_specs.items():
-            replaced = context.get(name, value).infer(context)
-            resolved_kwargs[name] = replaced
+        dim_kwargs = {}
+        dim_ctx = {}
+        for name, default_dim in self._dim_specs.items():
+            current_dim = getattr(self, name)
+            raw_val = ctx.get(name, ctx.get(current_dim, current_dim))
 
-        for field_name in self._schema_specs:
-            resolved_kwargs[field_name] = getattr(self, field_name).specialize(context)
+            resolved = Arg.new(raw_val, name=name).infer(ctx)
 
-        return type(self)(**resolved_kwargs)
+            dim_kwargs[name] = resolved
+            if resolved is not current_dim:
+                dim_ctx[current_dim] = resolved
+
+            if resolved is not default_dim:
+                dim_ctx[default_dim] = resolved
+
+        merged_ctx = {**ctx, **dim_ctx}
+        schema_kwargs = {
+            name: getattr(self, name).specialize(merged_ctx)
+            for name in self._schema_specs
+        }
+
+        return type(self)(**dim_kwargs, **schema_kwargs)
 
     def _create_schema(self) -> Schema:
         return Schema(

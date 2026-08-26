@@ -8,13 +8,11 @@ from typing import Iterator, Optional, Dict, Tuple, Type, Union, Any
 
 class SchemaConvertible(metaclass=abc.ABCMeta):
 
+    @classmethod
     @abc.abstractmethod
-    def validate(self, other: Any) -> None:
-        """Validate that another instance matches this specification's type and structure."""
+    def default(cls) -> "SchemaConvertible":
+        """Create a default, unspecialized instance from the type."""
         ...
-
-    @abc.abstractmethod
-    def convert_to_entry(self) -> "Entry": ...
 
     @abc.abstractmethod
     def specialize(
@@ -23,18 +21,15 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         """Specialize this specification with dimension bindings from context."""
         ...
 
-    def bind(
-        self,
-        value: Optional[Any] = None,
-        context: Optional[Dict[Any, Any]] = None,
-    ) -> "SchemaConvertible":
-        """Validate and bind an incoming override value, or specialize defaults."""
-        if value is None:
-            return self.specialize(context)
+    @abc.abstractmethod
+    def validate(self, other: Any) -> None:
+        """Validate that another instance matches this specification's type and structure."""
+        ...
 
-        self.validate(value)
-
-        return value
+    @abc.abstractmethod
+    def convert_to_entry(self) -> "Entry":
+        """Convert this instance into a schema Entry tree representation."""
+        ...
 
     
 class Entry(metaclass=abc.ABCMeta):

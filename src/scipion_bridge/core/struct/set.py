@@ -44,15 +44,13 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
         self._capacity = capacity
 
-        context = { k: Arg.new(v, name=k) for k, v in kwargs.items() }
-        self._item = self.dtype(**context)
+        item = self.dtype.default()
+        if kwargs:
+            context = {k: Arg.new(v, name=k) for k, v in kwargs.items()}
+            item = item.specialize(context)
 
-        assert isinstance(self._item, Struct)
-
-        item_schema = self._item.schema
-        assert item_schema is not None
-
-        self.schema = item_schema.to_set_schema(capacity=self.capacity)
+        self._item = item
+        self.schema = self._item.schema.to_set_schema(capacity=self.capacity)
 
     @classmethod
     def _create(
@@ -109,9 +107,19 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
             **self.options,
         )
 
+    @classmethod
+    def default(cls) -> "Set[T]":
+        if cls._dtype is None:
+            raise TypeError(
+                "Cannot convert unsubscripted Set to a schema. "
+                "Please provide an element type (e.g., Set[Struct] or dtype=Struct)."
+            )
+        
+        return cls()
+
     def validate(self, other: Any) -> None:
         if not isinstance(other, Set):
             raise TypeError(f"Expected Set instance, got '{type(other).__name__}'.")
-
-    def default(self) -> "Set[T]":
-        return self.specialize({})
+        
+        if self.dtype is not None and other.dtype is not None and other.dtype != self.dtype:
+            raise TypeError(f"Expected Set[{self.dtype.__name__}], got Set[{other.dtype.__name__}].")
