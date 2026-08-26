@@ -176,7 +176,7 @@ class Array(Marker[T], SchemaConvertible):
         return _ArrayEntry(np.dtype(self.dtype), shape=resolved_shape)
 
 
-class Struct(SchemaArrayStorage, SchemaConvertible):
+class Struct(SchemaConvertible, SchemaArrayStorage):
 
     _schema_specs: dict[str, SchemaConvertible]
     _dim_specs: dict[str, Dim]
@@ -243,9 +243,17 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
                     )
 
         cls._dim_specs = dim_specs
-        cls._schema_specs = schema_specs
+        cls.schema = Schema(
+            dtype=cls,
+            fields={
+                k: v.convert_to_entry()
+                for k, v in schema_specs.items()
+            },
+        )
+
 
     def __init__(self, **kwargs: Any) -> None:
+
         allowed_keys = set(self._dim_specs)
         extra_keys = set(kwargs) - allowed_keys
         if extra_keys:
@@ -255,24 +263,24 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
 
         dim_context: dict[Any, Any] = {}
 
-        for dim_name, default_dim in self._dim_specs.items():
-            if dim_name in kwargs:
-                val = kwargs[dim_name]
-                default_dim.validate(val)
-                specialized_dim = Dim.new(val, name=dim_name)
-            else:
-                specialized_dim = default_dim.infer(dim_context)
+        # for dim_name, default_dim in self._dim_specs.items():
+        #     if dim_name in kwargs:
+        #         val = kwargs[dim_name]
+        #         default_dim.validate(val)
+        #         specialized_dim = Dim.new(val, name=dim_name)
+        #     else:
+        #         specialized_dim = default_dim.infer(dim_context)
 
-            if specialized_dim is not default_dim:
-                dim_context[default_dim] = specialized_dim
+        #     if specialized_dim is not default_dim:
+        #         dim_context[default_dim] = specialized_dim
 
-            setattr(self, dim_name, specialized_dim)
+        #     setattr(self, dim_name, specialized_dim)
 
-        for field_name, default_spec in self._schema_specs.items():
-            specialized_field = default_spec.specialize(dim_context)
-            setattr(self, field_name, specialized_field)
+        # for field_name, default_spec in self._schema_specs.items():
+        #     specialized_field = default_spec.specialize(dim_context)
+        #     setattr(self, field_name, specialized_field)
 
-        self.schema = self._create_schema()
+        # self.schema = self._create_schema()
 
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
         ctx = context or {}
@@ -282,16 +290,7 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
         }
         return type(self)(**dim_kwargs)
 
-    def _create_schema(self) -> Schema:
-        return Schema(
-            dtype=type(self),
-            fields={
-                k: getattr(self, k).convert_to_entry()
-                for k in self._schema_specs.keys()
-            },
-        )
-
     def convert_to_entry(self) -> Entry:
         return _SchemaEntry(
-            schema=self._create_schema(),
+            schema=self.schema,
         )

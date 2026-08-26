@@ -13,7 +13,8 @@ class SchemaArrayStorage:
     def __setitem__(self, key, value):
         raise NotImplementedError
 
-    def print_schema(self) -> None:
-        assert self.schema is not None
+    @classmethod
+    def print_schema(cls) -> None:
+        assert cls.schema is not None
 
-        self.schema.print_tree()
+        cls.schema.print_tree()
