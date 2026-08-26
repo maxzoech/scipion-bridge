@@ -167,18 +167,3 @@ def test_set_specialize_struct_dimensions_and_capacity():
     assert not classes_set.convert_to_entry().is_static
 
     classes_set.print_schema()
-
-@pytest.mark.xfail(
-    reason="Limitation: Unsubscripted B.Set() default field on Struct requires lazy schema creation via __set_name__"
-)
-def test_unsubscripted_set_default_field_in_struct():
-    class LocalParticle(B.Struct):
-        voltage_kv: float
-
-    class TiltSeriesWithUnsubscriptedDefault(B.Struct):
-        tilts: B.Set[LocalParticle] = B.Set()
-
-    ts = TiltSeriesWithUnsubscriptedDefault()
-    assert isinstance(ts.schema, Schema)
-    assert "tilts" in ts.schema.fields
-

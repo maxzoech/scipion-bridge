@@ -276,15 +276,10 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
 
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
         ctx = context or {}
-
-        dim_kwargs = {}
-        for name, _ in self._dim_specs.items():
-            current_dim = getattr(self, name)
-            raw_val = ctx.get(name, ctx.get(current_dim, current_dim))
-
-            resolved = Arg.new(raw_val, name=name).infer(ctx)
-            dim_kwargs[name] = resolved
-
+        dim_kwargs = {
+            name: getattr(self, name).infer(ctx)
+            for name in self._dim_specs
+        }
         return type(self)(**dim_kwargs)
 
     def _create_schema(self) -> Schema:

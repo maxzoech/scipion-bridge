@@ -43,13 +43,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
             raise TypeError(f"Element of a set has to be of type Struct, got '{self.dtype}'")
 
         self._capacity = capacity
-
-        item = self.dtype.default()
-        if kwargs:
-            context = {k: Arg.new(v, name=k) for k, v in kwargs.items()}
-            item = item.specialize(context)
-
-        self._item = item
+        self._item = self.dtype(**kwargs)
         self.schema = self._item.schema.to_set_schema(capacity=self.capacity)
 
     @classmethod
@@ -87,17 +81,16 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         )
 
     def specialize(self, context: Optional[Dict[Any, Any]] = None) -> "Set[T]":
-        if context is None:
-            context = {}
+        ctx = context or {}
 
         # Specialize the capacity Dim if it is dynamic.
         specialized_capacity = (
-            self._capacity.infer(context) if isinstance(self._capacity, Arg)
-            else context.get(self._capacity, self._capacity)
+            self._capacity.infer(ctx) if isinstance(self._capacity, Arg)
+            else ctx.get(self._capacity, self._capacity)
         )
 
         # Specialize the item with calling context
-        specialized_item = self._item.specialize(context)
+        specialized_item = self._item.specialize(ctx)
         assert self.dtype is not None and isinstance(self.dtype, type)
 
         return type(self)._create(
