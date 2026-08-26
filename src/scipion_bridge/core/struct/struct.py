@@ -35,7 +35,9 @@ class Arg:
             self.name = name
 
     @classmethod
-    def new(cls, value: Optional[Union["Arg", int]] = None, *, name: Optional[str] = None) -> "Arg":
+    def new(
+        cls, value: Optional[Union["Arg", int]] = None, *, name: Optional[str] = None
+    ) -> "Arg":
         if isinstance(value, Arg):
             if name and value.name is None:
                 value.name = name
@@ -52,7 +54,7 @@ class Arg:
         """Recursively resolves down to the underlying integer or None."""
         if isinstance(self.value, Arg):
             return self.value.resolve_value()
-        
+
         return self.value
 
     def infer(self, context: Optional[dict[Any, Any]] = None) -> "Arg":
@@ -113,6 +115,7 @@ class Arg:
 
     def __hash__(self) -> int:
         return id(self)
+
 
 Dim: TypeAlias = Arg
 
@@ -195,23 +198,10 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        cls_name = cls.__name__
-        annotations = getattr(cls, "__annotations__", {})
-
-        dim_fields: dict[str, Dim] = {}
-        spec_fields: dict[str, SchemaConvertible] = {}
-
-        # Inherit specs from base classes in reverse MRO order
-        for base in reversed(cls.__mro__):
-            if hasattr(base, "_dim_specs"):
-                dim_fields.update(base._dim_specs)
-            if hasattr(base, "_schema_specs"):
-                spec_fields.update(base._schema_specs)
-
         def _init_default(dtype: Type):
             if _is_supported_scalar_value(dtype):
                 return Array(dtype=np.dtype(dtype), shape=(1,))
-            elif (isinstance(dtype, type) and issubclass(dtype, SchemaConvertible)):
+            elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
                 new_subtype = dtype()
                 assert isinstance(new_subtype, SchemaConvertible)
                 return new_subtype.specialize({})
@@ -221,31 +211,51 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
                     "Expected a supported scalar type or a valid schema convertible type."
                 )
 
+        cls_name = cls.__name__
+        annotations = cls.__dict__.get("__annotations__", {})
+
         # Collect all candidate field names in declaration order
         assigned_fields = {
-            k: v for k, v in cls.__dict__.items() if not k.startswith("__") and not callable(v)
+            k: v
+            for k, v in cls.__dict__.items()
+            if not k.startswith("__") and not callable(v)
         }
+
+        unassigned_fields = {
+            k: _init_default(v)
+            for k, v in annotations.items()
+            if k not in assigned_fields
+        }
+
+        cls_fields = {**assigned_fields, **unassigned_fields}
+
+        dim_specs = {k: v for k, v in cls_fields.items() if isinstance(v, Arg)}
+        schema_specs = {k: v for k, v in cls_fields.items() if not isinstance(v, Arg)}
+
+        # Inherit specs from base classes in reverse MRO order
+        for base in reversed(cls.__mro__):
+            if hasattr(base, "_dim_specs"):
+                dim_specs.update(base._dim_specs)
+            if hasattr(base, "_schema_specs"):
+                schema_specs.update(base._schema_specs)
 
         # Check that every assigned field in a struct is a SchemaConvertible type
         for name, v in assigned_fields.items():
             if not isinstance(v, (SchemaConvertible, Arg)):
-                raise TypeError(
-                    f"Field '{name}' in '{cls_name}' must be an instance of 'SchemaConvertible', "
-                    f"got {type(v).__name__!r} (value: {v!r})"
-                )
+                if name not in annotations:
+                    raise TypeError(
+                        f"Struct '{cls_name}' contains class-level attributes missing type annotations. "
+                        f"Field '{name}' was assigned {type(v).__name__!r} (value: {v!r}) without an annotation. "
+                        f"Did you mean '{name}: {type(v).__name__} = {v!r}' or '{name} = B.Dim({v!r})'?"
+                    )
+                else:
+                    raise TypeError(
+                        f"Field '{name}' in '{cls_name}' was assigned an invalid default value of type "
+                        f"'{type(v).__name__}' (value: {v!r}). Expected a SchemaConvertible or Arg specification."
+                    )
 
-        unassigned_fields = {
-            k: _init_default(v) for k, v in annotations.items() if k not in assigned_fields
-        }
-
-        cls_fields = {
-            **assigned_fields,
-            **unassigned_fields
-        }
-
-        cls._dim_specs = {k: v for k, v in cls_fields.items() if isinstance(v, Arg)}
-        cls._schema_specs = {k: v for k, v in cls_fields.items() if not isinstance(v, Arg)}
-
+        cls._dim_specs = dim_specs
+        cls._schema_specs = schema_specs
 
     def __init__(self, **kwargs: Any) -> None:
         allowed_keys = set(self._schema_specs) | set(self._dim_specs)
