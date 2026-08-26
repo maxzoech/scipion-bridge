@@ -25,7 +25,7 @@ class Arg:
         *,
         name: Optional[str] = None,
     ) -> None:
-        self.value = value
+        self._value = value
         self.name = name
 
         self._owner = None
@@ -50,12 +50,16 @@ class Arg:
 
         return Arg(value, name=name)
 
-    def resolve_value(self) -> Optional[int]:
-        """Recursively resolves down to the underlying integer or None."""
-        if isinstance(self.value, Arg):
-            return self.value.resolve_value()
+    @property
+    def value(self) -> Optional[int]:
+        return self._resolve_value()
 
-        return self.value
+    def _resolve_value(self) -> Optional[int]:
+        """Recursively resolves down to the underlying integer or None."""
+        if isinstance(self._value, Arg):
+            return self._value._resolve_value()
+
+        return self._value
 
     def infer(self, context: Optional[dict[Any, Any]] = None) -> "Arg":
         """Infer the concrete value of Dim using the given substitution context."""
@@ -75,43 +79,40 @@ class Arg:
         # Case 2: Chained alias / parameter forwarding.
         # Occurs when `self` is not directly in `ctx`, but holds a reference to another Dim in `self.value`
         # (e.g. nested struct Particle.H referencing outer Class2D.H, or square dimension constraints H=Dim(size)).
-        if isinstance(self.value, Arg):
-            resolved_target = self.value.infer(ctx)
-            val = resolved_target if resolved_target.value is not None else self.value
+        if isinstance(self._value, Arg):
+            resolved_target = self._value.infer(ctx)
+            val = resolved_target if resolved_target._value is not None else self._value
             return Arg(val, name=self.name)
 
         # Case 3: Standalone fallback.
         # Occurs when `self` is an independent literal default (e.g. Dim(64)) or unassigned dynamic Dim (None).
-        return Arg(self.value, name=self.name)
+        return Arg(self._value, name=self.name)
 
     @property
     def is_static(self) -> bool:
-        val = self.resolve_value()
-        return isinstance(val, int) and val >= 0
+        return isinstance(self.value, int) and self.value >= 0
 
     def __repr__(self) -> str:
         parts = []
-        if self.value is not None or self.name is None:
-            parts.append(repr(self.value))
+        if self._value is not None or self.name is None:
+            parts.append(repr(self._value))
         if self.name is not None:
             parts.append(f"name={self.name!r}")
         return f"{self.__class__.__name__}({', '.join(parts)}, id: {id(self):#x})"
 
     def __str__(self) -> str:
-        val = self.resolve_value()
-        if self.name is not None and val is not None:
-            return f"{self.name}:{val}"
-        return self.name or (str(val) if val is not None else "?")
+        if self.name is not None and self.value is not None:
+            return f"{self.name}:{self.value}"
+        return self.name or (str(self.value) if self.value is not None else "?")
 
     def __int__(self) -> int:
-        val = self.resolve_value()
-        if val is None:
+        if self.value is None:
             raise TypeError("Cannot convert unassigned Dim to int")
-        return int(val)
+        return int(self.value)
 
     def __eq__(self, other: Any) -> bool:
-        other_val = other.resolve_value() if isinstance(other, Arg) else other
-        return self.resolve_value() == other_val
+        other_val = other.value if isinstance(other, Arg) else other
+        return self.value == other_val
 
     def __hash__(self) -> int:
         return id(self)
@@ -154,7 +155,7 @@ class Array(Marker[T], SchemaConvertible):
 
     def convert_to_entry(self) -> Entry:
         assert self.dtype is not None
-        resolved_shape = tuple(dim.resolve_value() for dim in self.shape)
+        resolved_shape = tuple(dim.value for dim in self.shape)
         return _ArrayEntry(np.dtype(self.dtype), shape=resolved_shape)
 
     def validate(self, other: Any) -> None:
@@ -179,8 +180,8 @@ class Array(Marker[T], SchemaConvertible):
         for axis, (expected_dim, incoming_dim) in enumerate(
             zip(self.shape, other.shape)
         ):
-            exp_val = expected_dim.resolve_value()
-            in_val = incoming_dim.resolve_value()
+            exp_val = expected_dim.value
+            in_val = incoming_dim.value
 
             if exp_val is not None and in_val != exp_val:
                 raise ValueError(
@@ -271,10 +272,10 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             if dim_name in kwargs:
                 val = kwargs[dim_name]
 
-                if val is None and default_dim.resolve_value() is not None:
+                if val is None and default_dim.value is not None:
                     raise ValueError(
                         f"Cannot override fixed dimension '{dim_name}' "
-                        f"(value={default_dim.resolve_value()}) with None."
+                        f"(value={default_dim.value}) with None."
                     )
                 specialized_dim = Dim.new(val, name=dim_name)
             else:

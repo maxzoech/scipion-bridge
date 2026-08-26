@@ -78,7 +78,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
     @property
     def capacity(self) -> Optional[int]:
-        return self._capacity.resolve_value() if isinstance(self._capacity, Arg) else self._capacity
+        return self._capacity.value if isinstance(self._capacity, Arg) else self._capacity
 
     def convert_to_entry(self) -> Entry:
         if self.dtype is None or self.schema is None:
