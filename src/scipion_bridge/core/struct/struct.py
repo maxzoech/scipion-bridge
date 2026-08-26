@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Type, TypeVar, Tuple, Union, Any, Optional
+from typing_extensions import TypeAlias
 
 from .schema import SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from .storage import SchemaArrayStorage
@@ -17,11 +18,11 @@ def _is_supported_scalar_value(cls: Type) -> bool:
         return False
 
 
-class Dim:
+class Arg:
 
     def __init__(
         self,
-        value: Optional[Union[int, "Dim"]] = None,
+        value: Optional[Union[int, "Arg"]] = None,
         *,
         name: Optional[str] = None,
     ) -> None:
@@ -35,8 +36,8 @@ class Dim:
             self.name = name
 
     @classmethod
-    def new(cls, value: Optional[Union["Dim", int]] = None, *, name: Optional[str] = None) -> "Dim":
-        if isinstance(value, Dim):
+    def new(cls, value: Optional[Union["Arg", int]] = None, *, name: Optional[str] = None) -> "Arg":
+        if isinstance(value, Arg):
             if name and value.name is None:
                 value.name = name
             return value
@@ -46,16 +47,16 @@ class Dim:
                 f"Expected Dim, int, or None, but got {type(value).__name__}: {value!r}"
             )
 
-        return Dim(value, name=name)
+        return Arg(value, name=name)
 
     def resolve_value(self) -> Optional[int]:
         """Recursively resolves down to the underlying integer or None."""
-        if isinstance(self.value, Dim):
+        if isinstance(self.value, Arg):
             return self.value.resolve_value()
         
         return self.value
 
-    def infer(self, context: Optional[dict[Any, Any]] = None) -> "Dim":
+    def infer(self, context: Optional[dict[Any, Any]] = None) -> "Arg":
         """Infer the concrete value of Dim using the given substitution context."""
         ctx = context or {}
 
@@ -64,23 +65,23 @@ class Dim:
         # (e.g. Array shape referencing Particle.H when Particle(H=128) is instantiated).
         if self in ctx:
             target = ctx[self]
-            if isinstance(target, Dim):
+            if isinstance(target, Arg):
                 # If target Dim is also mapped in ctx, follow the chain; otherwise preserve the target Dim reference
                 return target.infer(ctx) if target in ctx else target
 
-            return Dim(target, name=self.name)
+            return Arg(target, name=self.name)
 
         # Case 2: Chained alias / parameter forwarding.
         # Occurs when `self` is not directly in `ctx`, but holds a reference to another Dim in `self.value`
         # (e.g. nested struct Particle.H referencing outer Class2D.H, or square dimension constraints H=Dim(size)).
-        if isinstance(self.value, Dim):
+        if isinstance(self.value, Arg):
             resolved_target = self.value.infer(ctx)
             val = resolved_target if resolved_target.value is not None else self.value
-            return Dim(val, name=self.name)
+            return Arg(val, name=self.name)
 
         # Case 3: Standalone fallback.
         # Occurs when `self` is an independent literal default (e.g. Dim(64)) or unassigned dynamic Dim (None).
-        return Dim(self.value, name=self.name)
+        return Arg(self.value, name=self.name)
 
     @property
     def is_static(self) -> bool:
@@ -108,11 +109,13 @@ class Dim:
         return int(val)
 
     def __eq__(self, other: Any) -> bool:
-        other_val = other.resolve_value() if isinstance(other, Dim) else other
+        other_val = other.resolve_value() if isinstance(other, Arg) else other
         return self.resolve_value() == other_val
 
     def __hash__(self) -> int:
         return id(self)
+
+Dim: TypeAlias = Arg
 
 
 class Array(Marker[T], SchemaConvertible):

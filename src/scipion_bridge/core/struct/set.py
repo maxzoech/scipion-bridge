@@ -14,7 +14,7 @@ from typing import (
     Optional,
 )
 
-from .struct import Struct, Dim
+from .struct import Struct, Arg
 from .storage import SchemaArrayStorage
 from .schema import Entry, SchemaConvertible, Schema, _SchemaSetEntry
 from ..utils.marker import Marker
@@ -26,8 +26,8 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
     def __init__(
         self,
+        capacity: Optional[Union[int, Arg]] = None,
         *,
-        capacity: Optional[Union[int, Dim]] = None,
         dtype: Optional[Type[T]] = None,
         **kwargs: Any,
     ) -> None:
@@ -44,7 +44,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
         self._capacity = capacity
 
-        context = { k: Dim.new(v, name=k) for k, v in kwargs.items() }
+        context = { k: Arg.new(v, name=k) for k, v in kwargs.items() }
         self._item = self.dtype(**context)
 
         assert isinstance(self._item, Struct)
@@ -58,7 +58,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
     def _create(
         cls,
         *,
-        capacity: Optional[Union[int, Dim]],
+        capacity: Optional[Union[int, Arg]],
         dtype: "Type[T]",
         item: Struct,
         **options: Any,
@@ -78,7 +78,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
     @property
     def capacity(self) -> Optional[int]:
-        return self._capacity.resolve_value() if isinstance(self._capacity, Dim) else self._capacity
+        return self._capacity.resolve_value() if isinstance(self._capacity, Arg) else self._capacity
 
     def convert_to_entry(self) -> Entry:
         if self.dtype is None or self.schema is None:
@@ -94,7 +94,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
         # Specialize the capacity Dim if it is dynamic.
         specialized_capacity = (
-            self._capacity.infer(context) if isinstance(self._capacity, Dim)
+            self._capacity.infer(context) if isinstance(self._capacity, Arg)
             else context.get(self._capacity, self._capacity)
         )
 

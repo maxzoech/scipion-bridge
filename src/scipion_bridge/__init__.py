@@ -10,7 +10,7 @@ from .core import protocol
 from .core.protocol import Protocol, Field, Input
 
 from .core import struct
-from .core.struct import Struct, Set, Array, Dim
+from .core.struct import Struct, Set, Array, Arg, Dim
 
 from .core.streaming.ops import Op, FlushSignal, FLUSH
 
@@ -44,5 +44,6 @@ __all__ = [
     "Op",
     "FlushSignal",
     "FLUSH",
+    "Arg",
     "Dim",
 ]

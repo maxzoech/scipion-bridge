@@ -139,11 +139,11 @@ def test_set_specialize_struct_dimensions_and_capacity():
 
     class Class2D(B.Struct):
         H: B.Dim = B.Dim()
-        num_particles: B.Dim = B.Dim()
+        num_particles: B.Arg = B.Arg()
 
         average: B.Array[float] = B.Array(shape=(H, H))
         particles: B.Set[DynamicParticle] = B.Set[DynamicParticle](
-            capacity=num_particles,
+            num_particles,
             H=H,
         )
 
