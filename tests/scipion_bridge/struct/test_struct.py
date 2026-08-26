@@ -208,7 +208,7 @@ def test_dynamic_rebinding_with_dim_instance():
     assert not p.schema.is_static
     assert_array_entry(p.schema.fields["pixels"], (None, None))
 
-    specialized_p = p.specialize({runtime_dim: 128})
+    specialized_p = p.specialize({runtime_dim: B.Dim(128)})
     assert specialized_p.schema.is_static
     assert_array_entry(specialized_p.schema.fields["pixels"], (128, 128))
 
@@ -219,7 +219,7 @@ def test_specialize_multiple_dims_and_immutability():
     p = Particle(H=runtime_h, W=runtime_w)
     assert not p.schema.is_static
 
-    specialized_p = p.specialize({runtime_h: 128, runtime_w: 128})
+    specialized_p = p.specialize({runtime_h: B.Dim(128), runtime_w: B.Dim(128)})
     assert specialized_p.schema.is_static
     assert_array_entry(specialized_p.schema.fields["pixels"], (128, 128))
     # Original remains unmodified (immutability)
@@ -327,9 +327,9 @@ def test_relaxed_type_annotations_syntax():
 
     c = Class2D(H=64, num_particles=10)
     assert c.schema.is_static
-    assert assert_array_entry(c.schema.fields["average"], (64, 64)) is None
+    assert_array_entry(c.schema.fields["average"], (64, 64))
     particles_entry = c.schema.fields["particles"]
-    assert get_child_struct(particles_entry).fields["pixels"].shape == (64, 64)
+    assert_array_entry(get_child_struct(particles_entry).fields["pixels"], (64, 64))
 
 
 def test_annotation_only_struct_and_array_rules():

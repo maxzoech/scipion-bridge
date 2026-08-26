@@ -305,11 +305,6 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             replaced = context.get(name, value).infer(context)
             resolved_kwargs[name] = replaced
 
-        # resolved_kwargs: dict[str, Any] = {
-        #     dim_name: getattr(self, dim_name, default_dim).infer(context)
-        #     for dim_name, default_dim in self._dim_specs.items()
-        # }
-
         for field_name in self._schema_specs:
             resolved_kwargs[field_name] = getattr(self, field_name).specialize(context)
 
