@@ -14,5 +14,6 @@ class SchemaArrayStorage:
         raise NotImplementedError
 
     def print_schema(self) -> None:
-        if self.schema is not None:
-            self.schema.print_tree()
+        assert self.schema is not None
+
+        self.schema.print_tree()

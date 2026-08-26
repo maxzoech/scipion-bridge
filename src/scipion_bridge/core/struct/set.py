@@ -31,8 +31,6 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         dtype: Optional[Type[T]] = None,
         **kwargs: Any,
     ) -> None:
-        
-        item = kwargs.pop("_item", None)
         super().__init__(dtype=dtype, **kwargs)
 
         if self.dtype is None:
@@ -47,14 +45,36 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         self._capacity = capacity
 
         context = { k: Dim.new(v, name=k) for k, v in kwargs.items() }
-        self._item = item if item is not None else self.dtype(**context)
+        self._item = self.dtype(**context)
 
         assert isinstance(self._item, Struct)
-        
+
         item_schema = self._item.schema
         assert item_schema is not None
-        
+
         self.schema = item_schema.to_set_schema(capacity=self.capacity)
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        capacity: Optional[Union[int, Dim]],
+        dtype: "Type[T]",
+        item: Struct,
+        **options: Any,
+    ) -> "Set[T]":
+        """Low-level factory: construct a Set from a pre-built item, skipping validation.
+
+        Used internally by `specialize` to avoid redundantly re-validating and
+        re-constructing the item struct when the caller already holds a specialized one.
+        """
+        obj = object.__new__(cls)
+        Marker.__init__(obj, dtype=dtype, **options)
+        obj._capacity = capacity
+        obj._item = item
+        assert isinstance(obj._item, Struct)
+        obj.schema = obj._item.schema.to_set_schema(capacity=obj.capacity)
+        return obj
 
     @property
     def capacity(self) -> Optional[int]:
@@ -70,7 +90,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
     def is_static(self) -> bool:
         assert self.schema is not None
-        return self.schema.is_static
+        return self.schema.is_static and self.capacity is not None
 
     def specialize(self, context: Optional[Dict[Any, Any]] = None) -> "Set[T]":
         if context is None:
@@ -84,11 +104,12 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
         # Specialize the item with calling context
         specialized_item = self._item.specialize(context)
+        assert self.dtype is not None and isinstance(self.dtype, type)
 
-        return type(self)(
+        return type(self)._create(
             capacity=specialized_capacity,
             dtype=self.dtype,
-            _item=specialized_item,
+            item=specialized_item,
             **self.options,
         )
 

@@ -105,6 +105,8 @@ def test_set_of_classes2d_schema():
         particles: B.Set[StaticParticle] = B.Set[StaticParticle]()
 
     set_schema = B.Set[Class2D]().schema
+    set_schema.print_tree()
+
     assert isinstance(set_schema, Schema)
     assert set_schema.is_static is False
 
@@ -147,9 +149,10 @@ def test_set_specialize_struct_dimensions_and_capacity():
 
     # 1. Specialize a single Class2D instance
     class2d_specialized = Class2D(H=64)
-    assert class2d_specialized.is_static()
+    assert not class2d_specialized.is_static()
     assert isinstance(class2d_specialized.schema.fields["average"], _ArrayEntryBase)
     assert class2d_specialized.schema.fields["average"].shape == (64, 64)
+
 
     # Inner particles set has dynamic capacity, but its elements have specialized shape (64, 64)
     particles_entry = class2d_specialized.schema.fields["particles"]
@@ -158,10 +161,12 @@ def test_set_specialize_struct_dimensions_and_capacity():
     assert isinstance(particles_entry.schema.fields["pixels"], _ArrayEntryBase)
     assert particles_entry.schema.fields["pixels"].shape == (64, 64)
 
-    # 2. Specialize outer Set capacity with a dynamic Dim
-    classes_set = B.Set[Class2D](capacity=10, H=128, num_particles=100)
-    classes_set.print_schema()
+    # 2. Specialize outer Set capacity with a dynamic Dim and size
+    classes_set = B.Set[Class2D](H=128, num_particles=100)
+    assert not classes_set.is_static()
+    print(classes_set.is_static())
 
+    classes_set.print_schema()
 
 @pytest.mark.xfail(
     reason="Limitation: Unsubscripted B.Set() default field on Struct requires lazy schema creation via __set_name__"
