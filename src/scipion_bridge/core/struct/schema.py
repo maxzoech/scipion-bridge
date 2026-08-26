@@ -36,11 +36,7 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
 
         return value
 
-    def default(self) -> "SchemaConvertible":
-        """Creates a default instance."""
-        return self.specialize({})
-
-
+    
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
 

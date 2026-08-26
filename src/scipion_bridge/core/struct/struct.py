@@ -5,7 +5,6 @@ from typing_extensions import TypeAlias
 from .schema import SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from .storage import SchemaArrayStorage
 from ..utils.marker import Marker
-from ..utils.type_annotation import has_untyped_class_definitions
 
 T = TypeVar("T")
 
@@ -124,10 +123,16 @@ class Array(Marker[T], SchemaConvertible):
         self,
         dtype: Optional[np.dtype] = None,
         *,
-        shape: Tuple[Union[Dim, int, None], ...] = (),
+        shape: Optional[Tuple[Union[Dim, int, None], ...]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(dtype)
+
+        if shape is None:
+            raise ValueError(
+                "Missing required argument 'shape' for Array. "
+                "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
+            )
 
         self.shape: Tuple[Dim, ...] = tuple([Dim.new(v) for v in shape])
         self.options = kwargs
@@ -181,9 +186,6 @@ class Array(Marker[T], SchemaConvertible):
                     f"(target shape={list(self.shape)}, incoming shape={list(other.shape)})."
                 )
 
-    def default(self) -> "Array":
-        return self.specialize({})
-
 
 class Struct(SchemaArrayStorage, SchemaConvertible):
 
@@ -196,13 +198,6 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
         cls_name = cls.__name__
         annotations = getattr(cls, "__annotations__", {})
 
-        if has_untyped_class_definitions(cls):
-            raise TypeError(
-                f"Schema class '{cls_name}' contains class-level attributes missing type annotations. "
-                f"All fields in a Schema must be explicitly annotated. "
-                f"Example: 'field_name: int = 0' instead of 'field_name = 0'."
-            )
-
         dim_fields: dict[str, Dim] = {}
         spec_fields: dict[str, SchemaConvertible] = {}
 
@@ -213,49 +208,44 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             if hasattr(base, "_schema_specs"):
                 spec_fields.update(base._schema_specs)
 
-        for field_name, field_type in annotations.items():
-            default_val = getattr(cls, field_name, None)
-
-            # 1. Dimension field
-            if field_type is Dim:
-                dim_fields[field_name] = Dim.new(default_val, name=field_name)
-
-            # 2. Primitive scalar shorthand (float, int, bool -> Array with shape (1,))
-            elif _is_supported_scalar_value(field_type):
-                spec_fields[field_name] = Array(
-                    dtype=np.dtype(field_type),
-                    shape=(1,),
-                )
-
-            # 3. SchemaConvertible field (Array, Struct, Set)
-            elif isinstance(field_type, type) and issubclass(
-                field_type, SchemaConvertible
-            ):
-                if issubclass(field_type, Array) and not default_val:
-                    raise ValueError(
-                        f"Field '{field_name}' in '{cls_name}' is typed as '{field_type}', "
-                        f"but is missing a default Array specification. "
-                        f"Expected: {field_name}: {field_type} = Array(shape=(...))"
-                    )
-
-                default_val = default_val if default_val is not None else field_type()
-                if not isinstance(default_val, SchemaConvertible):
-                    raise TypeError(
-                        f"Field '{field_name}' in '{cls_name}' expects a default value of type '{field_type.__name__}' "
-                        f"(subclass of SchemaConvertible), but got '{type(default_val).__name__}'."
-                    )
-
-                spec_fields[field_name] = default_val
-
+        def _init_default(dtype: Type):
+            if _is_supported_scalar_value(dtype):
+                return Array(dtype=np.dtype(dtype), shape=(1,))
+            elif (isinstance(dtype, type) and issubclass(dtype, SchemaConvertible)):
+                new_subtype = dtype()
+                assert isinstance(new_subtype, SchemaConvertible)
+                return new_subtype.specialize({})
             else:
                 raise TypeError(
-                    f"Invalid type annotation '{cls!r}' for field '{field_name}' in Schema '{cls}'. "
-                    f"Expected a primitive numeric/scalar type (e.g., float, int, bool) or an Array type (e.g., Array[float]), "
-                    f"but got an unsupported or non-convertible type."
+                    f"Unsupported field type {dtype!r}. "
+                    "Expected a supported scalar type or a valid schema convertible type."
                 )
 
-        cls._dim_specs = dim_fields
-        cls._schema_specs = spec_fields
+        # Collect all candidate field names in declaration order
+        assigned_fields = {
+            k: v for k, v in cls.__dict__.items() if not k.startswith("__") and not callable(v)
+        }
+
+        # Check that every assigned field in a struct is a SchemaConvertible type
+        for name, v in assigned_fields.items():
+            if not isinstance(v, (SchemaConvertible, Arg)):
+                raise TypeError(
+                    f"Field '{name}' in '{cls_name}' must be an instance of 'SchemaConvertible', "
+                    f"got {type(v).__name__!r} (value: {v!r})"
+                )
+
+        unassigned_fields = {
+            k: _init_default(v) for k, v in annotations.items() if k not in assigned_fields
+        }
+
+        cls_fields = {
+            **assigned_fields,
+            **unassigned_fields
+        }
+
+        cls._dim_specs = {k: v for k, v in cls_fields.items() if isinstance(v, Arg)}
+        cls._schema_specs = {k: v for k, v in cls_fields.items() if not isinstance(v, Arg)}
+
 
     def __init__(self, **kwargs: Any) -> None:
         allowed_keys = set(self._schema_specs) | set(self._dim_specs)
@@ -314,9 +304,6 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             resolved_kwargs[field_name] = getattr(self, field_name).specialize(context)
 
         return type(self)(**resolved_kwargs)
-
-    def default(self) -> "Struct":
-        return self.specialize({})
 
     def _create_schema(self) -> Schema:
         return Schema(
