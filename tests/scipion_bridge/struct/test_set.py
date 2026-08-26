@@ -149,7 +149,7 @@ def test_set_specialize_struct_dimensions_and_capacity():
 
     # 1. Specialize a single Class2D instance
     class2d_specialized = Class2D(H=64)
-    assert not class2d_specialized.is_static()
+    assert not class2d_specialized.schema.is_static
     assert isinstance(class2d_specialized.schema.fields["average"], _ArrayEntryBase)
     assert class2d_specialized.schema.fields["average"].shape == (64, 64)
 
@@ -163,8 +163,8 @@ def test_set_specialize_struct_dimensions_and_capacity():
 
     # 2. Specialize outer Set capacity with a dynamic Dim and size
     classes_set = B.Set[Class2D](H=128, num_particles=100)
-    assert not classes_set.is_static()
-    print(classes_set.is_static())
+    assert classes_set.schema.is_static
+    assert not classes_set.convert_to_entry().is_static
 
     classes_set.print_schema()
 

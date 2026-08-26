@@ -60,7 +60,6 @@ class Class2D(B.Struct):
 
 def test_simple_struct():
     struct = SimpleStruct()
-    assert struct.is_static()
     assert struct.schema.is_static
     assert set(struct.schema.fields.keys()) == {"val_int", "val_float", "val_bool"}
     assert_array_entry(struct.schema.fields["val_int"], (1,))
@@ -69,7 +68,6 @@ def test_simple_struct():
 
 def test_nested_struct():
     struct = CTF()
-    assert struct.is_static()
     assert struct.schema.is_static
     assert set(struct.schema.fields.keys()) == {"voltage_kv", "amplitude_contrast", "foo"}
     foo_schema = get_child_struct(struct.schema.fields["foo"])
@@ -79,7 +77,6 @@ def test_nested_struct():
 
 def test_dynamic_init():
     class2D = Class2D(H=128, W=128)
-    assert class2D.is_static()
     assert class2D.schema.is_static
     assert class2D.H == 128
     assert class2D.W == 128
@@ -96,7 +93,6 @@ def test_dynamic_init():
 
 def test_unspecialized_dynamic_init():
     class2D = Class2D()
-    assert not class2D.is_static()
     assert not class2D.schema.is_static
     assert_array_entry(class2D.schema.fields["average"], (None, None), is_static=False)
 
@@ -122,12 +118,12 @@ def test_struct_with_default_dim_value():
 
     # Default uses 64
     fb_default = FixedBox()
-    assert fb_default.is_static()
+    assert fb_default.schema.is_static
     assert_array_entry(fb_default.schema.fields["pixels"], (64, 64))
 
     # Override with 128
     fb_override = FixedBox(size=128)
-    assert fb_override.is_static()
+    assert fb_override.schema.is_static
     assert_array_entry(fb_override.schema.fields["pixels"], (128, 128))
 
 
@@ -139,7 +135,7 @@ def test_partial_specialization():
         data: B.Array[float] = B.Array(shape=(D, H, W))
 
     v = Volume(D=32)
-    assert not v.is_static()
+    assert not v.schema.is_static
     assert_array_entry(v.schema.fields["data"], (32, None, None), is_static=False)
 
 
@@ -178,7 +174,7 @@ def test_multi_level_alias_chaining():
         class2d: Level2Class2D = Level2Class2D(box_size=N)
 
     exp = Level3Experiment(N=256)
-    assert exp.is_static()
+    assert exp.schema.is_static
     l2_schema = get_child_struct(exp.schema.fields["class2d"])
     assert_array_entry(l2_schema.fields["average"], (256, 256))
     l1_schema = get_child_struct(l2_schema.fields["particle"])
@@ -187,7 +183,7 @@ def test_multi_level_alias_chaining():
 
 def test_explicit_nested_override():
     c = Class2D(H=256, W=256, particle=Particle(H=64, W=64))
-    assert c.is_static()
+    assert c.schema.is_static
     assert_array_entry(c.schema.fields["average"], (256, 256))
     assert_array_entry(get_child_struct(c.schema.fields["particle"]).fields["pixels"], (64, 64))
 
@@ -202,7 +198,7 @@ def test_struct_inheritance_with_dims():
         channels: B.Array[float] = B.Array(shape=(BaseRecord.H, BaseRecord.H, C))
 
     record = ExtendedRecord(H=64, C=3)
-    assert record.is_static()
+    assert record.schema.is_static
     assert_array_entry(record.schema.fields["pixels"], (64, 64))
     assert_array_entry(record.schema.fields["channels"], (64, 64, 3))
 
@@ -210,11 +206,11 @@ def test_struct_inheritance_with_dims():
 def test_dynamic_rebinding_with_dim_instance():
     runtime_dim = B.Dim()
     p = Particle(H=runtime_dim, W=runtime_dim)
-    assert not p.is_static()
+    assert not p.schema.is_static
     assert_array_entry(p.schema.fields["pixels"], (None, None))
 
     specialized_p = p.specialize({runtime_dim: 128})
-    assert specialized_p.is_static()
+    assert specialized_p.schema.is_static
     assert_array_entry(specialized_p.schema.fields["pixels"], (128, 128))
 
 
@@ -222,13 +218,13 @@ def test_specialize_multiple_dims_and_immutability():
     runtime_h = B.Dim()
     runtime_w = B.Dim()
     p = Particle(H=runtime_h, W=runtime_w)
-    assert not p.is_static()
+    assert not p.schema.is_static
 
     specialized_p = p.specialize({runtime_h: 128, runtime_w: 128})
-    assert specialized_p.is_static()
+    assert specialized_p.schema.is_static
     assert_array_entry(specialized_p.schema.fields["pixels"], (128, 128))
     # Original remains unmodified (immutability)
-    assert not p.is_static()
+    assert not p.schema.is_static
 
 
 def test_specialize_default():
@@ -238,7 +234,7 @@ def test_specialize_default():
 
     box = FixedBox()
     default_box = box.default()
-    assert default_box.is_static()
+    assert default_box.schema.is_static
     assert_array_entry(default_box.schema.fields["pixels"], (64, 64))
 
 
@@ -252,7 +248,7 @@ def test_multi_array_shared_dims_mixed_ranks():
         fixed_cube: B.Array[float] = B.Array(shape=(batch, 3, H, 64))
 
     mixed = MixedStruct(batch=10, H=32)
-    assert mixed.is_static()
+    assert mixed.schema.is_static
     assert_array_entry(mixed.schema.fields["scalar"], (1,))
     assert_array_entry(mixed.schema.fields["vector"], (10,))
     assert_array_entry(mixed.schema.fields["image"], (10, 32, 32))

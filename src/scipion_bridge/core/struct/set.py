@@ -88,10 +88,6 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
             capacity=self.capacity,
         )
 
-    def is_static(self) -> bool:
-        assert self.schema is not None
-        return self.schema.is_static and self.capacity is not None
-
     def specialize(self, context: Optional[Dict[Any, Any]] = None) -> "Set[T]":
         if context is None:
             context = {}

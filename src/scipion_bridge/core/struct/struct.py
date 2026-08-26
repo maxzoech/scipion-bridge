@@ -131,10 +131,6 @@ class Array(Marker[T], SchemaConvertible):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-    def is_static(self) -> bool:
-        """Returns True if all shape dimensions are defined integers."""
-        return all(dim.is_static for dim in self.shape)
-
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Array":
         if context is None:
             context = {}
@@ -318,9 +314,6 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
 
     def default(self) -> "Struct":
         return self.specialize({})
-
-    def is_static(self) -> bool:
-        return all(f.is_static for f in self.schema.fields.values())
 
     def _create_schema(self) -> Schema:
         return Schema(

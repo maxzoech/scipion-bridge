@@ -17,9 +17,6 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     def convert_to_entry(self) -> "Entry": ...
 
     @abc.abstractmethod
-    def is_static(self) -> bool: ...
-
-    @abc.abstractmethod
     def specialize(
         self, context: Optional[Dict[Any, Any]] = None
     ) -> "SchemaConvertible":
