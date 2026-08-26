@@ -22,11 +22,6 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
-    def validate(self, other: Any) -> None:
-        """Validate that another instance matches this specification's type and structure."""
-        ...
-
-    @abc.abstractmethod
     def convert_to_entry(self) -> "Entry":
         """Convert this instance into a schema Entry tree representation."""
         ...

@@ -175,38 +175,6 @@ class Array(Marker[T], SchemaConvertible):
         resolved_shape = tuple(dim.value for dim in self.shape)
         return _ArrayEntry(np.dtype(self.dtype), shape=resolved_shape)
 
-    def validate(self, other: Any) -> None:
-        """Checks if another Array specification can be assigned to this marker.
-
-        Raises:
-            TypeError: If `other` is not an Array marker or has incompatible dtypes.
-            ValueError: If rank differs or a static dimension would be overwritten.
-        """
-        if not isinstance(other, Array):
-            raise TypeError(
-                f"Expected an Array marker specification, but got '{type(other).__name__}'."
-            )
-
-        if len(self.shape) != len(other.shape):
-            raise ValueError(
-                f"Rank mismatch: cannot assign Array with rank {len(other.shape)} "
-                f"(shape={list(other.shape)}) to target with rank {len(self.shape)} "
-                f"(shape={list(self.shape)})."
-            )
-
-        for axis, (expected_dim, incoming_dim) in enumerate(
-            zip(self.shape, other.shape)
-        ):
-            exp_val = expected_dim.value
-            in_val = incoming_dim.value
-
-            if exp_val is not None and in_val != exp_val:
-                raise ValueError(
-                    f"Dimension mismatch at axis {axis}: static dimension {exp_val} "
-                    f"cannot be overwritten by {in_val} "
-                    f"(target shape={list(self.shape)}, incoming shape={list(other.shape)})."
-                )
-
 
 class Struct(SchemaArrayStorage, SchemaConvertible):
 
@@ -278,7 +246,7 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
         cls._schema_specs = schema_specs
 
     def __init__(self, **kwargs: Any) -> None:
-        allowed_keys = set(self._schema_specs) | set(self._dim_specs)
+        allowed_keys = set(self._dim_specs)
         extra_keys = set(kwargs) - allowed_keys
         if extra_keys:
             raise TypeError(
@@ -301,49 +269,23 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
             setattr(self, dim_name, specialized_dim)
 
         for field_name, default_spec in self._schema_specs.items():
-            if field_name in kwargs:
-                incoming_val = kwargs[field_name]
-                default_spec.validate(incoming_val)
-                specialized_field = incoming_val
-            else:
-                specialized_field = default_spec.specialize(dim_context)
-                
+            specialized_field = default_spec.specialize(dim_context)
             setattr(self, field_name, specialized_field)
 
         self.schema = self._create_schema()
-
-    def validate(self, other: Any) -> None:
-        """Checks if another Struct specification can be assigned to this marker."""
-        if not isinstance(other, type(self)):
-            raise TypeError(
-                f"Expected field of type '{type(self).__name__}', but got '{type(other).__name__}'."
-            )
 
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
         ctx = context or {}
 
         dim_kwargs = {}
-        dim_ctx = {}
-        for name, default_dim in self._dim_specs.items():
+        for name, _ in self._dim_specs.items():
             current_dim = getattr(self, name)
             raw_val = ctx.get(name, ctx.get(current_dim, current_dim))
 
             resolved = Arg.new(raw_val, name=name).infer(ctx)
-
             dim_kwargs[name] = resolved
-            if resolved is not current_dim:
-                dim_ctx[current_dim] = resolved
 
-            if resolved is not default_dim:
-                dim_ctx[default_dim] = resolved
-
-        merged_ctx = {**ctx, **dim_ctx}
-        schema_kwargs = {
-            name: getattr(self, name).specialize(merged_ctx)
-            for name in self._schema_specs
-        }
-
-        return type(self)(**dim_kwargs, **schema_kwargs)
+        return type(self)(**dim_kwargs)
 
     def _create_schema(self) -> Schema:
         return Schema(

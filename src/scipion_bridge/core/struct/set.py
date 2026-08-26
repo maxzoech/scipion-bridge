@@ -116,10 +116,3 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
             )
         
         return cls()
-
-    def validate(self, other: Any) -> None:
-        if not isinstance(other, Set):
-            raise TypeError(f"Expected Set instance, got '{type(other).__name__}'.")
-        
-        if self.dtype is not None and other.dtype is not None and other.dtype != self.dtype:
-            raise TypeError(f"Expected Set[{self.dtype.__name__}], got Set[{other.dtype.__name__}].")

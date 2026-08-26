@@ -180,13 +180,6 @@ def test_multi_level_alias_chaining():
     assert_array_entry(l1_schema.fields["pixels"], (256, 256))
 
 
-def test_explicit_nested_override():
-    c = Class2D(H=256, W=256, particle=Particle(H=64, W=64))
-    assert c.schema.is_static
-    assert_array_entry(c.schema.fields["average"], (256, 256))
-    assert_array_entry(get_child_struct(c.schema.fields["particle"]).fields["pixels"], (64, 64))
-
-
 def test_struct_inheritance_with_dims():
     class BaseRecord(B.Struct):
         H: B.Dim = B.Dim()
@@ -254,16 +247,16 @@ def test_dim_validation_and_type_errors():
 
 
 def test_invalid_field_overrides_raise():
-    # 1. Rejecting wrong struct type in struct field
-    with pytest.raises(TypeError, match="Expected field of type 'Particle', but got 'CTF'"):
+    # 1. Rejecting struct field in kwargs
+    with pytest.raises(TypeError, match="got unexpected keyword argument"):
         Class2D(particle=CTF())
 
-    # 2. Rejecting primitive in struct field
-    with pytest.raises(TypeError, match="Expected field of type 'Particle', but got 'str'"):
+    # 2. Rejecting primitive in kwargs
+    with pytest.raises(TypeError, match="got unexpected keyword argument"):
         Class2D(particle="not a struct")
 
-    # 3. Rejecting primitive in array field
-    with pytest.raises(TypeError, match="Expected an Array marker specification, but got 'str'"):
+    # 3. Rejecting array field in kwargs
+    with pytest.raises(TypeError, match="got unexpected keyword argument"):
         Particle(pixels="not an array")
 
 
@@ -279,8 +272,8 @@ def test_override_fixed_dim_with_none_fails():
     class FixedParticle(B.Struct):
         pixels: B.Array[float] = B.Array(shape=(64, 64))
 
-    # 2. Attempting to override a fixed static array with dynamic None shape should fail
-    with pytest.raises(ValueError):
+    # 2. Attempting to pass array field as keyword argument should fail
+    with pytest.raises(TypeError, match="got unexpected keyword argument"):
         FixedParticle(pixels=B.Array[float](shape=(None, None)))
 
 
