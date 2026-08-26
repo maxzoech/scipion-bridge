@@ -88,6 +88,17 @@ class Arg:
         # Case 3: Standalone fallback.
         return self
 
+    def validate(self, other: Any) -> None:
+        if other is None and self.value is not None:
+            raise ValueError(
+                f"Cannot override fixed dimension '{self.name}' "
+                f"(value={self.value}) with None."
+            )
+        if other is not None and not isinstance(other, (Arg, int)):
+            raise TypeError(
+                f"Expected Dim, int, or None, but got {type(other).__name__}: {other!r}"
+            )
+
     @property
     def is_static(self) -> bool:
         return isinstance(self.value, int) and self.value >= 0
@@ -151,12 +162,11 @@ class Array(Marker[T], SchemaConvertible):
         )
 
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Array":
-        if context is None:
-            context = {}
+        ctx = context or {}
 
         return Array(
             dtype=self.dtype,
-            shape=tuple(dim.infer(context) for dim in self.shape),
+            shape=tuple(dim.infer(ctx) for dim in self.shape),
             **self.options,
         )
 
@@ -280,20 +290,15 @@ class Struct(SchemaArrayStorage, SchemaConvertible):
         for dim_name, default_dim in self._dim_specs.items():
             if dim_name in kwargs:
                 val = kwargs[dim_name]
-
-                if val is None and default_dim.value is not None:
-                    raise ValueError(
-                        f"Cannot override fixed dimension '{dim_name}' "
-                        f"(value={default_dim.value}) with None."
-                    )
+                default_dim.validate(val)
                 specialized_dim = Dim.new(val, name=dim_name)
             else:
                 specialized_dim = default_dim.infer(dim_context)
 
-            setattr(self, dim_name, specialized_dim)
-
             if specialized_dim is not default_dim:
                 dim_context[default_dim] = specialized_dim
+
+            setattr(self, dim_name, specialized_dim)
 
         for field_name, default_spec in self._schema_specs.items():
             if field_name in kwargs:
