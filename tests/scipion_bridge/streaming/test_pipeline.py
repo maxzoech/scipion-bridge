@@ -10,13 +10,13 @@ class Metadata(B.Struct):
 
 
 class Particle(B.Struct):
-    pixels: B.Array[np.float32, 256, 256]
+    pixels: B.Array[np.float32] = B.Array(shape=(256, 256))
     metadata: Metadata
 
 
 class ParticleEmbeddings(B.Struct):
-    particles: B.Set[Particle, 10]
-    latent_code: B.Array[np.float32, 128]
+    particles: B.Set[Particle] = B.Set[Particle](10)
+    latent_code: B.Array[np.float32] = B.Array(shape=(128,))
 
 
 def test_basic_stream():

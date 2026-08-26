@@ -6,7 +6,7 @@ from scipion_bridge.backend.standalone.container import Container
 
 
 class Particle(B.Struct):
-    pixels: B.Array[np.float32, [128, 128]]
+    pixels: B.Array[np.float32] = B.Array(shape=(128, 128))
     voltage: float
 
 

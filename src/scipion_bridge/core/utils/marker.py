@@ -46,27 +46,32 @@ class Marker(Generic[T]):
             self._dtype = args[0]
 
     def __class_getitem__(cls, params):
-            type_args = params if isinstance(params, tuple) else (params,)
-            if any(isinstance(t, TypeVar) for t in type_args):
-                    return types.GenericAlias(cls, type_args)
-   
-            cache_key = (cls, params)
-            if cache_key in Marker._generic_cache:
-                return Marker._generic_cache[cache_key]
-
-            param_names = ", ".join(getattr(t, "__name__", str(t)) for t in type_args)
-            new_cls_name = f"{cls.__name__}[{param_names}]"
-
-            new_cls = type(
-                new_cls_name,
-                (cls,),
-                {
-                    "__module__": cls.__module__,
-                    "__origin__": cls,
-                    "__args__": type_args,
-                    "_dtype": type_args[0],
-                },
+        type_args = params if isinstance(params, tuple) else (params,)
+        if any(isinstance(t, str) for t in type_args):
+            raise TypeError(
+                "Forward declarations using type strings are not supported yet."
             )
 
-            Marker._generic_cache[cache_key] = new_cls
-            return new_cls
+        if any(isinstance(t, TypeVar) for t in type_args):
+            return types.GenericAlias(cls, type_args)
+
+        cache_key = (cls, params)
+        if cache_key in Marker._generic_cache:
+            return Marker._generic_cache[cache_key]
+
+        param_names = ", ".join(getattr(t, "__name__", str(t)) for t in type_args)
+        new_cls_name = f"{cls.__name__}[{param_names}]"
+
+        new_cls = type(
+            new_cls_name,
+            (cls,),
+            {
+                "__module__": cls.__module__,
+                "__origin__": cls,
+                "__args__": type_args,
+                "_dtype": type_args[0],
+            },
+        )
+
+        Marker._generic_cache[cache_key] = new_cls
+        return new_cls
