@@ -80,26 +80,6 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
             capacity=self.capacity,
         )
 
-    def specialize(self, context: Optional[Dict[Any, Any]] = None) -> "Set[T]":
-        ctx = context or {}
-
-        # Specialize the capacity Dim if it is dynamic.
-        specialized_capacity = (
-            self._capacity.infer(ctx) if isinstance(self._capacity, Arg)
-            else ctx.get(self._capacity, self._capacity)
-        )
-
-        # Specialize the item with calling context
-        specialized_item = self._item.specialize(ctx)
-        assert self.dtype is not None and isinstance(self.dtype, type)
-
-        return type(self)._create(
-            capacity=specialized_capacity,
-            dtype=self.dtype,
-            item=specialized_item,
-            **self.options,
-        )
-
     @classmethod
     def default(cls) -> "Set[T]":
         if cls._dtype is None:

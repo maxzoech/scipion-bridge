@@ -32,12 +32,23 @@ class Arg:
     ) -> None:
         self._value = value
         self.name = name
-
-        self._owner = None
+        self._owner: Optional[type] = None
 
     def __set_name__(self, owner: Any, name: str) -> None:
         if self.name is None:
             self.name = name
+
+        self._owner = owner
+
+    def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
+        if instance is None:
+            return self
+        return self.value
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        raise AttributeError(
+            f"Dimension '{self.name}' on {type(instance).__name__} is a class-level schema parameter and cannot be modified on an instance."
+        )
 
     @classmethod
     def new(
@@ -68,45 +79,24 @@ class Arg:
 
     def infer(self, context: Optional[dict[Any, Any]] = None) -> "Arg":
         raise NotImplementedError
-    
-        # """Infer the concrete value of Dim using the given substitution context."""
-        # ctx = context or {}
-
-        # # Case 1: Direct substitution.
-        # if self in ctx:
-        #     target = ctx[self]
-        #     if isinstance(target, Arg):
-        #         if target is not self and target in ctx:
-        #             return target.infer(ctx)
-        #         return target
-
-        #     return Arg(target, name=self.name)
-
-        # # Case 2: Chained alias / parameter forwarding.
-        # if isinstance(self._value, Arg):
-        #     resolved_target = self._value.infer(ctx)
-        #     if resolved_target is not self._value:
-        #         return Arg(resolved_target, name=self.name)
-        #     return self
-
-        # # Case 3: Standalone fallback.
-        # return self
 
     def validate(self, other: Any) -> None:
-        if (other is None or other.value is None) and self.value is not None:
-            raise ValueError(
-                f"Cannot override fixed dimension '{self.name}' "
-                f"(value={self.value}) with None."
-            )
         if other is not None and not isinstance(other, (Arg, int)):
             raise TypeError(
                 f"Expected Dim, int, or None, but got {type(other).__name__}: {other!r}"
+            )
+        
+        other_val = other.value if isinstance(other, Arg) else other
+        if other_val is None and self.value is not None:
+            raise ValueError(
+                f"Cannot override fixed dimension '{self.name}' "
+                f"(value={self.value}) with None."
             )
 
     def chain(self, other: "Arg"):
         self.validate(other)
 
-        if not self == other:
+        if self is not other:
             self._value = other
 
     @property
@@ -119,7 +109,7 @@ class Arg:
             parts.append(repr(self._value))
         if self.name is not None:
             parts.append(f"name={self.name!r}")
-        return f"{self.__class__.__name__}({', '.join(parts)}, id: {id(self):#x})"
+        return f"{self.__class__.__name__}({', '.join(parts)})"
 
     def __str__(self) -> str:
         if self.name is not None and self.value is not None:
@@ -172,13 +162,7 @@ class Array(Marker[T], SchemaConvertible):
         )
 
     def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Array":
-        ctx = context or {}
-
-        return Array(
-            dtype=self.dtype,
-            shape=tuple(dim.infer(ctx) for dim in self.shape),
-            **self.options,
-        )
+        raise NotImplementedError
 
     def convert_to_entry(self) -> Entry:
         assert self.dtype is not None
@@ -293,33 +277,6 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
             raise TypeError(
                 f"'{type(self).__name__}' got unexpected keyword argument(s): {list(extra_keys)}"
             )
-
-        # for dim_name, default_dim in self._dim_specs.items():
-        #     if dim_name in kwargs:
-        #         val = kwargs[dim_name]
-        #         default_dim.validate(val)
-        #         specialized_dim = Dim.new(val, name=dim_name)
-        #     else:
-        #         specialized_dim = default_dim.infer(dim_context)
-
-        #     if specialized_dim is not default_dim:
-        #         dim_context[default_dim] = specialized_dim
-
-        #     setattr(self, dim_name, specialized_dim)
-
-        # for field_name, default_spec in self._schema_specs.items():
-        #     specialized_field = default_spec.specialize(dim_context)
-        #     setattr(self, field_name, specialized_field)
-
-        # self.schema = self._create_schema()
-
-    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Struct":
-        ctx = context or {}
-        dim_kwargs = {
-            name: getattr(self, name).infer(ctx)
-            for name in self._dim_specs
-        }
-        return type(self)(**dim_kwargs)
 
     def convert_to_entry(self) -> Entry:
         return _SchemaEntry(

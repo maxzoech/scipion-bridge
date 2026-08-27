@@ -15,13 +15,6 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
-    def specialize(
-        self, context: Optional[Dict[Any, Any]] = None
-    ) -> "SchemaConvertible":
-        """Specialize this specification with dimension bindings from context."""
-        ...
-
-    @abc.abstractmethod
     def convert_to_entry(self) -> "Entry":
         """Convert this instance into a schema Entry tree representation."""
         ...
