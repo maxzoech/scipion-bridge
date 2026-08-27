@@ -208,12 +208,12 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
     ) -> None:
         super().__init_subclass__(**kwargs)
 
-        def _init_default(dtype: Type) -> SchemaConvertible:
-            if _is_supported_scalar_value(dtype):
-                return BoundArrayView(
+        def _init_default(dtype: Type):
+
+            if _is_supported_scalar_value(dtype):                
+                return Array(
                     dtype=np.dtype(dtype),
-                    shape_spec=(Dim(1),),
-                    owner_cls=cls,
+                    shape=(1,)
                 )
             elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
                 return dtype.default()
@@ -258,8 +258,9 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
         cls_fields.update(unassigned_fields)
 
         # Use getattr to get the resolved array view
-        schema_specs = { k: getattr(cls, k, None) for k in cls_fields.keys() }
+        schema_specs = { k: v.__get__(None, cls) for k, v in cls_fields.items() }
         schema_specs = { k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible) }
+
 
         # Check that every assigned field in a struct is a SchemaConvertible type
         for name, v in schema_specs.items():

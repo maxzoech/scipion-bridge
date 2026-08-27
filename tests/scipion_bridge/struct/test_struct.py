@@ -47,10 +47,11 @@ def test_simple_struct():
         val_bool: bool
 
     struct = SimpleStruct()
+    struct.print_schema()
+
     assert struct.schema.is_static
     assert set(struct.schema.fields.keys()) == {"val_int", "val_float", "val_bool"}
     assert_array_entry(struct.schema.fields["val_int"], (1,))
-    struct.schema.print_tree()
 
 
 def test_nested_struct():
@@ -433,4 +434,4 @@ class TestNestedStructDimensionScoping:
 
 
 if __name__ == "__main__":
-    test_sibling_subclasses_do_not_mutate_base_dimension()
+    test_simple_struct()
