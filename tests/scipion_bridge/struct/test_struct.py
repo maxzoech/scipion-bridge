@@ -188,5 +188,249 @@ def test_inheritance_with_nested_structs_and_sets():
     assert set(items_entry.children.fields.keys()) == {"feature", "vector"}
 
 
+# ==============================================================================
+# Suite: Descriptor Semantics & Protocol
+# ==============================================================================
+
+class TestDescriptorSemantics:
+
+    def test_class_vs_instance_get_semantics(self):
+        class Record(B.Struct):
+            dim = B.Dim(64)
+
+        # Access on class returns the Arg/Dim descriptor instance
+        assert isinstance(Record.dim, B.Arg)
+        assert Record.dim.value == 64
+        assert Record.dim.name == "dim"
+
+        # Access on instance returns the resolved integer value
+        inst = Record()
+        assert inst.dim == 64
+
+    def test_unassigned_class_vs_instance_get(self):
+        class DynamicRecord(B.Struct):
+            dim = B.Dim()
+
+        assert isinstance(DynamicRecord.dim, B.Arg)
+        assert DynamicRecord.dim.value is None
+
+        inst = DynamicRecord()
+        assert inst.dim is None
+
+    def test_instance_set_raises_attribute_error(self):
+        class Record(B.Struct):
+            dim = B.Dim(64)
+
+        inst = Record()
+        with pytest.raises(AttributeError, match="class-level schema parameter"):
+            inst.dim = 128
+
+    def test_dim_equality_with_ints_and_dims(self):
+        d1 = B.Dim(64)
+        d2 = B.Dim(64)
+        d3 = B.Dim(128)
+        d_none1 = B.Dim()
+        d_none2 = B.Dim()
+
+        assert d1 == d2
+        assert d1 == 64
+        assert 64 == d1
+        assert d1 != d3
+        assert d1 != 128
+        assert d_none1 == d_none2
+        assert d_none1 == None
+        assert d1 != d_none1
+
+    def test_int_conversion(self):
+        d = B.Dim(42)
+        assert int(d) == 42
+
+        d_unassigned = B.Dim()
+        with pytest.raises(TypeError, match="Cannot convert unassigned Dim to int"):
+            int(d_unassigned)
+
+    def test_repr_and_str(self):
+        d = B.Dim(64, name="H")
+        assert str(d) == "H:64"
+        assert "Arg(64, name='H')" in repr(d)
+
+        d_unbound = B.Dim(name="W")
+        assert str(d_unbound) == "W"
+
+
+# ==============================================================================
+# Suite: Chaining, Aliasing & Cycle Detection
+# ==============================================================================
+
+class TestCycleDetectionAndAliasChaining:
+
+    def test_self_chaining_noop(self):
+        d = B.Dim(name="A")
+        d.chain(d)
+        assert d._value is None
+        assert d.value is None
+
+    def test_multi_hop_alias_forwarding(self):
+        d1 = B.Dim(name="D1")
+        d2 = B.Dim(name="D2")
+        d3 = B.Dim(name="D3")
+
+        d1.chain(d2)
+        d2.chain(d3)
+        assert d1.value is None
+        assert d2.value is None
+        assert d3.value is None
+
+        # Resolving the end of the chain resolves all upstream descriptors
+        d3.chain(B.Dim(256))
+        assert d3.value == 256
+        assert d2.value == 256
+        assert d1.value == 256
+
+    def test_unassigned_chain_late_binding(self):
+        parent_dim = B.Dim(name="parent")
+        child_dim = B.Dim(name="child")
+
+        child_dim.chain(parent_dim)
+        assert child_dim.value is None
+
+        # Parent is assigned a value later
+        parent_dim.chain(B.Dim(512))
+        assert child_dim.value == 512
+
+
+# ==============================================================================
+# Suite: Sibling & Base Class Isolation (Edge Cases / Potential Bugs)
+# ==============================================================================
+
+class TestSiblingAndBaseIsolation:
+
+    def test_sibling_subclasses_do_not_mutate_base_dimension(self):
+        """Edge case: subclassing must not mutate the parent class descriptor."""
+        class Base(B.Struct):
+            H = B.Dim()
+            pixels = B.Array[float](shape=(H, H))
+
+        assert Base.H.value is None
+
+        # Create Subclass A with H=64
+        class SubA(Base):
+            H = B.Dim(64)
+
+        assert SubA.H.value == 64
+        # Base.H must remain unassigned (None), NOT mutated to 64
+        assert Base.H.value is None, "BUG: Defining SubA mutated Base.H!"
+
+    def test_sibling_subclasses_do_not_poison_each_other(self):
+        """Edge case: defining multiple siblings with different values."""
+        class Base(B.Struct):
+            H = B.Dim()
+            pixels = B.Array[float](shape=(H, H))
+
+        class Sub64(Base):
+            H = B.Dim(64)
+
+        class Sub128(Base):
+            H = B.Dim(128)
+
+        class SubDynamic(Base):
+            H = B.Dim()
+
+        assert Sub64.H.value == 64
+        assert Sub128.H.value == 128
+        assert SubDynamic.H.value is None
+        assert Base.H.value is None
+
+    def test_multi_tier_inheritance_isolation(self):
+        class Root(B.Struct):
+            dim = B.Dim()
+
+        class MidA(Root):
+            dim = B.Dim(32)
+
+        class MidB(Root):
+            dim = B.Dim(64)
+
+        class LeafA(MidA):
+            pass
+
+        class LeafB(MidB):
+            pass
+
+        assert Root.dim.value is None
+        assert MidA.dim.value == 32
+        assert MidB.dim.value == 64
+        assert LeafA.dim.value == 32
+        assert LeafB.dim.value == 64
+
+    def test_diamond_inheritance_dimension_resolution(self):
+        class Root(B.Struct):
+            dim = B.Dim()
+
+        class Left(Root):
+            dim = B.Dim(16)
+
+        class Right(Root):
+            dim = B.Dim(16)
+
+        class Diamond(Left, Right):
+            pass
+
+        assert Diamond.dim.value == 16
+        assert Root.dim.value is None
+
+
+# ==============================================================================
+# Suite: Validation & Override Rules
+# ==============================================================================
+
+class TestValidationAndOverrideRules:
+
+    def test_override_fixed_dimension_with_none_rejected(self):
+        class FixedBase(B.Struct):
+            dim = B.Dim(64)
+
+        with pytest.raises(ValueError, match=r"Cannot override fixed dimension 'dim' \(value=64\) with None"):
+            class InvalidSub(FixedBase):
+                dim = B.Dim(None)
+
+    def test_override_dimension_with_invalid_type_rejected(self):
+        with pytest.raises(TypeError, match="Expected Dim, int, or None"):
+            B.Dim("invalid_string")  # type: ignore
+
+        with pytest.raises(TypeError, match="Expected Dim, int, or None"):
+            B.Dim([64])  # type: ignore
+
+    def test_validate_method_type_checks(self):
+        d = B.Dim(64, name="H")
+        with pytest.raises(TypeError, match="Expected Dim, int, or None"):
+            d.validate("string_value")
+
+        with pytest.raises(ValueError, match="Cannot override fixed dimension"):
+            d.validate(None)
+
+
+# ==============================================================================
+# Suite: Nested Struct Dimension Scoping
+# ==============================================================================
+
+class TestNestedStructDimensionScoping:
+
+    def test_dimension_name_scoping_no_crosstalk(self):
+        class Inner(B.Struct):
+            H = B.Dim(64)
+            pixels = B.Array[float](shape=(H, H))
+
+        class Outer(B.Struct):
+            H = B.Dim()
+            inner: Inner
+            image = B.Array[float](shape=(H, H))
+
+        assert Inner.H.value == 64
+        assert Outer.H.value is None
+        assert Inner.schema.fields["pixels"].shape == (64, 64)
+        assert Outer.schema.fields["image"].shape == (None, None)
+
+
 if __name__ == "__main__":
     test_basic_inheritance()

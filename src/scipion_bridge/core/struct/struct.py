@@ -77,9 +77,6 @@ class Arg:
 
         return self._value
 
-    def infer(self, context: Optional[dict[Any, Any]] = None) -> "Arg":
-        raise NotImplementedError
-
     def validate(self, other: Any) -> None:
         if other is not None and not isinstance(other, (Arg, int)):
             raise TypeError(
@@ -160,9 +157,6 @@ class Array(Marker[T], SchemaConvertible):
             "Missing required argument 'shape' for Array. "
             "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
         )
-
-    def specialize(self, context: Optional[dict[Any, Any]] = None) -> "Array":
-        raise NotImplementedError
 
     def convert_to_entry(self) -> Entry:
         assert self.dtype is not None
