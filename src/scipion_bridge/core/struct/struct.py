@@ -1,9 +1,11 @@
 import numpy as np
-from typing import Type, TypeVar, Tuple, Union, Any, Optional
+from typing import Mapping, Type, TypeVar, Tuple, Union, Any, Optional, Dict, Callable
 try:
     from typing import TypeAlias
 except ImportError:
     from typing_extensions import TypeAlias
+
+from functools import reduce
 
 from .schema import SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from .storage import SchemaArrayStorage
@@ -65,31 +67,33 @@ class Arg:
         return self._value
 
     def infer(self, context: Optional[dict[Any, Any]] = None) -> "Arg":
-        """Infer the concrete value of Dim using the given substitution context."""
-        ctx = context or {}
+        raise NotImplementedError
+    
+        # """Infer the concrete value of Dim using the given substitution context."""
+        # ctx = context or {}
 
-        # Case 1: Direct substitution.
-        if self in ctx:
-            target = ctx[self]
-            if isinstance(target, Arg):
-                if target is not self and target in ctx:
-                    return target.infer(ctx)
-                return target
+        # # Case 1: Direct substitution.
+        # if self in ctx:
+        #     target = ctx[self]
+        #     if isinstance(target, Arg):
+        #         if target is not self and target in ctx:
+        #             return target.infer(ctx)
+        #         return target
 
-            return Arg(target, name=self.name)
+        #     return Arg(target, name=self.name)
 
-        # Case 2: Chained alias / parameter forwarding.
-        if isinstance(self._value, Arg):
-            resolved_target = self._value.infer(ctx)
-            if resolved_target is not self._value:
-                return Arg(resolved_target, name=self.name)
-            return self
+        # # Case 2: Chained alias / parameter forwarding.
+        # if isinstance(self._value, Arg):
+        #     resolved_target = self._value.infer(ctx)
+        #     if resolved_target is not self._value:
+        #         return Arg(resolved_target, name=self.name)
+        #     return self
 
-        # Case 3: Standalone fallback.
-        return self
+        # # Case 3: Standalone fallback.
+        # return self
 
     def validate(self, other: Any) -> None:
-        if other is None and self.value is not None:
+        if (other is None or other.value is None) and self.value is not None:
             raise ValueError(
                 f"Cannot override fixed dimension '{self.name}' "
                 f"(value={self.value}) with None."
@@ -98,6 +102,12 @@ class Arg:
             raise TypeError(
                 f"Expected Dim, int, or None, but got {type(other).__name__}: {other!r}"
             )
+
+    def chain(self, other: "Arg"):
+        self.validate(other)
+
+        if not self == other:
+            self._value = other
 
     @property
     def is_static(self) -> bool:
@@ -175,6 +185,8 @@ class Array(Marker[T], SchemaConvertible):
         resolved_shape = tuple(dim.value for dim in self.shape)
         return _ArrayEntry(np.dtype(self.dtype), shape=resolved_shape)
 
+T = TypeVar("T")  # or TypeVar("T", Arg, SchemaConvertible) to restrict it
+R = TypeVar("R")  # Return type of the callable / iterator
 
 class Struct(SchemaConvertible, SchemaArrayStorage):
 
@@ -185,7 +197,7 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
     def default(cls) -> "Struct":
         return cls()
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, schema_overwrites: Dict[str, int] = {}, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
         def _init_default(dtype: Type) -> SchemaConvertible:
@@ -217,15 +229,34 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
 
         cls_fields = {**assigned_fields, **unassigned_fields}
 
-        dim_specs = {k: v for k, v in cls_fields.items() if isinstance(v, Arg)}
-        schema_specs = {k: v for k, v in cls_fields.items() if not isinstance(v, Arg)}
+        dim_specs: Dict[str, Arg] = {k: v for k, v in cls_fields.items() if isinstance(v, Arg)}
+        schema_specs: Dict[str, SchemaConvertible] = {k: v for k, v in cls_fields.items() if isinstance(v, SchemaConvertible)}
+
+        def _iter_common(f: Callable[[Tuple[T, ...]], R], *dicts: Mapping[str, T]) -> Dict[str, R]:
+            common_keys = reduce(set.intersection, (set(d.keys()) for d in dicts))
+            query = {key: tuple([d[key] for d in dicts]) for key in common_keys}
+
+            return { k: f(v) for k, v in query.items() }
+
+        def _update_dim_spec(args: Tuple[Arg, ...]):
+            base, arg = args
+            base.chain(arg)
 
         # Inherit specs from base classes in reverse MRO order
         for base in reversed(cls.__mro__):
-            if hasattr(base, "_dim_specs"):
-                dim_specs.update(base._dim_specs)
-            if hasattr(base, "_schema_specs"):
-                schema_specs.update(base._schema_specs)
+
+            base_dim_specs: Dict[str, Arg] = getattr(base, "_dim_specs", {})
+            base_schema_specs: Dict[str, SchemaConvertible] = getattr(base, "_schema_specs", {})
+
+            _iter_common(
+                _update_dim_spec, base_dim_specs, dim_specs
+            )
+
+            # TODO: Validate overwriting schema spec entries
+
+            dim_specs.update(base_dim_specs)
+            schema_specs.update(base_schema_specs)
+
 
         # Check that every assigned field in a struct is a SchemaConvertible type
         for name, v in assigned_fields.items():
@@ -243,6 +274,8 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
                     )
 
         cls._dim_specs = dim_specs
+        cls._schema_specs = schema_specs
+
         cls.schema = Schema(
             dtype=cls,
             fields={
@@ -260,8 +293,6 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
             raise TypeError(
                 f"'{type(self).__name__}' got unexpected keyword argument(s): {list(extra_keys)}"
             )
-
-        dim_context: dict[Any, Any] = {}
 
         # for dim_name, default_dim in self._dim_specs.items():
         #     if dim_name in kwargs:
