@@ -299,27 +299,30 @@ class TestCycleDetectionAndAliasChaining:
         assert child_dim.value == 512
 
 
-# ==============================================================================
-# Suite: Sibling & Base Class Isolation (Edge Cases / Potential Bugs)
-# ==============================================================================
+def test_sibling_subclasses_do_not_mutate_base_dimension():
+    """Edge case: subclassing must not mutate the parent class descriptor."""
+    class Base(B.Struct):
+        H = B.Dim()
+        pixels = B.Array[float](shape=(H, H))
+
+    assert Base.H.value is None
+
+    # Create Subclass A with H=64
+    class SubA(Base):
+        H = B.Dim(64)
+        latents = B.Array[float](shape=(H,))
+
+    assert SubA.H.value == 64
+    # Base.H must remain unassigned (None), NOT mutated to 64
+    assert Base.H.value is None, "BUG: Defining SubA mutated Base.H!"
+
+    SubA.print_schema()
+
+    Base.print_args()
+    SubA.print_args()
+
 
 class TestSiblingAndBaseIsolation:
-
-    def test_sibling_subclasses_do_not_mutate_base_dimension(self):
-        """Edge case: subclassing must not mutate the parent class descriptor."""
-        class Base(B.Struct):
-            H = B.Dim()
-            pixels = B.Array[float](shape=(H, H))
-
-        assert Base.H.value is None
-
-        # Create Subclass A with H=64
-        class SubA(Base):
-            H = B.Dim(64)
-
-        assert SubA.H.value == 64
-        # Base.H must remain unassigned (None), NOT mutated to 64
-        assert Base.H.value is None, "BUG: Defining SubA mutated Base.H!"
 
     def test_sibling_subclasses_do_not_poison_each_other(self):
         """Edge case: defining multiple siblings with different values."""
@@ -433,4 +436,4 @@ class TestNestedStructDimensionScoping:
 
 
 if __name__ == "__main__":
-    test_basic_inheritance()
+    test_sibling_subclasses_do_not_mutate_base_dimension()

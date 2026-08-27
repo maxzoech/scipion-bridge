@@ -1,5 +1,8 @@
 import numpy as np
+import copy
+
 from typing import Mapping, Type, TypeVar, Tuple, Union, Any, Optional, Dict, Callable
+
 try:
     from typing import TypeAlias
 except ImportError:
@@ -82,19 +85,13 @@ class Arg:
             raise TypeError(
                 f"Expected Dim, int, or None, but got {type(other).__name__}: {other!r}"
             )
-        
+
         other_val = other.value if isinstance(other, Arg) else other
         if other_val is None and self.value is not None:
             raise ValueError(
                 f"Cannot override fixed dimension '{self.name}' "
                 f"(value={self.value}) with None."
             )
-
-    def chain(self, other: "Arg"):
-        self.validate(other)
-
-        if self is not other:
-            self._value = other
 
     @property
     def is_static(self) -> bool:
@@ -129,14 +126,47 @@ class Arg:
 Dim: TypeAlias = Arg
 
 
-class Array(Marker[T], SchemaConvertible):
+class BoundArrayView(SchemaConvertible):
+    """Read-only view returned when accessing an Array attribute on a Struct class."""
+
+    def __init__(
+        self, dtype: np.dtype, shape_spec: Tuple[Dim, ...], owner_cls: Type["Struct"]
+    ) -> None:
+        self._dtype = dtype
+        self._shape_spec = shape_spec
+
+        self._owner_cls = owner_cls
+
+    @property
+    def dtype(self) -> Optional[np.dtype]:
+        return self._dtype
+
+    @property
+    def shape(self) -> Tuple[Optional[int], ...]:
+        # TODO: Resolve Shape spec with context of owner here
+
+        return tuple([e.value for e in self._shape_spec])
+
+    @classmethod
+    def default(cls) -> SchemaConvertible:
+        raise ValueError(
+            "Missing required argument 'shape' for Array. "
+            "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
+        )
+
+    def convert_to_entry(self) -> Entry:
+        assert self.dtype is not None
+        assert issubclass(self._owner_cls, Struct)
+        return _ArrayEntry(np.dtype(self.dtype), shape=self.shape)
+
+
+class Array(Marker[T]):
 
     def __init__(
         self,
         dtype: Optional[np.dtype] = None,
         *,
         shape: Optional[Tuple[Union[Dim, int, None], ...]] = None,
-        **kwargs: Any,
     ) -> None:
         super().__init__(dtype)
 
@@ -146,25 +176,18 @@ class Array(Marker[T], SchemaConvertible):
                 "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
             )
 
-        self.shape: Tuple[Dim, ...] = tuple([Dim.new(v) for v in shape])
-        self.options = kwargs
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+        self.shape_spec: Tuple[Dim, ...] = tuple([Dim.new(v) for v in shape])
 
-    @classmethod
-    def default(cls) -> "Array":
-        raise ValueError(
-            "Missing required argument 'shape' for Array. "
-            "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
-        )
-
-    def convert_to_entry(self) -> Entry:
+    def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
+        assert owner is not None
         assert self.dtype is not None
-        resolved_shape = tuple(dim.value for dim in self.shape)
-        return _ArrayEntry(np.dtype(self.dtype), shape=resolved_shape)
 
+        return BoundArrayView(self.dtype, self.shape_spec, owner_cls=owner)
+
+    
 T = TypeVar("T")  # or TypeVar("T", Arg, SchemaConvertible) to restrict it
 R = TypeVar("R")  # Return type of the callable / iterator
+
 
 class Struct(SchemaConvertible, SchemaArrayStorage):
 
@@ -175,12 +198,18 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
     def default(cls) -> "Struct":
         return cls()
 
-    def __init_subclass__(cls, schema_overwrites: Dict[str, int] = {}, **kwargs: Any) -> None:
+    def __init_subclass__(
+        cls, schema_overwrites: Dict[str, int] = {}, **kwargs: Any
+    ) -> None:
         super().__init_subclass__(**kwargs)
 
         def _init_default(dtype: Type) -> SchemaConvertible:
             if _is_supported_scalar_value(dtype):
-                return Array(dtype=np.dtype(dtype), shape=(1,))
+                return BoundArrayView(
+                    dtype=np.dtype(dtype),
+                    shape_spec=(Dim(1),),
+                    owner_cls=cls,
+                )
             elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
                 return dtype.default()
             else:
@@ -207,37 +236,29 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
 
         cls_fields = {**assigned_fields, **unassigned_fields}
 
-        dim_specs: Dict[str, Arg] = {k: v for k, v in cls_fields.items() if isinstance(v, Arg)}
-        schema_specs: Dict[str, SchemaConvertible] = {k: v for k, v in cls_fields.items() if isinstance(v, SchemaConvertible)}
-
-        def _iter_common(f: Callable[[Tuple[T, ...]], R], *dicts: Mapping[str, T]) -> Dict[str, R]:
-            common_keys = reduce(set.intersection, (set(d.keys()) for d in dicts))
-            query = {key: tuple([d[key] for d in dicts]) for key in common_keys}
-
-            return { k: f(v) for k, v in query.items() }
-
-        def _update_dim_spec(args: Tuple[Arg, ...]):
-            base, arg = args
-            base.chain(arg)
+        dim_specs: Dict[str, Arg] = {
+            k: v for k, v in cls_fields.items() if isinstance(v, Arg)
+        }
 
         # Inherit specs from base classes in reverse MRO order
         for base in reversed(cls.__mro__):
+            pass
 
-            base_dim_specs: Dict[str, Arg] = getattr(base, "_dim_specs", {})
-            base_schema_specs: Dict[str, SchemaConvertible] = getattr(base, "_schema_specs", {})
+            # base_schema_specs: Dict[str, SchemaConvertible] = getattr(
+            #     base, "_schema_specs", {}
+            # )
+            # for name, spec in base_schema_specs.items():
+            #     if name in schema_specs:
+            #         pass  # TODO: Validate overwriting schema spec entries
+            #     else:
+            #         schema_specs[name] = spec
 
-            _iter_common(
-                _update_dim_spec, base_dim_specs, dim_specs
-            )
-
-            # TODO: Validate overwriting schema spec entries
-
-            dim_specs.update(base_dim_specs)
-            schema_specs.update(base_schema_specs)
-
+        # Use getattr to get the resolved array view
+        schema_specs = { k: getattr(cls, k, None) for k in cls_fields.keys() }
+        schema_specs = { k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible) }
 
         # Check that every assigned field in a struct is a SchemaConvertible type
-        for name, v in assigned_fields.items():
+        for name, v in schema_specs.items():
             if not isinstance(v, (SchemaConvertible, Arg)):
                 if name not in annotations:
                     raise TypeError(
@@ -256,12 +277,8 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
 
         cls.schema = Schema(
             dtype=cls,
-            fields={
-                k: v.convert_to_entry()
-                for k, v in schema_specs.items()
-            },
+            fields={k: v.convert_to_entry() for k, v in schema_specs.items()},
         )
-
 
     def __init__(self, **kwargs: Any) -> None:
 
@@ -276,3 +293,7 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
         return _SchemaEntry(
             schema=self.schema,
         )
+
+    @classmethod
+    def print_args(cls):
+        print(cls._dim_specs)
