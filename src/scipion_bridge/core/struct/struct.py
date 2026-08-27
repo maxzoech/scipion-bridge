@@ -189,10 +189,6 @@ class Array(Marker[T]):
 
         return BoundArrayView(self.dtype, self.shape_spec, owner_cls=owner)
 
-    
-T = TypeVar("T")  # or TypeVar("T", Arg, SchemaConvertible) to restrict it
-R = TypeVar("R")  # Return type of the callable / iterator
-
 
 class Struct(SchemaConvertible, SchemaArrayStorage):
 
@@ -209,11 +205,11 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
         super().__init_subclass__(**kwargs)
 
         def _init_default(dtype: Type):
-
-            if _is_supported_scalar_value(dtype):                
-                return Array(
+            if _is_supported_scalar_value(dtype):
+                return BoundArrayView(
                     dtype=np.dtype(dtype),
-                    shape=(1,)
+                    shape_spec=(Dim(1),),
+                    owner_cls=cls,
                 )
             elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
                 return dtype.default()
@@ -222,6 +218,12 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
                     f"Unsupported field type {dtype!r}. "
                     "Expected a supported scalar type or a valid schema convertible type."
                 )
+
+        def _resolve_schema_field(cls: type, name: str, field: Any) -> Any:
+            if isinstance(field, SchemaConvertible):
+                return field
+
+            return getattr(cls, name, field)
 
         cls_name = cls.__name__
         annotations = cls.__dict__.get("__annotations__", {})
@@ -258,9 +260,12 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
         cls_fields.update(unassigned_fields)
 
         # Use getattr to get the resolved array view
-        schema_specs = { k: v.__get__(None, cls) for k, v in cls_fields.items() }
-        schema_specs = { k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible) }
-
+        schema_specs = {
+            k: _resolve_schema_field(cls, k, v) for k, v in cls_fields.items()
+        }
+        schema_specs = {
+            k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible)
+        }
 
         # Check that every assigned field in a struct is a SchemaConvertible type
         for name, v in schema_specs.items():
@@ -298,4 +303,3 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
         return _SchemaEntry(
             schema=self.schema,
         )
-
