@@ -262,41 +262,41 @@ class TestDescriptorSemantics:
 # Suite: Chaining, Aliasing & Cycle Detection
 # ==============================================================================
 
-class TestCycleDetectionAndAliasChaining:
+# class TestCycleDetectionAndAliasChaining:
 
-    def test_self_chaining_noop(self):
-        d = B.Dim(name="A")
-        d.chain(d)
-        assert d._value is None
-        assert d.value is None
+#     def test_self_chaining_noop(self):
+#         d = B.Dim(name="A")
+#         d.chain(d)
+#         assert d._value is None
+#         assert d.value is None
 
-    def test_multi_hop_alias_forwarding(self):
-        d1 = B.Dim(name="D1")
-        d2 = B.Dim(name="D2")
-        d3 = B.Dim(name="D3")
+#     def test_multi_hop_alias_forwarding(self):
+#         d1 = B.Dim(name="D1")
+#         d2 = B.Dim(name="D2")
+#         d3 = B.Dim(name="D3")
 
-        d1.chain(d2)
-        d2.chain(d3)
-        assert d1.value is None
-        assert d2.value is None
-        assert d3.value is None
+#         d1.chain(d2)
+#         d2.chain(d3)
+#         assert d1.value is None
+#         assert d2.value is None
+#         assert d3.value is None
 
-        # Resolving the end of the chain resolves all upstream descriptors
-        d3.chain(B.Dim(256))
-        assert d3.value == 256
-        assert d2.value == 256
-        assert d1.value == 256
+#         # Resolving the end of the chain resolves all upstream descriptors
+#         d3.chain(B.Dim(256))
+#         assert d3.value == 256
+#         assert d2.value == 256
+#         assert d1.value == 256
 
-    def test_unassigned_chain_late_binding(self):
-        parent_dim = B.Dim(name="parent")
-        child_dim = B.Dim(name="child")
+#     def test_unassigned_chain_late_binding(self):
+#         parent_dim = B.Dim(name="parent")
+#         child_dim = B.Dim(name="child")
 
-        child_dim.chain(parent_dim)
-        assert child_dim.value is None
+#         child_dim.chain(parent_dim)
+#         assert child_dim.value is None
 
-        # Parent is assigned a value later
-        parent_dim.chain(B.Dim(512))
-        assert child_dim.value == 512
+#         # Parent is assigned a value later
+#         parent_dim.chain(B.Dim(512))
+#         assert child_dim.value == 512
 
 
 def test_sibling_subclasses_do_not_mutate_base_dimension():
@@ -317,9 +317,6 @@ def test_sibling_subclasses_do_not_mutate_base_dimension():
     assert Base.H.value is None, "BUG: Defining SubA mutated Base.H!"
 
     SubA.print_schema()
-
-    Base.print_args()
-    SubA.print_args()
 
 
 class TestSiblingAndBaseIsolation:

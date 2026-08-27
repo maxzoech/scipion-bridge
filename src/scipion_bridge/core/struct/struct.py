@@ -143,9 +143,14 @@ class BoundArrayView(SchemaConvertible):
 
     @property
     def shape(self) -> Tuple[Optional[int], ...]:
-        # TODO: Resolve Shape spec with context of owner here
+        def _resolve(dim: Dim) -> Optional[int]:
+            if not dim.name:
+                return dim.value
 
-        return tuple([e.value for e in self._shape_spec])
+            target = getattr(self._owner_cls, dim.name, dim)
+            return target.value if isinstance(target, Arg) else target
+
+        return tuple(_resolve(d) for d in self._shape_spec)
 
     @classmethod
     def default(cls) -> SchemaConvertible:
@@ -240,18 +245,17 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
             k: v for k, v in cls_fields.items() if isinstance(v, Arg)
         }
 
-        # Inherit specs from base classes in reverse MRO order
-        for base in reversed(cls.__mro__):
-            pass
+        cls_fields: Dict[str, Any] = {}
+        dim_specs: Dict[str, Arg] = {}
 
-            # base_schema_specs: Dict[str, SchemaConvertible] = getattr(
-            #     base, "_schema_specs", {}
-            # )
-            # for name, spec in base_schema_specs.items():
-            #     if name in schema_specs:
-            #         pass  # TODO: Validate overwriting schema spec entries
-            #     else:
-            #         schema_specs[name] = spec
+        for base in reversed(cls.__mro__):
+            if hasattr(base, "_cls_fields"):
+                cls_fields.update(base._cls_fields)
+            if hasattr(base, "_dim_specs"):
+                dim_specs.update(base._dim_specs)
+
+        cls_fields.update(assigned_fields)
+        cls_fields.update(unassigned_fields)
 
         # Use getattr to get the resolved array view
         schema_specs = { k: getattr(cls, k, None) for k in cls_fields.keys() }
@@ -273,7 +277,7 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
                     )
 
         cls._dim_specs = dim_specs
-        cls._schema_specs = schema_specs
+        cls._cls_fields = cls_fields
 
         cls.schema = Schema(
             dtype=cls,
@@ -294,6 +298,3 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
             schema=self.schema,
         )
 
-    @classmethod
-    def print_args(cls):
-        print(cls._dim_specs)
