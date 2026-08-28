@@ -33,6 +33,14 @@ class Arg:
         *,
         name: Optional[str] = None,
     ) -> None:
+        
+        if value is not None and (
+            not isinstance(value, (int, Arg)) or isinstance(value, bool)
+        ):
+            raise TypeError(
+                f"Expected Dim, int, or None, but got {type(value).__name__}: {value!r}"
+            )
+        
         self._value = value
         self.name = name
         self._owner: Optional[type] = None
@@ -62,7 +70,9 @@ class Arg:
                 value.name = name
             return value
 
-        if value is not None and not isinstance(value, int):
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool)
+        ):
             raise TypeError(
                 f"Expected Dim, int, or None, but got {type(value).__name__}: {value!r}"
             )
@@ -81,7 +91,9 @@ class Arg:
         return self._value
 
     def validate(self, other: Any) -> None:
-        if other is not None and not isinstance(other, (Arg, int)):
+        if other is not None and (
+            not isinstance(other, (Arg, int)) or isinstance(other, bool)
+        ):
             raise TypeError(
                 f"Expected Dim, int, or None, but got {type(other).__name__}: {other!r}"
             )
@@ -130,7 +142,7 @@ class BoundArrayView(SchemaConvertible):
     """Read-only view returned when accessing an Array attribute on a Struct class."""
 
     def __init__(
-        self, dtype: np.dtype, shape_spec: Tuple[Dim, ...], owner_cls: Type["Struct"]
+        self, dtype: np.dtype, shape_spec: Tuple[Dim, ...], owner_cls: Type["Trait"]
     ) -> None:
         self._dtype = dtype
         self._shape_spec = shape_spec
@@ -161,7 +173,7 @@ class BoundArrayView(SchemaConvertible):
 
     def convert_to_entry(self) -> Entry:
         assert self.dtype is not None
-        assert issubclass(self._owner_cls, Struct)
+        assert issubclass(self._owner_cls, Trait)
         return _ArrayEntry(np.dtype(self.dtype), shape=self.shape)
 
 
@@ -190,19 +202,20 @@ class Array(Marker[T]):
         return BoundArrayView(self.dtype, self.shape_spec, owner_cls=owner)
 
 
-class Struct(SchemaConvertible, SchemaArrayStorage):
+class Trait:
+    """Specification layer: accumulates fields, dimensions, and shape descriptors."""
 
-    _schema_specs: dict[str, SchemaConvertible]
-    _dim_specs: dict[str, Dim]
+    _cls_fields: Dict[str, Any]
+    _dim_specs: Dict[str, Arg]
+    _bridge_trait_marker: bool = True
 
-    @classmethod
-    def default(cls) -> "Struct":
-        return cls()
-
-    def __init_subclass__(
-        cls, schema_overwrites: Dict[str, int] = {}, **kwargs: Any
-    ) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+
+        if cls.__name__ == "Struct" and cls.__module__ == __name__:
+            cls._cls_fields = {}
+            cls._dim_specs = {}
+            return
 
         def _init_default(dtype: Type):
             if _is_supported_scalar_value(dtype):
@@ -219,12 +232,6 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
                     "Expected a supported scalar type or a valid schema convertible type."
                 )
 
-        def _resolve_schema_field(cls: type, name: str, field: Any) -> Any:
-            if isinstance(field, SchemaConvertible):
-                return field
-
-            return getattr(cls, name, field)
-
         cls_name = cls.__name__
         annotations = cls.__dict__.get("__annotations__", {})
 
@@ -238,38 +245,12 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
         unassigned_fields = {
             k: _init_default(v)
             for k, v in annotations.items()
-            if k not in assigned_fields
+            if not k.startswith("_") and k not in assigned_fields
         }
 
-        cls_fields = {**assigned_fields, **unassigned_fields}
-
-        dim_specs: Dict[str, Arg] = {
-            k: v for k, v in cls_fields.items() if isinstance(v, Arg)
-        }
-
-        cls_fields: Dict[str, Any] = {}
-        dim_specs: Dict[str, Arg] = {}
-
-        for base in reversed(cls.__mro__):
-            if hasattr(base, "_cls_fields"):
-                cls_fields.update(base._cls_fields)
-            if hasattr(base, "_dim_specs"):
-                dim_specs.update(base._dim_specs)
-
-        cls_fields.update(assigned_fields)
-        cls_fields.update(unassigned_fields)
-
-        # Use getattr to get the resolved array view
-        schema_specs = {
-            k: _resolve_schema_field(cls, k, v) for k, v in cls_fields.items()
-        }
-        schema_specs = {
-            k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible)
-        }
-
-        # Check that every assigned field in a struct is a SchemaConvertible type
-        for name, v in schema_specs.items():
-            if not isinstance(v, (SchemaConvertible, Arg)):
+        # Check that every assigned field is a SchemaConvertible, Arg, or Marker
+        for name, v in assigned_fields.items():
+            if not isinstance(v, (SchemaConvertible, Arg, Marker)):
                 if name not in annotations:
                     raise TypeError(
                         f"Struct '{cls_name}' contains class-level attributes missing type annotations. "
@@ -282,8 +263,68 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
                         f"'{type(v).__name__}' (value: {v!r}). Expected a SchemaConvertible or Arg specification."
                     )
 
+        cls_fields: Dict[str, Any] = {}
+        dim_specs: Dict[str, Arg] = {}
+
+        for base in reversed(cls.__mro__):
+            if hasattr(base, "_cls_fields"):
+                cls_fields.update(base._cls_fields)
+            if hasattr(base, "_dim_specs"):
+                dim_specs.update(base._dim_specs)
+
+        # Validate overriding dimensions from base classes
+        for k, v in assigned_fields.items():
+            if k in dim_specs:
+                dim_specs[k].validate(v)
+
+        cls_fields.update(assigned_fields)
+        cls_fields.update(unassigned_fields)
+
+        for k, v in cls_fields.items():
+            if isinstance(v, Arg):
+                if v.name is None:
+                    v.name = k
+                dim_specs[k] = v
+
         cls._dim_specs = dim_specs
         cls._cls_fields = cls_fields
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if not issubclass(type(self), Struct):
+            raise TypeError(
+                f"Cannot instantiate pure Trait '{type(self).__name__}'. "
+                f"Mix it into a B.Struct to create a concrete entity."
+            )
+
+
+class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
+    """Materialization layer: builds the finalized Schema and binds array storage."""
+
+    _bridge_struct_marker: bool = True
+    schema: Schema
+
+    @classmethod
+    def default(cls) -> "Struct":
+        return cls()
+
+    def __init_subclass__(
+        cls, schema_overwrites: Dict[str, int] = {}, **kwargs: Any
+    ) -> None:
+        super().__init_subclass__(**kwargs)
+
+        def _resolve_schema_field(owner: type, name: str, field: Any) -> Any:
+            if isinstance(field, SchemaConvertible):
+                return field
+
+            return getattr(owner, name, field)
+
+        # Use getattr to get the resolved array view / schema convertible
+        schema_specs = {
+            k: _resolve_schema_field(cls, k, v) for k, v in cls._cls_fields.items()
+        }
+        schema_specs = {
+            k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible)
+        }
 
         cls.schema = Schema(
             dtype=cls,
@@ -291,7 +332,6 @@ class Struct(SchemaConvertible, SchemaArrayStorage):
         )
 
     def __init__(self, **kwargs: Any) -> None:
-
         allowed_keys = set(self._dim_specs)
         extra_keys = set(kwargs) - allowed_keys
         if extra_keys:
