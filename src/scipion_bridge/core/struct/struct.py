@@ -264,29 +264,26 @@ class Trait:
                     )
 
         cls_fields: Dict[str, Any] = {}
-        dim_specs: Dict[str, Arg] = {}
+        arg_specs: Dict[str, Arg] = {}
 
         for base in reversed(cls.__mro__):
             if hasattr(base, "_cls_fields"):
                 cls_fields.update(base._cls_fields)
-            if hasattr(base, "_dim_specs"):
-                dim_specs.update(base._dim_specs)
+            if hasattr(base, "_arg_specs"):
+                arg_specs.update(base._arg_specs)
 
         # Validate overriding dimensions from base classes
         for k, v in assigned_fields.items():
-            if k in dim_specs:
-                dim_specs[k].validate(v)
+            if k in arg_specs:
+                arg_specs[k].validate(v)
+
+            if isinstance(v, Arg):
+                arg_specs[k] = v
 
         cls_fields.update(assigned_fields)
         cls_fields.update(unassigned_fields)
 
-        for k, v in cls_fields.items():
-            if isinstance(v, Arg):
-                if v.name is None:
-                    v.name = k
-                dim_specs[k] = v
-
-        cls._dim_specs = dim_specs
+        cls._arg_specs = arg_specs
         cls._cls_fields = cls_fields
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -301,11 +298,15 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
     """Materialization layer: builds the finalized Schema and binds array storage."""
 
     _bridge_struct_marker: bool = True
-    schema: Schema
+    _bridge_schema: Schema
 
     @classmethod
     def default(cls) -> "Struct":
         return cls()
+
+    @classmethod
+    def schema(cls) -> Schema:
+        return cls._bridge_schema
 
     def __init_subclass__(
         cls, schema_overwrites: Dict[str, int] = {}, **kwargs: Any
@@ -326,7 +327,7 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
             k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible)
         }
 
-        cls.schema = Schema(
+        cls._bridge_schema = Schema(
             dtype=cls,
             fields={k: v.convert_to_entry() for k, v in schema_specs.items()},
         )
@@ -341,5 +342,5 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
 
     def convert_to_entry(self) -> Entry:
         return _SchemaEntry(
-            schema=self.schema,
+            schema=self.schema(),
         )

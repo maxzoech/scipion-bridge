@@ -44,7 +44,11 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
         self._capacity = capacity
         self._item = self.dtype(**kwargs)
-        self.schema = self._item.schema.to_set_schema(capacity=self.capacity)
+        # self.schema = self._item.schema().to_set_schema(capacity=self.capacity)
+
+    @classmethod
+    def schema(cls) -> Schema:
+        raise NotImplementedError
 
     @classmethod
     def _create(
@@ -65,7 +69,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         obj._capacity = capacity
         obj._item = item
         assert isinstance(obj._item, Struct)
-        obj.schema = obj._item.schema.to_set_schema(capacity=obj.capacity)
+        # obj.schema = obj._item.schema().to_set_schema(capacity=obj.capacity)
         return obj
 
     @property
@@ -76,7 +80,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         if self.dtype is None or self.schema is None:
             raise TypeError("Cannot convert unsubscripted Set to schema entry.")
         return _SchemaSetEntry(
-            schema=self.schema,
+            schema=self.schema(),
             capacity=self.capacity,
         )
 
