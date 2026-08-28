@@ -168,7 +168,7 @@ def test_inheritance_with_nested_structs_and_sets():
     assert set(items_entry.children.fields.keys()) == {"feature", "vector"}
 
 
-def test_class_vs_instance_get_semantics(self):
+def test_class_vs_instance_get_semantics():
     class Record(B.Struct):
         dim = B.Dim(64)
 
@@ -181,7 +181,7 @@ def test_class_vs_instance_get_semantics(self):
     inst = Record()
     assert inst.dim == 64
 
-def test_unassigned_class_vs_instance_get(self):
+def test_unassigned_class_vs_instance_get():
     class DynamicRecord(B.Struct):
         dim = B.Dim()
 
@@ -191,7 +191,7 @@ def test_unassigned_class_vs_instance_get(self):
     inst = DynamicRecord()
     assert inst.dim is None
 
-def test_instance_set_raises_attribute_error(self):
+def test_instance_set_raises_attribute_error():
     class Record(B.Struct):
         dim = B.Dim(64)
 
@@ -199,7 +199,7 @@ def test_instance_set_raises_attribute_error(self):
     with pytest.raises(AttributeError, match="class-level schema parameter"):
         inst.dim = 128
 
-def test_dim_equality_with_ints_and_dims(self):
+def test_dim_equality_with_ints_and_dims():
     d1 = B.Dim(64)
     d2 = B.Dim(64)
     d3 = B.Dim(128)
@@ -215,7 +215,7 @@ def test_dim_equality_with_ints_and_dims(self):
     assert d_none1 == None
     assert d1 != d_none1
 
-def test_int_conversion(self):
+def test_int_conversion():
     d = B.Dim(42)
     assert int(d) == 42
 
@@ -223,7 +223,7 @@ def test_int_conversion(self):
     with pytest.raises(TypeError, match="Cannot convert unassigned Dim to int"):
         int(d_unassigned)
 
-def test_repr_and_str(self):
+def test_repr_and_str():
     d = B.Dim(64, name="H")
     assert str(d) == "H:64"
     assert "Arg(64, name='H')" in repr(d)
@@ -252,7 +252,7 @@ def test_sibling_subclasses_do_not_mutate_base_dimension():
     SubA.print_schema()
 
 
-def test_sibling_subclasses_do_not_poison_each_other(self):
+def test_sibling_subclasses_do_not_poison_each_other():
     """Edge case: defining multiple siblings with different values."""
     class Base(B.Struct):
         H = B.Dim()
@@ -272,7 +272,7 @@ def test_sibling_subclasses_do_not_poison_each_other(self):
     assert SubDynamic.H.value is None
     assert Base.H.value is None
 
-def test_multi_tier_inheritance_isolation(self):
+def test_multi_tier_inheritance_isolation():
     class Root(B.Struct):
         dim = B.Dim()
 
@@ -294,7 +294,7 @@ def test_multi_tier_inheritance_isolation(self):
     assert LeafA.dim.value == 32
     assert LeafB.dim.value == 64
 
-def test_diamond_inheritance_dimension_resolution(self):
+def test_diamond_inheritance_dimension_resolution():
     class Root(B.Struct):
         dim = B.Dim()
 
@@ -311,7 +311,7 @@ def test_diamond_inheritance_dimension_resolution(self):
     assert Root.dim.value is None
 
 
-def test_override_fixed_dimension_with_none_rejected(self):
+def test_override_fixed_dimension_with_none_rejected():
     class FixedBase(B.Struct):
         dim = B.Dim(64)
 
@@ -319,14 +319,14 @@ def test_override_fixed_dimension_with_none_rejected(self):
         class InvalidSub(FixedBase):
             dim = B.Dim(None)
 
-def test_override_dimension_with_invalid_type_rejected(self):
+def test_override_dimension_with_invalid_type_rejected():
     with pytest.raises(TypeError, match="Expected Dim, int, or None"):
         B.Dim("invalid_string")  # type: ignore
 
     with pytest.raises(TypeError, match="Expected Dim, int, or None"):
         B.Dim([64])  # type: ignore
 
-def test_validate_method_type_checks(self):
+def test_validate_method_type_checks():
     d = B.Dim(64, name="H")
     with pytest.raises(TypeError, match="Expected Dim, int, or None"):
         d.validate("string_value")
@@ -335,7 +335,7 @@ def test_validate_method_type_checks(self):
         d.validate(None)
 
 
-def test_dimension_name_scoping_no_crosstalk(self):
+def test_dimension_name_scoping_no_crosstalk():
     class Inner(B.Struct):
         H = B.Dim(64)
         pixels = B.Array[float](shape=(H, H))
@@ -351,5 +351,40 @@ def test_dimension_name_scoping_no_crosstalk(self):
     assert_array_entry(Outer.schema().fields["image"], (None, None))
 
 
+def test_schema_specialization():
+    class Foo(B.Struct):
+        H = B.Dim(None)
+        pixels = B.Array[float](shape=(H, H))
+
+    # 1. Test specialization via subclass definition
+    class Foo128(Foo, specializations={"H": 128}):
+        pass
+
+    # 2. Test specialization via .static() factory method
+    FooStatic128 = Foo.static(H=128)
+
+    # Verify base class remained untouched
+    assert Foo.H.value is None
+    assert not Foo.schema().is_static
+    assert_array_entry(Foo.schema().fields["pixels"], (None, None), is_static=False)
+
+    # Verify class-level subclass specialization
+    assert Foo128.H.value == 128
+    assert Foo128.schema().is_static
+    assert_array_entry(Foo128.schema().fields["pixels"], (128, 128), is_static=True)
+
+    # Verify dynamic .static() specialization
+    assert FooStatic128.H.value == 128
+    assert FooStatic128.schema().is_static
+    assert_array_entry(FooStatic128.schema().fields["pixels"], (128, 128), is_static=True)
+
+    # Verify instance-level schema propagation
+    inst_128 = Foo128()
+    inst_static = FooStatic128()
+    assert_array_entry(inst_128.schema().fields["pixels"], (128, 128), is_static=True)
+    assert_array_entry(inst_static.schema().fields["pixels"], (128, 128), is_static=True)
+
+
+
 if __name__ == "__main__":
-    test_simple_struct()
+    pass

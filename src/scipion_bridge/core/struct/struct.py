@@ -1,7 +1,8 @@
 import numpy as np
 import copy
 
-from typing import Mapping, Type, TypeVar, Tuple, Union, Any, Optional, Dict, Callable
+from typing import Mapping, Type, TypeVar, Tuple, Union, Any, Optional, Dict, Callable, cast
+from typing_extensions import Self
 
 try:
     from typing import TypeAlias
@@ -206,7 +207,7 @@ class Trait:
     """Specification layer: accumulates fields, dimensions, and shape descriptors."""
 
     _cls_fields: Dict[str, Any]
-    _dim_specs: Dict[str, Arg]
+    _arg_specs: Dict[str, Arg]
     _bridge_trait_marker: bool = True
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -214,7 +215,7 @@ class Trait:
 
         if cls.__name__ == "Struct" and cls.__module__ == __name__:
             cls._cls_fields = {}
-            cls._dim_specs = {}
+            cls._arg_specs = {}
             return
 
         def _init_default(dtype: Type):
@@ -309,7 +310,7 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
         return cls._bridge_schema
 
     def __init_subclass__(
-        cls, schema_overwrites: Dict[str, int] = {}, **kwargs: Any
+        cls, specializations: Dict[str, int] = {}, **kwargs: Any
     ) -> None:
         super().__init_subclass__(**kwargs)
 
@@ -318,6 +319,20 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
                 return field
 
             return getattr(owner, name, field)
+
+        for k, v in specializations.items():
+            if k not in cls._arg_specs:
+                raise TypeError(
+                    f"Unknown schema overwrite argument '{k}' for '{cls.__name__}'. "
+                    f"Available dimensions: {list(cls._arg_specs.keys())}"
+                )
+
+            new_arg = Arg.new(v, name=k)
+            cls._arg_specs[k].validate(new_arg)
+
+            cls._arg_specs[k] = new_arg
+            cls._cls_fields[k] = new_arg
+            setattr(cls, k, new_arg)
 
         # Use getattr to get the resolved array view / schema convertible
         schema_specs = {
@@ -333,12 +348,34 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
         )
 
     def __init__(self, **kwargs: Any) -> None:
-        allowed_keys = set(self._dim_specs)
+        allowed_keys = set(self._arg_specs)
         extra_keys = set(kwargs) - allowed_keys
         if extra_keys:
             raise TypeError(
                 f"'{type(self).__name__}' got unexpected keyword argument(s): {list(extra_keys)}"
             )
+
+    @classmethod
+    def static(cls: Type[Self], **kwargs: Union[int, Arg]) -> Type[Self]:
+        """Create a new specialized subclass of this Struct with concrete dimension values."""
+        for k in kwargs:
+            if k not in cls._arg_specs:
+                raise TypeError(
+                    f"'{cls.__name__}.static()' got unexpected dimension argument: {k!r}. "
+                    f"Available dimensions: {list(cls._arg_specs.keys())}"
+                )
+            
+        args_suffix = "__".join(f"{k}{v}" for k, v in sorted(kwargs.items()))
+        subclass_name = f"{cls.__name__}_{args_suffix}" if args_suffix else f"{cls.__name__}_Static"
+
+        subtype = type(
+            subclass_name,
+            (cls,),
+            {},
+            specializations=kwargs,
+        )
+
+        return cast(Type[Self], subtype)
 
     def convert_to_entry(self) -> Entry:
         return _SchemaEntry(
