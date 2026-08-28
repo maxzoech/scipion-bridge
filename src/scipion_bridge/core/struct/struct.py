@@ -314,12 +314,6 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
     ) -> None:
         super().__init_subclass__(**kwargs)
 
-        def _resolve_schema_field(owner: type, name: str, field: Any) -> Any:
-            if isinstance(field, SchemaConvertible):
-                return field
-
-            return getattr(owner, name, field)
-
         for k, v in specializations.items():
             if k not in cls._arg_specs:
                 raise TypeError(
@@ -334,13 +328,12 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
             cls._cls_fields[k] = new_arg
             setattr(cls, k, new_arg)
 
-        # Use getattr to get the resolved array view / schema convertible
-        schema_specs = {
-            k: _resolve_schema_field(cls, k, v) for k, v in cls._cls_fields.items()
-        }
-        schema_specs = {
-            k: v for k, v in schema_specs.items() if isinstance(v, SchemaConvertible)
-        }
+        # Use getattr to trigger descriptors (Array -> BoundArrayView, Set -> BoundSetView)
+        schema_specs: Dict[str, SchemaConvertible] = {}
+        for k, v in cls._cls_fields.items():
+            resolved = getattr(cls, k, v)
+            if isinstance(resolved, SchemaConvertible):
+                schema_specs[k] = resolved
 
         cls._bridge_schema = Schema(
             dtype=cls,

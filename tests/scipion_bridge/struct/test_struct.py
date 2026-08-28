@@ -142,7 +142,6 @@ def test_inheritance_dimension_validation_errors():
             dim = "invalid_dimension"
 
 
-@pytest.mark.xfail(reason="Need to rewrite sets for this")
 def test_inheritance_with_nested_structs_and_sets():
     class Inner(B.Struct):
         feature: float
@@ -504,32 +503,39 @@ def test_specialization_error_handling():
         Foo.static(H="invalid")  # type: ignore
 
 
-@pytest.mark.skip(reason="Set needs to be refactored")
 def test_set_of_specialized_struct_schema():
     class Particle(B.Struct):
         H = B.Dim(None)
         pixels = B.Array[float](shape=(H, H))
 
     Particle128 = Particle.static(H=128)
-    set_schema = B.Set[Particle128]().schema
-    # assert "pixels" in set_schema.fields
-    # assert set_schema.fields["pixels"].shape == (128, 128)
+    set_schema = B.Set[Particle128].schema()
+    assert set_schema.is_static is True
+    assert "pixels" in set_schema.fields
+    assert_array_entry(set_schema.fields["pixels"], (128, 128), is_static=True)
 
 
-@pytest.mark.skip(reason="Set needs to be refactored")
 def test_struct_containing_specialized_set():
     class Particle(B.Struct):
         H = B.Dim(None)
         pixels = B.Array[float](shape=(H, H))
 
+    Particle64 = Particle.static(H=64)
+
     class Micrograph(B.Struct):
         W = B.Dim(None)
         raw = B.Array[float](shape=(W, W))
-        particles: B.Set[Particle].static(H=64) # type: ignore
+        particles = B.Set[Particle64](capacity=10)
 
+    assert not Micrograph.schema().is_static
     MicrographFixed = Micrograph.static(W=1024)
     assert MicrographFixed.schema().is_static is True
+    assert_array_entry(MicrographFixed.schema().fields["raw"], (1024, 1024), is_static=True)
+    particles_schema = get_child_struct(MicrographFixed.schema().fields["particles"])
+    assert_array_entry(particles_schema.fields["pixels"], (64, 64), is_static=True)
+
+    MicrographFixed.print_schema()
 
 
 if __name__ == "__main__":
-    test_nested_struct_specialization()
+    test_struct_containing_specialized_set()

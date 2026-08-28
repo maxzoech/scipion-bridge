@@ -291,15 +291,27 @@ def test_set_capacity_specialization_with_dynamic_arg():
         N = B.Arg()
         items = B.Set[Element](capacity=N)
 
-    # Base struct has dynamic capacity (None)
-    assert isinstance(Container.schema().fields["items"], B.Set)
-    assert Container.schema().fields["items"].capacity is None
+    # 1. Base struct has dynamic capacity (None)
+    items_entry_base = Container.schema().fields["items"]
+    assert isinstance(items_entry_base, _SchemaSetEntry)
+    assert items_entry_base.capacity is None
+    assert not items_entry_base.is_static
     assert not Container.schema().is_static
 
-    # Specializing N on Container should ideally propagate to Set capacity
+    # 2. Specializing N on Container via .static() propagates to Set capacity
     Container10 = Container.static(N=10)
-    items_entry = Container10.schema().fields["items"]
-    assert isinstance(items_entry, _SchemaSetEntry)
-    assert items_entry.capacity == 10
-    assert items_entry.is_static is True
+    items_entry_10 = Container10.schema().fields["items"]
+    assert isinstance(items_entry_10, _SchemaSetEntry)
+    assert items_entry_10.capacity == 10
+    assert items_entry_10.is_static is True
     assert Container10.schema().is_static is True
+
+    # 3. Specializing N on Container via subclass specializations={"N": 20}
+    class Container20(Container, specializations={"N": 20}):
+        pass
+
+    items_entry_20 = Container20.schema().fields["items"]
+    assert isinstance(items_entry_20, _SchemaSetEntry)
+    assert items_entry_20.capacity == 20
+    assert items_entry_20.is_static is True
+    assert Container20.schema().is_static is True
