@@ -385,6 +385,148 @@ def test_schema_specialization():
     assert_array_entry(inst_static.schema().fields["pixels"], (128, 128), is_static=True)
 
 
+def test_multidim_partial_and_full_specialization():
+    class TensorData(B.Struct):
+        H = B.Dim(None)
+        W = B.Dim(None)
+        C = B.Dim(None)
+        image = B.Array[float](shape=(H, W, C))
+        mask = B.Array[bool](shape=(H, W))
 
-if __name__ == "__main__":
-    pass
+    # Partial specialization: only specialize channel C
+    TensorRGB = TensorData.static(C=3)
+    assert TensorRGB.C.value == 3
+    assert TensorRGB.H.value is None
+    assert TensorRGB.W.value is None
+    assert not TensorRGB.schema().is_static
+    assert_array_entry(TensorRGB.schema().fields["image"], (None, None, 3), is_static=False)
+    assert_array_entry(TensorRGB.schema().fields["mask"], (None, None), is_static=False)
+
+    # Further specialize dimensions H and W
+    TensorFixed = TensorRGB.static(H=64, W=128)
+    assert TensorFixed.H.value == 64
+    assert TensorFixed.W.value == 128
+    assert TensorFixed.C.value == 3
+    assert TensorFixed.schema().is_static
+    assert_array_entry(TensorFixed.schema().fields["image"], (64, 128, 3), is_static=True)
+    assert_array_entry(TensorFixed.schema().fields["mask"], (64, 128), is_static=True)
+
+
+def test_multi_level_inheritance_specialization():
+    class BaseVolume(B.Struct):
+        Z = B.Dim(None)
+        Y = B.Dim(None)
+        X = B.Dim(None)
+        data = B.Array[float](shape=(Z, Y, X))
+
+    # Level 1: Specialize Z via subclass definition
+    class SlabVolume(BaseVolume, specializations={"Z": 1}):
+        pass
+
+    assert SlabVolume.Z.value == 1
+    assert SlabVolume.Y.value is None
+    assert SlabVolume.X.value is None
+    assert not SlabVolume.schema().is_static
+    assert_array_entry(SlabVolume.schema().fields["data"], (1, None, None), is_static=False)
+
+    # Level 2: Specialize Y via subclass definition
+    class SquareSlab(SlabVolume, specializations={"Y": 256}):
+        pass
+
+    assert SquareSlab.Z.value == 1
+    assert SquareSlab.Y.value == 256
+    assert SquareSlab.X.value is None
+    assert not SquareSlab.schema().is_static
+    assert_array_entry(SquareSlab.schema().fields["data"], (1, 256, None), is_static=False)
+
+    # Level 3: Fully specialize via .static()
+    Cube256 = SquareSlab.static(X=256)
+    assert Cube256.Z.value == 1
+    assert Cube256.Y.value == 256
+    assert Cube256.X.value == 256
+    assert Cube256.schema().is_static
+    assert_array_entry(Cube256.schema().fields["data"], (1, 256, 256), is_static=True)
+
+
+def test_nested_struct_specialization():
+    class Patch(B.Struct):
+        size = B.Dim(None)
+        pixels = B.Array[float](shape=(size, size))
+
+    Patch64 = Patch.static(size=64)
+
+    class Container(B.Struct):
+        N = B.Dim(None)
+        patch: Patch64
+
+        weights = B.Array[float](shape=(N,))
+
+    # Outer struct is partially dynamic due to N
+    assert not Container.schema().is_static
+    patch_schema = get_child_struct(Container.schema().fields["patch"])
+    assert patch_schema.is_static is True
+    assert_array_entry(patch_schema.fields["pixels"], (64, 64), is_static=True)
+    assert_array_entry(Container.schema().fields["weights"], (None,), is_static=False)
+
+    # Fully specializing outer struct
+    ContainerFixed = Container.static(N=10)
+    assert ContainerFixed.schema().is_static is True
+    fixed_patch_schema = get_child_struct(ContainerFixed.schema().fields["patch"])
+    assert fixed_patch_schema.is_static is True
+    assert_array_entry(fixed_patch_schema.fields["pixels"], (64, 64), is_static=True)
+    assert_array_entry(ContainerFixed.schema().fields["weights"], (10,), is_static=True)
+
+
+def test_specialization_error_handling():
+    class Foo(B.Struct):
+        H = B.Dim(None)
+        pixels = B.Array[float](shape=(H, H))
+
+    # Unknown dimension name
+    with pytest.raises(TypeError, match="unexpected dimension argument: 'UNKNOWN'"):
+        Foo.static(UNKNOWN=64)
+
+    with pytest.raises(TypeError, match="Unknown schema overwrite argument 'UNKNOWN'"):
+        class InvalidSub(Foo, specializations={"UNKNOWN": 64}):
+            pass
+
+    # Overriding fixed dimension with None is rejected
+    Foo64 = Foo.static(H=64)
+    with pytest.raises(ValueError, match=r"Cannot override fixed dimension 'H' \(value=64\) with None"):
+        Foo64.static(H=None)
+
+    with pytest.raises(ValueError, match=r"Cannot override fixed dimension 'H' \(value=64\) with None"):
+        class InvalidSubFixed(Foo64, specializations={"H": None}):
+            pass
+
+    # Invalid type for dimension
+    with pytest.raises(TypeError, match="Expected Dim, int, or None"):
+        Foo.static(H="invalid")  # type: ignore
+
+
+@pytest.mark.skip(reason="Set needs to be refactored")
+def test_set_of_specialized_struct_schema():
+    class Particle(B.Struct):
+        H = B.Dim(None)
+        pixels = B.Array[float](shape=(H, H))
+
+    Particle128 = Particle.static(H=128)
+    set_schema = B.Set[Particle128]().schema
+    assert set_schema.is_static is True
+    assert "pixels" in set_schema.fields
+    assert set_schema.fields["pixels"].shape == (128, 128)
+
+
+@pytest.mark.skip(reason="Set needs to be refactored")
+def test_struct_containing_specialized_set():
+    class Particle(B.Struct):
+        H = B.Dim(None)
+        pixels = B.Array[float](shape=(H, H))
+
+    class Micrograph(B.Struct):
+        W = B.Dim(None)
+        raw = B.Array[float](shape=(W, W))
+        particles: B.Set[Particle.static(H=64)]
+
+    MicrographFixed = Micrograph.static(W=1024)
+    assert MicrographFixed.schema().is_static is True
