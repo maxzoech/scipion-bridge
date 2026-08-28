@@ -24,53 +24,34 @@ T = TypeVar("T", bound=Struct)
 
 class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
 
+    _bridge_schema: Schema
+
     def __init__(
         self,
         capacity: Optional[Union[int, Arg]] = None,
-        *,
-        dtype: Optional[Type[T]] = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(dtype=dtype, **kwargs)
+        super().__init__(**kwargs)
 
-        if self.dtype is None:
+        self._capacity = capacity
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+
+        if cls._dtype is None:
             raise TypeError(
                 "Cannot convert unsubscripted Set to a schema. "
                 "Please provide an element type (e.g., Set[Struct] or dtype=Struct)."
             )
 
-        if not (isinstance(self.dtype, type) and issubclass(self.dtype, Struct)):
-            raise TypeError(f"Element of a set has to be of type Struct, got '{self.dtype}'")
+        if not (isinstance(cls._dtype, type) and issubclass(cls._dtype, Struct)):
+            raise TypeError(f"Element of a set has to be a Struct, got '{cls._dtype}'")
 
-        self._capacity = capacity
-        self._item = self.dtype(**kwargs)
-        # self.schema = self._item.schema().to_set_schema(capacity=self.capacity)
+        cls._bridge_schema = cls._dtype._bridge_schema.to_set_schema()
 
     @classmethod
     def schema(cls) -> Schema:
-        raise NotImplementedError
-
-    @classmethod
-    def _create(
-        cls,
-        *,
-        capacity: Optional[Union[int, Arg]],
-        dtype: "Type[T]",
-        item: Struct,
-        **options: Any,
-    ) -> "Set[T]":
-        """Low-level factory: construct a Set from a pre-built item, skipping validation.
-
-        Used internally by `specialize` to avoid redundantly re-validating and
-        re-constructing the item struct when the caller already holds a specialized one.
-        """
-        obj = object.__new__(cls)
-        Marker.__init__(obj, dtype=dtype, **options)
-        obj._capacity = capacity
-        obj._item = item
-        assert isinstance(obj._item, Struct)
-        # obj.schema = obj._item.schema().to_set_schema(capacity=obj.capacity)
-        return obj
+        return cls._bridge_schema
 
     @property
     def capacity(self) -> Optional[int]:
