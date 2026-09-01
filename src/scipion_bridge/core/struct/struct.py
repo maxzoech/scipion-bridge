@@ -148,6 +148,7 @@ class Array(Marker[T], SchemaConvertible):
         shape: Optional[Union[Tuple[Union[Dim, int, None], ...], list]] = None,
         owner_cls: Optional[Type["Trait"]] = None,
         name: Optional[str] = None,
+        is_scalar: bool = False,
     ) -> None:
         super().__init__(dtype)
 
@@ -170,6 +171,7 @@ class Array(Marker[T], SchemaConvertible):
 
         self.shape_spec: Tuple[Dim, ...] = tuple(shape_items)
         self._owner_cls: Optional[Type["Trait"]] = owner_cls
+        self.is_scalar: bool = is_scalar
         if name is not None:
             self.name = name
 
@@ -224,6 +226,16 @@ class Array(Marker[T], SchemaConvertible):
             )
         return _ArrayEntry(np.dtype(self.dtype), shape=self.shape)
 
+    def _bind(self, owner: Type["Trait"]) -> "Array[T]":
+        bound = type(self)(
+            dtype=self._dtype,
+            shape=self.shape_spec,
+            owner_cls=owner,
+            name=self.name,
+            is_scalar=self.is_scalar,
+        )
+        return bound
+
     def __set_name__(self, owner: type, name: str) -> None:
         super().__set_name__(owner, name)
         self._owner_cls = owner
@@ -232,7 +244,7 @@ class Array(Marker[T], SchemaConvertible):
     def __get__(self, instance: None, owner: Any) -> "Array[T]": ...
 
     @overload
-    def __get__(self, instance: "Struct", owner: Optional[Any] = None) -> NDArray: ...
+    def __get__(self, instance: "Struct", owner: Optional[Any] = None) -> Union[NDArray, Any]: ...
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         if instance is None:
@@ -246,12 +258,7 @@ class Array(Marker[T], SchemaConvertible):
                 )
             
             if self._owner_cls is None or self._owner_cls != owner:
-                return type(self)(
-                    dtype=self._dtype,
-                    shape=self.shape_spec,
-                    owner_cls=owner,
-                    name=self.name,
-                )
+                return self._bind(owner)
         
             return self
 
@@ -262,7 +269,7 @@ class Array(Marker[T], SchemaConvertible):
         if self.name is None:
             raise AttributeError("Array descriptor name is not set.")
 
-        entry = instance.schema().fields[self.name]
+        entry = instance.schema().fields.get(self.name)
 
         if entry is None or not isinstance(entry, _ArrayEntryBase):
             raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
@@ -272,9 +279,16 @@ class Array(Marker[T], SchemaConvertible):
                 f"Dynamic array access on instance is not supported yet for field '{self.name}'."
             )
 
-        return instance.storage.read_static_array(self.name, entry=entry)
+        arr = instance.storage.read_static_array(self.name, entry=entry)
+        assert isinstance(arr, np.ndarray)
+
+        if self.is_scalar:
+            return arr.item()
+        
+        return arr
 
     def __set__(self, instance: Any, value: Any) -> None:
+
         if not isinstance(instance, Struct):
             raise TypeError(
                 f"Cannot assign Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
@@ -292,6 +306,9 @@ class Array(Marker[T], SchemaConvertible):
             raise NotImplementedError(
                 f"Dynamic array assignment on instance is not supported yet for field '{self.name}'."
             )
+
+        if np.ndim(value) == 0 and self.is_scalar:
+            value = np.asarray(value).reshape([1])
 
         instance.storage.write_static_array(self.name, entry=entry, data=value)
 
@@ -322,6 +339,7 @@ class Trait:
                     dtype=np.dtype(dtype),
                     shape=(Dim(1),),
                     owner_cls=cls,
+                    is_scalar=True,
                 )
             elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
                 return dtype.default()
@@ -444,10 +462,16 @@ class Struct(Trait, SchemaConvertible):
 
     def __init__(self, **kwargs: Any) -> None:
 
-        storage = kwargs.get("_storage_view", ArrayStorage(schema=self._bridge_schema))
+        storage = kwargs.pop("_storage_view", None)
+        if storage is None:
+            storage = ArrayStorage(schema=self._bridge_schema)
+
         assert isinstance(storage, _BaseStorage)
 
         self._storage = storage
+
+        for k, v in kwargs.items():
+            setattr(self, k, v)
         
 
     @classmethod
@@ -478,19 +502,3 @@ class Struct(Trait, SchemaConvertible):
         )
 
 
-    # def __setattr__(self, name: str, value: Any) -> None:
-    #     schema = self.schema()
-    #     if name in schema.fields:
-    #         entry = schema.fields[name]
-
-    #         if name in schema.fields:
-    #             entry = schema.fields[name]
-    #             if isinstance(entry, _ArrayEntryBase) and entry.is_static:
-    #                 self.storage().write_static_array(name, entry, value)
-    #                 return
-                
-    #             raise NotImplementedError(
-    #                 f"Field '{name}' writing is not supported for entry type {type(entry)}"
-    #             )
-
-    #     super().__setattr__(name, value)

@@ -88,6 +88,9 @@ class ArrayStorage(_BaseStorage):
                 f"Expected static array entry for key '{key}', got {type(entry).__name__}."
             )
 
+        if key not in self._storage_group:
+            self._storage_group.create_dataset(key, shape=entry.shape, dtype=entry.dtype)
+
         arr = self._storage_group[key]._data
         if not np.can_cast(arr.dtype, entry.dtype, casting="same_kind"):
             raise TypeError(

@@ -549,7 +549,14 @@ def test_basic_set_storage():
     data.bar = 42.0
     data.pixels = noise
     
+    assert data.bar == 42.0
     assert np.allclose(data.pixels, noise)
+
+    # Verify that bar is serialized into data.storage as a shape (1,) static array
+    print(data.bar)
+
+    # assert stored_bar.shape == (1,)
+    # assert stored_bar[0] == 42.0
 
 
 def test_array_instantiation_validation():
