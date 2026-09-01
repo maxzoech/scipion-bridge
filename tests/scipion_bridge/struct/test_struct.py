@@ -551,6 +551,106 @@ def test_basic_set_storage():
     
     assert np.allclose(data.pixels, noise)
 
+
+def test_array_instantiation_validation():
+    # 1. Missing shape raises ValueError
+    with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        B.Array()
+
+    with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        B.Array[float]()
+
+    # 2. Non-sequence shape raises TypeError
+    with pytest.raises(TypeError, match="Expected shape to be a tuple or list of dimensions"):
+        B.Array[float](shape=128)  # type: ignore
+
+    # 3. Negative dimension raises ValueError
+    with pytest.raises(ValueError, match="Array dimension cannot be negative"):
+        B.Array[float](shape=(-1, 64))
+
+    # 4. Shape with list input works
+    arr = B.Array[float](shape=[64, 64])
+    assert len(arr.shape_spec) == 2
+    assert arr.shape_spec[0].value == 64
+    assert arr.shape_spec[1].value == 64
+
+
+def test_array_unassigned_annotation_raises_helpful_error():
+    with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        class BadStruct(B.Struct):
+            pixels: B.Array[float]
+
+
+def test_array_class_access_semantics():
+    class Particle(B.Struct):
+        H = B.Dim(64)
+        pixels = B.Array[np.float32](shape=(H, H))
+
+    # Class-level access yields an Array bound to the owner class
+    arr = Particle.pixels
+    assert isinstance(arr, B.Array)
+    assert arr.dtype == np.dtype(np.float32)
+    assert arr.shape == (64, 64)
+    assert repr(arr) == "Array[float32](shape=(64, 64), owner=Particle)"
+    entry = arr.convert_to_entry()
+    assert isinstance(entry, _ArrayEntryBase)
+    assert entry.shape == (64, 64)
+
+    # Calling schema() on uninstantiated Array class raises NotImplementedError
+    with pytest.raises(NotImplementedError, match="Cannot get schema directly from an uninstantiated Array class"):
+        B.Array.schema()
+
+    # Calling default() raises ValueError
+    with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        B.Array.default()
+
+
+def test_array_missing_dtype_error():
+    # Defining a Struct with an Array lacking a dtype specification raises TypeError during class creation
+    with pytest.raises(TypeError, match="missing a dtype specification"):
+        class UnspecifiedArrayStruct(B.Struct):
+            pixels = B.Array(shape=(64, 64))
+
+
+def test_array_schema_convertible_methods():
+    arr = B.Array[float](shape=(10, 10))
+
+    with pytest.raises(NotImplementedError, match="Cannot get schema directly from an uninstantiated Array class"):
+        B.Array.schema()
+
+    entry = arr.convert_to_entry()
+    assert isinstance(entry, _ArrayEntryBase)
+    assert entry.shape == (10, 10)
+    assert repr(arr) == "Array[float64](shape=(10, 10))"
+
+
+def test_array_descriptor_error_handling():
+    class Record(B.Struct):
+        dim = B.Dim()
+        pixels = B.Array[float](shape=(dim, dim))
+
+    inst = Record()
+
+    # 1. Reading dynamic (non-static) array raises NotImplementedError
+    with pytest.raises(NotImplementedError, match="Dynamic array access on instance is not supported yet"):
+        _ = inst.pixels
+
+    # 2. Writing dynamic (non-static) array raises NotImplementedError
+    with pytest.raises(NotImplementedError, match="Dynamic array assignment on instance is not supported yet"):
+        inst.pixels = np.ones((10, 10))
+
+    # 3. Accessing/setting Array descriptor on non-Struct instance raises TypeError
+    class NonStruct:
+        pixels = B.Array[float](shape=(10,))
+
+    non_struct_inst = NonStruct()
+    with pytest.raises(TypeError, match="on non-Struct instance"):
+        _ = non_struct_inst.pixels # type: ignore
+
+    with pytest.raises(TypeError, match="on non-Struct instance"):
+        non_struct_inst.pixels = np.ones(10)
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
         

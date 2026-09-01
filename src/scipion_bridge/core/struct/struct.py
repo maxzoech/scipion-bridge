@@ -1,7 +1,6 @@
 import numpy as np
-import copy
 
-from typing import Mapping, Type, TypeVar, Tuple, Union, Any, Optional, Dict, Callable, cast, overload
+from typing import Type, TypeVar, Tuple, Union, Any, Optional, Dict, cast, overload
 from typing_extensions import Self
 from numpy.typing import NDArray
 
@@ -9,8 +8,6 @@ try:
     from typing import TypeAlias
 except ImportError:
     from typing_extensions import TypeAlias
-
-from functools import reduce
 
 from .schema import _ArrayEntryBase, SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from ..utils.marker import Marker
@@ -138,31 +135,69 @@ class Arg:
 Dim: TypeAlias = Arg
 
 
-class BoundArrayView(SchemaConvertible):
-    """Read-only view returned when accessing an Array attribute on a Struct class."""
+T = TypeVar("T", bound=Union[np.generic, float, int, bool])
+
+
+class Array(Marker[T], SchemaConvertible):
+    """Descriptor and schema representation for array attributes on Struct classes."""
 
     def __init__(
-        self, dtype: np.dtype, shape_spec: Tuple[Dim, ...], owner_cls: Type["Trait"]
+        self,
+        dtype: Optional[Union[np.dtype, type, str]] = None,
+        *,
+        shape: Optional[Union[Tuple[Union[Dim, int, None], ...], list]] = None,
+        owner_cls: Optional[Type["Trait"]] = None,
+        name: Optional[str] = None,
     ) -> None:
-        self._dtype = dtype
-        self._shape_spec = shape_spec
+        super().__init__(dtype)
 
-        self._owner_cls = owner_cls
+        if shape is None:
+            raise ValueError(
+                "Missing required argument 'shape' for Array. "
+                "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
+            )
+
+        if not isinstance(shape, (tuple, list)):
+            raise TypeError(
+                f"Expected shape to be a tuple or list of dimensions, but got {type(shape).__name__}: {shape!r}"
+            )
+
+        shape_items: list[Dim] = []
+        for v in shape:
+            if isinstance(v, int) and not isinstance(v, bool) and v < 0:
+                raise ValueError(f"Array dimension cannot be negative, got: {v}")
+            shape_items.append(Dim.new(v))
+
+        self.shape_spec: Tuple[Dim, ...] = tuple(shape_items)
+        self._owner_cls: Optional[Type["Trait"]] = owner_cls
+        if name is not None:
+            self.name = name
 
     @property
     def dtype(self) -> Optional[np.dtype]:
-        return self._dtype
+        if self._dtype is None:
+            return None
+        if isinstance(self._dtype, np.dtype):
+            return self._dtype
+        try:
+            return np.dtype(self._dtype)
+        except (TypeError, ValueError):
+            return self._dtype  # type: ignore
 
     @property
     def shape(self) -> Tuple[Optional[int], ...]:
-        def _resolve(dim: Dim) -> Optional[int]:
-            if not dim.name:
+        def _resolve(dim: Union[Dim, int, None]) -> Optional[int]:
+            if isinstance(dim, Arg):
+                if not dim.name:
+                    return dim.value
+
+                if self._owner_cls is not None:
+                    target = getattr(self._owner_cls, dim.name, dim)
+                    return target.value if isinstance(target, Arg) else target
                 return dim.value
+            return dim
 
-            target = getattr(self._owner_cls, dim.name, dim)
-            return target.value if isinstance(target, Arg) else target
-
-        return tuple(_resolve(d) for d in self._shape_spec)
+        return tuple(_resolve(d) for d in self.shape_spec)
 
     @classmethod
     def default(cls) -> SchemaConvertible:
@@ -173,70 +208,97 @@ class BoundArrayView(SchemaConvertible):
 
     @classmethod
     def schema(cls) -> Schema:
-        raise NotImplementedError
+        raise NotImplementedError("Cannot get schema directly from an uninstantiated Array class.")
 
     def convert_to_entry(self) -> Entry:
-        assert self.dtype is not None
-        assert issubclass(self._owner_cls, Trait)
+        if self.dtype is None:
+            owner_name = f" on '{self._owner_cls.__name__}'" if self._owner_cls is not None else ""
+            raise TypeError(
+                f"Array field '{self.name}'{owner_name} is missing a dtype specification."
+            )
+        if self._owner_cls is not None and not (
+            isinstance(self._owner_cls, type) and issubclass(self._owner_cls, Trait)
+        ):
+            raise TypeError(
+                f"Owner class '{self._owner_cls}' must be a subclass of Trait."
+            )
         return _ArrayEntry(np.dtype(self.dtype), shape=self.shape)
 
-T = TypeVar("T", bound=Union[np.generic, float, int, bool])
-
-class Array(Marker[T]):
-
-    def __init__(
-        self,
-        dtype: Optional[np.dtype] = None,
-        *,
-        shape: Optional[Tuple[Union[Dim, int, None], ...]] = None,
-    ) -> None:
-        super().__init__(dtype)
-
-        if shape is None:
-            raise ValueError(
-                "Missing required argument 'shape' for Array. "
-                "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
-            )
-
-        self.shape_spec: Tuple[Dim, ...] = tuple([Dim.new(v) for v in shape])
+    def __set_name__(self, owner: type, name: str) -> None:
+        super().__set_name__(owner, name)
+        self._owner_cls = owner
 
     @overload
     def __get__(self, instance: None, owner: Any) -> "Array[T]": ...
 
     @overload
-    def __get__(self, instance: Any, owner: Optional[Any] = None) -> np.ndarray: ...
+    def __get__(self, instance: "Struct", owner: Optional[Any] = None) -> NDArray: ...
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
-        assert owner is not None
-        assert self.dtype is not None
+        if instance is None:
+            if owner is None:
+                return self
+            
+            if self.dtype is None:
+                raise TypeError(
+                    f"Array field '{self.name}' on '{owner.__name__}' is missing a dtype specification. "
+                    f"Specify a dtype using Array[dtype](...) or Array(dtype=...)."
+                )
+            
+            if self._owner_cls is None or self._owner_cls != owner:
+                return type(self)(
+                    dtype=self._dtype,
+                    shape=self.shape_spec,
+                    owner_cls=owner,
+                    name=self.name,
+                )
+        
+            return self
 
-        if instance is not None:
-            assert isinstance(instance, Struct)
-            assert self.name is not None
+        if not isinstance(instance, Struct):
+            raise TypeError(
+                f"Cannot access Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
+            )
+        if self.name is None:
+            raise AttributeError("Array descriptor name is not set.")
 
-            schema_inst = instance.schema()
-            entry = schema_inst.fields[self.name]
+        entry = instance.schema().fields[self.name]
 
-            assert isinstance(entry, _ArrayEntryBase)
-            if not entry.is_static:
-                raise NotImplementedError
+        if entry is None or not isinstance(entry, _ArrayEntryBase):
+            raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
 
-            return instance.storage.read_static_array(self.name, entry=entry)
-        else:
-            return BoundArrayView(self.dtype, self.shape_spec, owner_cls=owner)
+        if not entry.is_static:
+            raise NotImplementedError(
+                f"Dynamic array access on instance is not supported yet for field '{self.name}'."
+            )
 
-    def __set__(self, instance, value):
-        assert isinstance(instance, Struct)
-        assert self.name is not None
+        return instance.storage.read_static_array(self.name, entry=entry)
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        if not isinstance(instance, Struct):
+            raise TypeError(
+                f"Cannot assign Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
+            )
+        
+        if self.name is None:
+            raise AttributeError("Array descriptor name is not set.")
 
         schema = instance.schema()
-        entry = schema.fields[self.name]
+        entry = schema.fields.get(self.name)
+        if entry is None or not isinstance(entry, _ArrayEntryBase):
+            raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
 
-        assert isinstance(entry, _ArrayEntryBase)
         if not entry.is_static:
-            raise NotImplementedError
+            raise NotImplementedError(
+                f"Dynamic array assignment on instance is not supported yet for field '{self.name}'."
+            )
 
         instance.storage.write_static_array(self.name, entry=entry, data=value)
+
+    def __repr__(self) -> str:
+        dtype_str = getattr(self.dtype, "name", getattr(self.dtype, "__name__", str(self.dtype))) if self.dtype is not None else "?"
+        owner_str = f", owner={self._owner_cls.__name__}" if self._owner_cls is not None else ""
+        return f"Array[{dtype_str}](shape={self.shape}{owner_str})"
 
 
 class Trait:
@@ -256,9 +318,9 @@ class Trait:
 
         def _init_default(dtype: Type):
             if _is_supported_scalar_value(dtype):
-                return BoundArrayView(
+                return Array(
                     dtype=np.dtype(dtype),
-                    shape_spec=(Dim(1),),
+                    shape=(Dim(1),),
                     owner_cls=cls,
                 )
             elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
@@ -368,7 +430,7 @@ class Struct(Trait, SchemaConvertible):
             cls._cls_fields[k] = new_arg
             setattr(cls, k, new_arg)
 
-        # Use getattr to trigger descriptors (Array -> BoundArrayView, Set -> BoundSetView)
+        # Use getattr to trigger descriptors (Array -> bound Array, Set -> BoundSetView)
         schema_specs: Dict[str, SchemaConvertible] = {}
         for k, v in cls._cls_fields.items():
             resolved = getattr(cls, k, v)
