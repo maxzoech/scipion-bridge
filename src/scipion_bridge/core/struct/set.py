@@ -14,9 +14,11 @@ from typing import (
     Optional,
 )
 
+from numpy.typing import ArrayLike
+
 from .struct import Struct, Arg, Trait
-from .storage import SchemaArrayStorage
 from .schema import Entry, SchemaConvertible, Schema, _SchemaSetEntry
+from .storage import ArrayStorage
 from ..utils.marker import Marker
 
 T = TypeVar("T", bound=Struct)
@@ -39,6 +41,10 @@ class BoundSetView(SchemaConvertible):
     def default(cls) -> "BoundSetView":
         raise ValueError("Cannot instantiate default BoundSetView directly.")
 
+    @classmethod
+    def schema(cls) -> Schema:
+        raise NotImplementedError
+
     @property
     def capacity(self) -> Optional[int]:
         if not self._capacity_spec.name:
@@ -55,7 +61,7 @@ class BoundSetView(SchemaConvertible):
         )
 
 
-class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
+class Set(Marker[T], SchemaConvertible):
 
     _bridge_schema: Schema
     _capacity: Arg
@@ -68,6 +74,7 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         super().__init__(**kwargs)
 
         self._capacity = Arg.new(capacity)
+        self._storage = ArrayStorage(schema=self._bridge_schema)
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         if instance is None and owner is not None:
@@ -119,3 +126,10 @@ class Set(Marker[T], SchemaArrayStorage, SchemaConvertible):
         
         return cls()
 
+
+    def __setitem__(self, key, value):
+        self._storage[key] = value
+
+
+    def __getitem__(self, key: Union[int, slice, str]):
+        return self._storage[key]

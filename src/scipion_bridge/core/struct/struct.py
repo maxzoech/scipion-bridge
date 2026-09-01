@@ -12,7 +12,6 @@ except ImportError:
 from functools import reduce
 
 from .schema import SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
-from .storage import SchemaArrayStorage
 from ..utils.marker import Marker
 
 T = TypeVar("T")
@@ -172,6 +171,10 @@ class BoundArrayView(SchemaConvertible):
             "Expected a tuple of dimensions (e.g., shape=(1,), shape=(Dim('N'), 3), or shape=(None,))."
         )
 
+    @classmethod
+    def schema(cls) -> Schema:
+        raise NotImplementedError
+
     def convert_to_entry(self) -> Entry:
         assert self.dtype is not None
         assert issubclass(self._owner_cls, Trait)
@@ -295,7 +298,7 @@ class Trait:
             )
 
 
-class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
+class Struct(Trait, SchemaConvertible):
     """Materialization layer: builds the finalized Schema and binds array storage."""
 
     _bridge_struct_marker: bool = True
@@ -341,12 +344,8 @@ class Struct(Trait, SchemaConvertible, SchemaArrayStorage):
         )
 
     def __init__(self, **kwargs: Any) -> None:
-        allowed_keys = set(self._arg_specs)
-        extra_keys = set(kwargs) - allowed_keys
-        if extra_keys:
-            raise TypeError(
-                f"'{type(self).__name__}' got unexpected keyword argument(s): {list(extra_keys)}"
-            )
+        if kwargs:
+            raise NotImplementedError
 
     @classmethod
     def static(cls: Type[Self], **kwargs: Union[int, Arg]) -> Type[Self]:

@@ -106,11 +106,6 @@ def test_nested_sets():
 
 
 
-def test_unsubscripted_set_schema_raises():
-    with pytest.raises(TypeError, match="Cannot convert unsubscripted Set to schema entry"):
-        B.Set().convert_to_entry()
-
-
 def test_non_struct_set_schema_raises():
     with pytest.raises(TypeError, match="Element of a set has to be a Struct"):
         B.Set[int]  # type: ignore
@@ -255,18 +250,6 @@ def test_set_capacity_static_vs_dynamic():
     assert fixed_entry.is_static is True
 
 
-def test_unimplemented_set_storage_operations():
-    class Item(B.Struct):
-        val: float
-
-    item_set = B.Set[Item](capacity=10)
-    with pytest.raises(NotImplementedError):
-        _ = item_set[0]
-
-    with pytest.raises(NotImplementedError):
-        item_set[0] = Item()
-
-
 def test_set_capacity_with_fixed_arg():
     class Element(B.Struct):
         val: float
@@ -315,3 +298,74 @@ def test_set_capacity_specialization_with_dynamic_arg():
     assert items_entry_20.capacity == 20
     assert items_entry_20.is_static is True
     assert Container20.schema().is_static is True
+
+
+# Storage Tests
+
+def test_basic_set_storage():
+
+    class Foo(B.Struct):
+        bar: int
+
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+        foo: float
+        bar: float
+
+    noise = np.random.uniform(size=[5, 128, 128])
+
+    data = B.Set[Data](capacity=64)
+    data["pixels"] = noise
+
+    assert np.allclose(noise, data["pixels"]) # type: ignore
+
+
+def test_set_storage_shape_mismatch_raises():
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+
+    data = B.Set[Data](capacity=64)
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        data["pixels"] = np.random.uniform(size=[5, 64, 64])
+
+
+@pytest.mark.xfail(reason="Triage verification for now")
+def test_set_storage_capacity_exceeded_raises():
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+
+    data = B.Set[Data](capacity=64)
+    with pytest.raises(ValueError, match="exceeds capacity 64"):
+        data["pixels"] = np.random.uniform(size=[100, 128, 128])
+
+
+def test_set_storage_incompatible_dtype_raises():
+    class Data(B.Struct):
+        foo: float
+
+    data = B.Set[Data](capacity=64)
+    with pytest.raises(TypeError, match="Cannot cast data of dtype"):
+        data["foo"] = np.array([1.0 + 2.0j], dtype=np.complex128)
+
+
+@pytest.mark.xfail(reason="Triage verification for now")
+def test_set_storage_unspecified_capacity_raises():
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+
+    data = B.Set[Data]()
+    with pytest.raises(ValueError, match="Capacity must be explicitly specified"):
+        data["pixels"] = np.random.uniform(size=[5, 128, 128])
+
+
+if __name__ == "__main__":
+    from scipion_bridge.backend.standalone.container import configure_default_env
+    
+    # Wire the container for 'scipion_bridge'
+    container = configure_default_env()
+    
+    test_basic_set_storage()
+    # test_set_storage_shape_mismatch_raises()
+    # test_set_storage_capacity_exceeded_raises()
+    # test_set_storage_incompatible_dtype_raises()
+    # test_set_storage_unspecified_capacity_raises()

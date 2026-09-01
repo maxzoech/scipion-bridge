@@ -10,6 +10,11 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
 
     @classmethod
     @abc.abstractmethod
+    def schema(cls) -> "Schema":
+        ...
+
+    @classmethod
+    @abc.abstractmethod
     def default(cls) -> "SchemaConvertible":
         """Create a default, unspecialized instance from the type."""
         ...
@@ -19,6 +24,10 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         """Convert this instance into a schema Entry tree representation."""
         ...
 
+    @classmethod
+    def print_schema(cls) -> None:
+        assert cls.schema is not None
+        cls.schema().print_tree()
     
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
