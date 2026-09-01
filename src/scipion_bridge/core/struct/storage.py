@@ -1,6 +1,6 @@
 import abc
 
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 from . import schema
 from .schema import Schema, _ArrayEntryBase
 
@@ -12,11 +12,18 @@ from scipion_bridge.backend.standalone.container import Container
 from scipion_bridge.core.environment.storage import ArrayStorageProvider
 from dependency_injector.wiring import Provide, inject
 
-class Storage(metaclass=abc.ABCMeta):
+class _BaseStorage(metaclass=abc.ABCMeta):
 
-    @abc.abstractmethod
+    def __init__(self, schema: Schema, parent: Optional["_BaseStorage"], root: str, offset: Optional[Tuple[Tuple[int, int], ...]]) -> None:
+        super().__init__()
+
+        self._schema = schema
+        self.parent = parent
+        self.offset = offset
+        self.root = root
+
     def schema(self) -> Schema:
-        ...
+        return self._schema
 
     @abc.abstractmethod
     def write_static_array(self, key: str, entry: _ArrayEntryBase, data: ArrayLike):
@@ -26,48 +33,24 @@ class Storage(metaclass=abc.ABCMeta):
     def read_static_array(self, key: str, entry: _ArrayEntryBase) -> ArrayLike:
         ...
 
-    def __setitem__(self, key, value):
-        if isinstance(key, str):
-            fields = self.schema().fields
-            if key not in fields:
-                raise ValueError
+    @abc.abstractmethod
+    def __contains__(self, key: str) -> bool:
+        ...
+        
 
-            entry = fields[key]
-            if isinstance(entry, schema._ArrayEntryBase) and entry.is_static:
-                self.write_static_array(key, entry, value)
-            else:
-                raise NotImplementedError
-
-    def __getitem__(self, key):
-
-        if isinstance(key, str):
-            fields = self.schema().fields
-            if key not in fields:
-                raise ValueError
-
-            entry = fields[key]
-            if isinstance(entry, schema._ArrayEntryBase) and entry.is_static:
-                return self.read_static_array(key, entry)
-            else:
-                raise NotImplementedError
-            
-
-class ArrayStorage(Storage):
+class ArrayStorage(_BaseStorage):
 
     @inject
     def __init__(self,
                  schema: Schema,
                  storage_provider: Optional[ArrayStorageProvider] = Provide[Container.storage_provider],
         ) -> None:
-        super().__init__()
+        super().__init__(schema=schema, parent=None, root="", offset=None)
         assert storage_provider is not None
 
         self._schema = schema
         self._storage_group = storage_provider.create_group()
 
-
-    def schema(self) -> Schema:
-        return self._schema
 
     def write_static_array(self, key: str, entry: _ArrayEntryBase, data: ArrayLike):
         if not isinstance(entry, (schema._ArrayEntry, schema._ArraySetEntry)) or not entry.is_static:
@@ -115,3 +98,22 @@ class ArrayStorage(Storage):
 
     def __contains__(self, key: str) -> bool:
         return key in self._storage_group
+
+
+
+class ArrayStorageView(_BaseStorage):
+
+    def read_static_array(self, key: str, entry: _ArrayEntryBase) -> ArrayLike:
+        assert self.parent is not None
+
+        indices = tuple(slice(start, stop, 1) for start, stop in self.offset or tuple())
+        arr = self.parent.read_static_array(key, entry)
+        return arr[indices] # type: ignore
+
+
+    def write_static_array(self, key: str, entry: _ArrayEntryBase, data: ArrayLike):
+        raise NotImplementedError
+
+
+    def __contains__(self, key: str) -> bool:
+        raise NotImplementedError

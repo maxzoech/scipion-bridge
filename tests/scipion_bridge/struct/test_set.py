@@ -304,20 +304,67 @@ def test_set_capacity_specialization_with_dynamic_arg():
 
 def test_basic_set_storage():
 
-    class Foo(B.Struct):
-        bar: int
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+        foo: float
+
+    noise = np.random.uniform(size=[5, 128, 128])
+    noise_foo = np.random.uniform(size=[5, 1])
+
+    data = B.Set[Data](capacity=64)
+
+    data["pixels"] = noise
+    data["foo"] = noise_foo
+
+    assert np.allclose(noise, data["pixels"]) # type: ignore
+    assert np.allclose(noise_foo, data["foo"]) # type: ignore
+
+
+def test_basic_set_slicing():
 
     class Data(B.Struct):
         pixels = B.Array[float](shape=(128, 128))
         foo: float
-        bar: float
 
-    noise = np.random.uniform(size=[5, 128, 128])
+    data_pixels = np.random.uniform(size=[32, 128, 128])
+    data_foo = np.random.uniform(size=[32, 1])
 
-    data = B.Set[Data](capacity=64)
-    data["pixels"] = noise
+    # Set up buffer
+    buffer = B.Set[Data](capacity=32)
+    buffer["pixels"] = data_pixels
+    buffer["foo"] = data_foo
 
-    assert np.allclose(noise, data["pixels"]) # type: ignore
+    assert np.allclose(buffer[1:5]["pixels"], data_pixels[1:5])
+    assert np.allclose(buffer[1:5]["foo"], data_foo[1:5])
+
+    assert np.allclose(buffer[:5]["pixels"], data_pixels[:5])
+    assert np.allclose(buffer[:5]["foo"], data_foo[:5])
+
+    assert np.allclose(buffer[5:]["pixels"], data_pixels[5:])
+    assert np.allclose(buffer[5:]["foo"], data_foo[5:])
+
+
+def test_set_double_slicing():
+
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+
+    data_pixels = np.random.uniform(size=[32, 128, 128])
+
+    # Set up buffer
+    buffer = B.Set[Data](capacity=32)
+    buffer["pixels"] = data_pixels
+
+    buffer_slice = buffer[16:]
+    assert buffer_slice.capacity == 16
+    assert np.allclose(buffer_slice["pixels"], data_pixels[16:])
+
+    # Second slice relative to the first: indices [4:9] -> root indices [20:25] (length 5)
+    buffer_subslice = buffer_slice[4:9]
+    assert buffer_subslice.capacity == 5
+    assert buffer_subslice["pixels"].shape == (5, 128, 128) # type: ignore
+    assert np.allclose(buffer_subslice["pixels"], data_pixels[20:25])
+
 
 
 def test_set_storage_shape_mismatch_raises():
@@ -364,7 +411,7 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
     
-    test_basic_set_storage()
+    test_set_double_slicing()
     # test_set_storage_shape_mismatch_raises()
     # test_set_storage_capacity_exceeded_raises()
     # test_set_storage_incompatible_dtype_raises()
