@@ -397,6 +397,14 @@ class Trait:
             if isinstance(v, Arg):
                 arg_specs[k] = v
 
+        for k, v in unassigned_fields.items():
+            if isinstance(v, (Array, Marker)):
+                # Manually trigger __set_name__ here because we are dynamically
+                # synthesizing these fields, and therefore have to fake standard
+                # Python behaviour
+                v.__set_name__(cls, k)
+                setattr(cls, k, v)
+
         cls_fields.update(assigned_fields)
         cls_fields.update(unassigned_fields)
 

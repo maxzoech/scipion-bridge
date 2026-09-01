@@ -1,6 +1,6 @@
 import abc
 
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Union
 from . import schema
 from .schema import Schema, _ArrayEntryBase
 
@@ -14,7 +14,12 @@ from dependency_injector.wiring import Provide, inject
 
 class _BaseStorage(metaclass=abc.ABCMeta):
 
-    def __init__(self, schema: Schema, parent: Optional["_BaseStorage"], root: str, offset: Optional[Tuple[Tuple[int, int], ...]]) -> None:
+    def __init__(self,
+                 schema: Schema,
+                 parent: Optional["_BaseStorage"],
+                 root: str,
+                 offset: Optional[Tuple[Union[slice, int], ...]]
+        ) -> None:
         super().__init__()
 
         self._schema = schema
@@ -110,7 +115,7 @@ class ArrayStorageView(_BaseStorage):
     def read_static_array(self, key: str, entry: _ArrayEntryBase) -> ArrayLike:
         assert self.parent is not None
 
-        indices = tuple(slice(start, stop, 1) for start, stop in self.offset or tuple())
+        indices = self.offset or tuple()
         arr = self.parent.read_static_array(key, entry)
         return arr[indices] # type: ignore
 

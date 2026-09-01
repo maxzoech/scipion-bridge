@@ -188,7 +188,6 @@ class Set(Marker[T], SchemaConvertible):
     def __getitem__(self, key: slice) -> Self: ...
     
     def __getitem__(self, key) -> Union[ArrayLike, Set]:
-
         if isinstance(key, str):
             fields = self.schema().fields
             if key not in fields:
@@ -206,10 +205,11 @@ class Set(Marker[T], SchemaConvertible):
             start, stop = indices
             new_size = stop - start
 
-            if self.schema().is_static:
-                base_start = self._storage.offset[0][0] if self._storage.offset else 0
-
-                new_offset = (base_start + start, base_start + stop)
+            if self.schema().is_static:                
+                base_start = self._storage.offset[0] if self._storage.offset else 0
+                assert isinstance(base_start, slice)
+                
+                new_offset = slice(base_start.start + start, base_start.start + stop, 1)
                 base_offset = self._storage.offset or (new_offset,)
                 
                 subview = ArrayStorageView(
@@ -222,5 +222,17 @@ class Set(Marker[T], SchemaConvertible):
                 raise NotImplementedError("Sclicing ragged sets is not supported yet")
 
             return type(self)(capacity=new_size, _storage_view=subview)
+        elif isinstance(key, int):
+            assert isinstance(self.dtype, type) and issubclass(self.dtype, SchemaConvertible)
+
+            tail_offset = self._storage.offset[1:] if self._storage.offset else tuple()
+            subview = ArrayStorageView(
+                self.dtype.schema(),
+                parent=self._storage.parent or self._storage,
+                root=self._storage.root,
+                offset=(key, *tail_offset)
+            )
+
+            return self.dtype(_storage_view=subview)
 
         raise NotImplementedError

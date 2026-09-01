@@ -366,6 +366,23 @@ def test_set_double_slicing():
     assert np.allclose(buffer_subslice["pixels"], data_pixels[20:25])
 
 
+def test_set_index_access():
+
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+        bar: int
+    
+    data_pixels = np.random.uniform(size=[32, 128, 128])
+    buffer = B.Set[Data](capacity=32)
+    buffer["pixels"] = data_pixels
+    buffer["bar"] = np.arange(32)[..., None]
+
+    sample = buffer[5]
+    assert np.allclose(sample.pixels, data_pixels[5])
+
+    print(sample.bar)
+    
+
 
 def test_set_storage_shape_mismatch_raises():
     class Data(B.Struct):
@@ -411,7 +428,7 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
     
-    test_nested_sets()
+    test_set_index_access()
     # test_set_storage_shape_mismatch_raises()
     # test_set_storage_capacity_exceeded_raises()
     # test_set_storage_incompatible_dtype_raises()
