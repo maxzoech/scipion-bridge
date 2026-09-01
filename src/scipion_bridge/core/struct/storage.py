@@ -53,6 +53,7 @@ class ArrayStorage(_BaseStorage):
 
 
     def write_static_array(self, key: str, entry: _ArrayEntryBase, data: ArrayLike):
+
         if not isinstance(entry, (schema._ArrayEntry, schema._ArraySetEntry)) or not entry.is_static:
             raise TypeError(
                 f"Expected static array entry for key '{key}', got {type(entry).__name__}."

@@ -537,5 +537,24 @@ def test_struct_containing_specialized_set():
     MicrographFixed.print_schema()
 
 
+def test_basic_set_storage():
+
+    class Data(B.Struct):
+        pixels: B.Array[float] = B.Array[float](shape=(128, 128,))
+        bar: float
+
+    data = Data()
+    noise = np.random.uniform(size=[128, 128])
+
+    data.bar = 42.0
+    data.pixels = noise
+    
+    assert np.allclose(data.pixels, noise)
+
 if __name__ == "__main__":
-    test_struct_containing_specialized_set()
+    from scipion_bridge.backend.standalone.container import configure_default_env
+        
+    # Wire the container for 'scipion_bridge'
+    container = configure_default_env()
+
+    test_basic_set_storage()

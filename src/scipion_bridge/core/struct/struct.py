@@ -1,8 +1,9 @@
 import numpy as np
 import copy
 
-from typing import Mapping, Type, TypeVar, Tuple, Union, Any, Optional, Dict, Callable, cast
+from typing import Mapping, Type, TypeVar, Tuple, Union, Any, Optional, Dict, Callable, cast, overload
 from typing_extensions import Self
+from numpy.typing import NDArray
 
 try:
     from typing import TypeAlias
@@ -11,11 +12,10 @@ except ImportError:
 
 from functools import reduce
 
-from .schema import SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
+from .schema import _ArrayEntryBase, SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from ..utils.marker import Marker
 
-T = TypeVar("T")
-
+from .storage import _BaseStorage, ArrayStorage
 
 def _is_supported_scalar_value(cls: Type) -> bool:
     try:
@@ -180,6 +180,7 @@ class BoundArrayView(SchemaConvertible):
         assert issubclass(self._owner_cls, Trait)
         return _ArrayEntry(np.dtype(self.dtype), shape=self.shape)
 
+T = TypeVar("T", bound=Union[np.generic, float, int, bool])
 
 class Array(Marker[T]):
 
@@ -199,11 +200,43 @@ class Array(Marker[T]):
 
         self.shape_spec: Tuple[Dim, ...] = tuple([Dim.new(v) for v in shape])
 
+    @overload
+    def __get__(self, instance: None, owner: Any) -> "Array[T]": ...
+
+    @overload
+    def __get__(self, instance: Any, owner: Optional[Any] = None) -> np.ndarray: ...
+
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         assert owner is not None
         assert self.dtype is not None
 
-        return BoundArrayView(self.dtype, self.shape_spec, owner_cls=owner)
+        if instance is not None:
+            assert isinstance(instance, Struct)
+            assert self.name is not None
+
+            schema_inst = instance.schema()
+            entry = schema_inst.fields[self.name]
+
+            assert isinstance(entry, _ArrayEntryBase)
+            if not entry.is_static:
+                raise NotImplementedError
+
+            return instance.storage.read_static_array(self.name, entry=entry)
+        else:
+            return BoundArrayView(self.dtype, self.shape_spec, owner_cls=owner)
+
+    def __set__(self, instance, value):
+        assert isinstance(instance, Struct)
+        assert self.name is not None
+
+        schema = instance.schema()
+        entry = schema.fields[self.name]
+
+        assert isinstance(entry, _ArrayEntryBase)
+        if not entry.is_static:
+            raise NotImplementedError
+
+        instance.storage.write_static_array(self.name, entry=entry, data=value)
 
 
 class Trait:
@@ -312,6 +345,10 @@ class Struct(Trait, SchemaConvertible):
     def schema(cls) -> Schema:
         return cls._bridge_schema
 
+    @property
+    def storage(self) -> _BaseStorage:
+        return self._storage
+
     def __init_subclass__(
         cls, specializations: Dict[str, int] = {}, **kwargs: Any
     ) -> None:
@@ -344,8 +381,12 @@ class Struct(Trait, SchemaConvertible):
         )
 
     def __init__(self, **kwargs: Any) -> None:
-        if kwargs:
-            raise NotImplementedError
+
+        storage = kwargs.get("_storage_view", ArrayStorage(schema=self._bridge_schema))
+        assert isinstance(storage, _BaseStorage)
+
+        self._storage = storage
+        
 
     @classmethod
     def static(cls: Type[Self], **kwargs: Union[int, Arg]) -> Type[Self]:
@@ -373,3 +414,21 @@ class Struct(Trait, SchemaConvertible):
         return _SchemaEntry(
             schema=self.schema(),
         )
+
+
+    # def __setattr__(self, name: str, value: Any) -> None:
+    #     schema = self.schema()
+    #     if name in schema.fields:
+    #         entry = schema.fields[name]
+
+    #         if name in schema.fields:
+    #             entry = schema.fields[name]
+    #             if isinstance(entry, _ArrayEntryBase) and entry.is_static:
+    #                 self.storage().write_static_array(name, entry, value)
+    #                 return
+                
+    #             raise NotImplementedError(
+    #                 f"Field '{name}' writing is not supported for entry type {type(entry)}"
+    #             )
+
+    #     super().__setattr__(name, value)

@@ -83,6 +83,12 @@ class Set(Marker[T], SchemaConvertible):
         self._capacity = Arg.new(capacity)
         self._storage = storage
 
+    def __set_name__(self, owner: Type[Struct], name: str) -> None:
+        # When we the Set is used as a descriptor, delete the storage
+        # definition. This is a bit hacky but the only way to use Set[<Struct>]
+        # both inside a struct and as a standalone class.
+        del self._storage
+
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         if instance is None and owner is not None:
             assert self.dtype is not None

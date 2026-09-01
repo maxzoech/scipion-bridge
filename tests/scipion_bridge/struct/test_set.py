@@ -411,7 +411,7 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
     
-    test_set_double_slicing()
+    test_nested_sets()
     # test_set_storage_shape_mismatch_raises()
     # test_set_storage_capacity_exceeded_raises()
     # test_set_storage_incompatible_dtype_raises()
