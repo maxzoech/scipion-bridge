@@ -600,6 +600,38 @@ def test_assign_struct():
 
     assert data.metadata.bar == 42.0
     assert np.allclose(data.metadata.latent, metadata.latent)
+
+
+def test_multilevel_assign_struct():
+
+    class Bar(B.Struct):
+        a: int
+        b: int
+
+    class Metadata(B.Struct):
+        latent = B.Array[np.float32](shape=(128,))
+        bar: Bar
+
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+        metadata = Metadata()
+
+    latent_data = np.random.uniform(size=[128])
+
+    metadata = Metadata(
+        latent=latent_data,
+        bar=Bar(
+            a=42,
+            b=24,
+        )
+    )
+
+    data = Data(pixels=np.random.uniform(size=(128, 128)))
+    data.metadata = metadata
+
+    assert data.metadata.bar.a == 42.0
+    assert data.metadata.bar.b == 24.0
+    assert np.allclose(data.metadata.latent, metadata.latent)
     
     
 
@@ -708,4 +740,4 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
 
-    # test_set_nested_struct()
+    test_multilevel_assign_struct()

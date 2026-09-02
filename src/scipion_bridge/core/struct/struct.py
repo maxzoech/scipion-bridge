@@ -398,7 +398,7 @@ class Trait:
                 arg_specs[k] = v
 
         for k, v in unassigned_fields.items():
-            if isinstance(v, (Array, Marker)):
+            if isinstance(v, (Array, Marker, SchemaConvertible)):
                 # Manually trigger __set_name__ here because we are dynamically
                 # synthesizing these fields, and therefore have to fake standard
                 # Python behaviour

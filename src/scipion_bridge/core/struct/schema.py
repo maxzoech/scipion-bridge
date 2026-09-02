@@ -28,6 +28,9 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     def print_schema(cls) -> None:
         assert cls.schema is not None
         cls.schema().print_tree()
+
+    def __set_name__(self, name, owner):
+        pass
     
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
