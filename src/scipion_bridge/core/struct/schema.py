@@ -244,13 +244,14 @@ class Schema:
         """True when every field in the schema has a fixed shape."""
         return all(entry.is_static for entry in self.fields.values())
 
-    def tree_iter(self, root: str = "") -> Iterator[Tuple[str, Entry]]:
+    def tree_iter(self, root: str = "") -> Iterator[Tuple[str, _ArrayEntryBase]]:
         """Yield (path, entry) for all leaf entries in the schema."""
         for field_name, entry in self.fields.items():
             path = f"{root}.{field_name}" if root else field_name
             if entry.children is not None:
                 yield from entry.children.tree_iter(root=path)
             else:
+                assert isinstance(entry, _ArrayEntryBase)
                 yield path, entry
 
     #     def iter_leaves(self, prefix: str = "") -> Iterator[Tuple[str, Entry]]:

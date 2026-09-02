@@ -283,7 +283,6 @@ class Array(Marker[T], SchemaConvertible):
         assert isinstance(arr, np.ndarray)
 
         if self.is_scalar:
-            print(arr.shape)
             return arr.item()
         
         return arr
@@ -502,6 +501,18 @@ class Struct(Trait, SchemaConvertible):
             )
 
         return self
+
+    def __set__(self, instance, value):
+        assert isinstance(instance, Struct)
+        assert isinstance(value, Struct)
+        assert self._name is not None
+        
+        for key, entry in value.schema().tree_iter():
+            if entry.is_static:
+                data = value._storage.read_static_array(key, entry)
+                instance._storage.write_static_array(f"{self._name}.{key}", entry=entry, data=data)
+            else:
+                raise NotImplementedError
 
 
     def __set_name__(self, owner, name):

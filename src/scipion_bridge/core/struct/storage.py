@@ -48,7 +48,7 @@ class _BaseStorage(metaclass=abc.ABCMeta):
 
             return (*offset[:-1], new_last)
         else:
-            
+
             return (item,)
         
     def compute_slice_offset(self, start: int, stop: int) -> Tuple[IndexType, ...]:
