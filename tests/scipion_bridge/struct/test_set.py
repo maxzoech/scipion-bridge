@@ -382,17 +382,31 @@ def test_set_index_reading():
     assert sample.bar == 5
 
 
-# def test_nested_struct_index_reading():
+def test_nested_struct_set_slicing():
 
-#     class Metadata(B.Struct):
-#         latent = B.Array[np.float32](shape=(128,))
-#         bar: float
+    class Metadata(B.Struct):
+        latent = B.Array[np.float32](shape=(128,))
+        bar: int
 
-#     class Data(B.Struct):
-#         pixels = B.Array[float](shape=(128, 128))
-#         metadata: Metadata
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+        metadata = Metadata()
 
-#     B.Set[Data].print_schema()
+    buffer = B.Set[Data](capacity=64)
+    metadata_buffer: B.Set[Metadata] = buffer["metadata"]
+    metadata_buffer["bar"] = np.arange(64)[..., None]
+    latent_data = np.random.randn(64, 128).astype(np.float32)
+    metadata_buffer["latent"] = latent_data
+
+    # Direct integer indexing
+    sample = buffer[42]
+    assert sample.metadata.bar == 42
+    assert np.allclose(sample.metadata.latent, latent_data[42])
+
+    # Sliced subset indexing
+    sub_buffer = buffer[10:30]
+    assert sub_buffer[5].metadata.bar == 15
+    assert np.allclose(sub_buffer[5].metadata.latent, latent_data[15])
     
 
 
@@ -440,4 +454,4 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
     
-    # test_nested_struct_index_reading()
+    test_nested_struct_set_slicing()

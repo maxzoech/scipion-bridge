@@ -283,6 +283,7 @@ class Array(Marker[T], SchemaConvertible):
         assert isinstance(arr, np.ndarray)
 
         if self.is_scalar:
+            print(arr.shape)
             return arr.item()
         
         return arr
@@ -486,11 +487,14 @@ class Struct(Trait, SchemaConvertible):
     def __get__(self, instance, owner):
         if isinstance(instance, Struct):
             assert self._name is not None
+            parent = instance._storage.parent or instance._storage
+            new_path = (*instance._storage.path, self._name)
+            
             subview = ArrayStorageView(
                 self.schema(),
-                parent=instance._storage.parent or instance._storage,
-                root=self._name,
-                offset=self._storage.offset,
+                parent=parent,
+                path=new_path,
+                offset=instance._storage.offset,
             )
 
             return type(self)(

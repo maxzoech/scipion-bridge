@@ -182,7 +182,7 @@ class Set(Marker[T], SchemaConvertible):
                 raise NotImplementedError
 
     @overload
-    def __getitem__(self, key: str) -> ArrayLike: ...
+    def __getitem__(self, key: str) -> Union[ArrayLike, Set]: ...
 
     @overload
     def __getitem__(self, key: slice) -> Self: ...
@@ -190,15 +190,34 @@ class Set(Marker[T], SchemaConvertible):
     @overload
     def __getitem__(self, key: int) -> T: ...
     
-    def __getitem__(self, key: Union[str, slice, int]) -> Union[ArrayLike, Self, T]:
+    def __getitem__(self, key: Union[str, slice, int]) -> Union[ArrayLike, Self, T, Set]:
         if isinstance(key, str):
             fields = self.schema().fields
             if key not in fields:
                 raise ValueError
 
+
             entry = fields[key]
+
             if isinstance(entry, schema._ArrayEntryBase) and entry.is_static:
                 return self._storage.read_static_array(key, entry)
+            elif isinstance(entry, schema._SchemaEntry) and entry.is_static:
+                assert entry.schema.dtype is not None
+
+                new_path = (*self._storage.path, key)
+                sliced_view = ArrayStorageView(
+                    entry.schema,
+                    parent=(self._storage.parent or self._storage),
+                    path=new_path,
+                    offset=self._storage.offset,
+                )
+
+                sliced_set = Set[entry.schema.dtype](
+                    capacity=self.capacity,
+                    _storage_view=sliced_view,
+                )
+
+                return sliced_set
             
         elif isinstance(key, slice):
             assert self.dtype is not None
@@ -222,7 +241,7 @@ class Set(Marker[T], SchemaConvertible):
                 subview = ArrayStorageView(
                     self.schema(),
                     parent=self._storage.parent or self._storage, 
-                    root=self._storage.root,
+                    path=self._storage.path,
                     offset=(new_offset, *base_tail)
                 )
             else:
@@ -243,7 +262,7 @@ class Set(Marker[T], SchemaConvertible):
             subview = ArrayStorageView(
                 self.dtype.schema(),
                 parent=self._storage.parent or self._storage,
-                root=self._storage.root,
+                path=self._storage.path,
                 offset=(base_start + key, *base_tail)
             )
 

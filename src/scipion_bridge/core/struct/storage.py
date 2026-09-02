@@ -17,15 +17,19 @@ class _BaseStorage(metaclass=abc.ABCMeta):
     def __init__(self,
                  schema: Schema,
                  parent: Optional["_BaseStorage"],
-                 root: str,
-                 offset: Optional[Tuple[Union[slice, int], ...]]
+                 path: Tuple[str, ...] = (),
+                 offset: Optional[Tuple[Union[slice, int], ...]] = None
         ) -> None:
         super().__init__()
 
         self._schema = schema
         self.parent = parent
         self.offset = offset
-        self.root = root
+        self.path = tuple(path)
+
+    @property
+    def root(self) -> str:
+        return ".".join(self.path)
 
     def schema(self) -> Schema:
         return self._schema
@@ -50,7 +54,7 @@ class ArrayStorage(_BaseStorage):
                  schema: Schema,
                  storage_provider: Optional[ArrayStorageProvider] = Provide[Container.storage_provider],
         ) -> None:
-        super().__init__(schema=schema, parent=None, root="", offset=None)
+        super().__init__(schema=schema, parent=None, path=(), offset=None)
         assert storage_provider is not None
 
         self._schema = schema
@@ -112,28 +116,31 @@ class ArrayStorage(_BaseStorage):
 
 class ArrayStorageView(_BaseStorage):
 
+    def qualify_key(self, key: str) -> str:
+        return ".".join((*self.path, key))
+
     def read_static_array(self, key: str, entry: _ArrayEntryBase) -> ArrayLike:
         assert self.parent is not None
 
-        key = ".".join([self.root, key])
-
+        full_key = self.qualify_key(key)
         indices = self.offset or tuple()
-        arr = self.parent.read_static_array(key, entry)
+
+        arr = self.parent.read_static_array(full_key, entry)
         return arr[indices] # type: ignore
 
 
     def write_static_array(self, key: str, entry: _ArrayEntryBase, data: ArrayLike):
         assert self.parent is not None
 
-        key = ".".join([self.root, key])
+        full_key = self.qualify_key(key)
 
         if self.offset:
             raise NotImplementedError
 
-        # indices = self.offset or tuple()
-
-        self.parent.write_static_array(key, entry, data)
+        self.parent.write_static_array(full_key, entry, data)
 
 
     def __contains__(self, key: str) -> bool:
-        raise NotImplementedError
+        assert self.parent is not None
+        full_key = self.qualify_key(key)
+        return full_key in self.parent

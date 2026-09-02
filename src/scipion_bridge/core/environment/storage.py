@@ -78,6 +78,17 @@ class NumPyStorageGroup:
             arr = NumPyStorageArray(val_arr.shape, val_arr.dtype, data=val_arr)
             self._arrays[name] = arr
 
+    def debug_print(self) -> None:
+        """Print all stored arrays along with their shapes and data types."""
+        print(f"NumPyStorageGroup ({len(self._arrays)} array{'s' if len(self._arrays) != 1 else ''}):")
+        if not self._arrays:
+            print("  <empty>")
+            return
+
+        max_key_len = max(len(k) for k in self._arrays)
+        for name, arr in self._arrays.items():
+            print(f"  - {name:<{max_key_len}} : shape={arr.shape}, dtype={arr.dtype}")
+
     def __contains__(self, name: str) -> bool:
         return name in self._arrays
 
