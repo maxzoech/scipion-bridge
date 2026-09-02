@@ -274,11 +274,6 @@ class Array(Marker[T], SchemaConvertible):
         if entry is None or not isinstance(entry, _ArrayEntryBase):
             raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
 
-        # if not entry.is_static:
-        #     raise NotImplementedError(
-        #         f"Dynamic array access on instance is not supported yet for field '{self.name}'."
-        #     )
-
         arr = instance.storage.read_static_array(self.name, entry=entry)
         assert isinstance(arr, np.ndarray)
 
@@ -302,19 +297,14 @@ class Array(Marker[T], SchemaConvertible):
         if entry is None or not isinstance(entry, _ArrayEntryBase):
             raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
 
-        if isinstance(entry, _ArrayEntry) or entry.is_static:
-            if np.ndim(value) == 0 and self.is_scalar:
-                value = np.asarray(value).reshape([1])
+        if np.ndim(value) == 0 and self.is_scalar:
+            value = np.asarray(value).reshape([1])
 
-            instance.storage.write_static_array(
-                self.name,
-                entry=entry,
-                data=value
-            )
-        else:
-            raise NotImplementedError(
-                f"Dynamic array assignment on instance is not supported yet for field '{self.name}'."
-            )        
+        instance.storage.write_static_array(
+            self.name,
+            entry=entry,
+            data=value
+        )        
 
     def __repr__(self) -> str:
         dtype_str = getattr(self.dtype, "name", getattr(self.dtype, "__name__", str(self.dtype))) if self.dtype is not None else "?"

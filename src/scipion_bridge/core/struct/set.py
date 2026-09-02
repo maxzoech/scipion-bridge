@@ -14,14 +14,24 @@ from typing import (
     Any,
     Optional,
     Tuple,
+    Sequence,
     overload,
 )
 
+import numpy as np
 from numpy.typing import ArrayLike
 
 from .struct import Struct, Arg, Trait
 from . import schema
-from .schema import Entry, SchemaConvertible, Schema, _SchemaSetEntry
+from .schema import (
+    Entry,
+    SchemaConvertible,
+    Schema,
+    _SchemaSetEntry,
+    _ArraySetEntry,
+    _RaggedArraySetEntry,
+    _SchemaEntry,
+)
 from .storage import _BaseStorage, ArrayStorage, ArrayStorageView
 from ..utils.marker import Marker
 
@@ -77,10 +87,10 @@ class Set(Marker[T], SchemaConvertible):
     ) -> None:
         super().__init__(**kwargs)
 
-        storage = kwargs.get("_storage_view", ArrayStorage(schema=self._bridge_schema))
-        assert isinstance(storage, _BaseStorage)
-
         self._capacity = Arg.new(capacity)
+
+        storage = kwargs.get("_storage_view", ArrayStorage(schema=self.schema()))
+        assert isinstance(storage, _BaseStorage)
         self._storage = storage
 
     def __set_name__(self, owner: Type[Struct], name: str) -> None:
@@ -117,12 +127,43 @@ class Set(Marker[T], SchemaConvertible):
     def schema(cls) -> Schema:
         return cls._bridge_schema
 
+    # def __len__(self) -> int:
+    #     if self.capacity is not None:
+    #         return self.capacity
+    #     for key, entry in self.schema().tree_iter():
+    #         if key in self._storage:
+    #             arr = self._storage.read_static_array(key, entry)
+    #             return len(arr)
+    #     return 0
+
+    # @classmethod
+    # def concat(cls, *sets: "Set[T]") -> "Set[T]":
+    #     if not sets:
+    #         raise ValueError("Need at least one Set to concatenate.")
+
+    #     first = sets[0]
+    #     if not first.schema().is_static:
+    #         raise NotImplementedError("Concatenating ragged sets is not supported yet.")
+
+    #     total_capacity = sum(len(s) for s in sets)
+    #     element_cls = first.dtype
+    #     assert element_cls is not None
+
+    #     result_set = Set[element_cls](capacity=total_capacity)
+
+    #     for key, entry in first.schema().tree_iter():
+    #         arrays = [s._storage.read_static_array(key, entry) for s in sets]
+    #         concatenated = np.concatenate(arrays, axis=0)
+    #         result_set._storage.write_static_array(key, entry, concatenated)
+
+    #     return result_set
+
     @property
     def capacity(self) -> Optional[int]:
         return self._capacity.value
 
     def convert_to_entry(self) -> Entry:
-        if self.dtype is None or self.schema is None:
+        if self.dtype is None:
             raise TypeError("Cannot convert unsubscripted Set to schema entry.")
         return _SchemaSetEntry(
             schema=self.schema(),
@@ -169,17 +210,38 @@ class Set(Marker[T], SchemaConvertible):
 
         return start, stop
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: Union[str, int], value: Any) -> None:
         if isinstance(key, str):
             fields = self.schema().fields
             if key not in fields:
-                raise ValueError
+                raise ValueError(f"Field '{key}' not found in Set schema.")
 
             entry = fields[key]
-            if isinstance(entry, schema._ArrayEntryBase) and entry.is_static:
+            if isinstance(entry, _ArraySetEntry):
                 self._storage.write_static_array(key, entry, value)
+            elif isinstance(entry, _RaggedArraySetEntry):
+                self._storage.write_ragged_array(key, entry, value)
             else:
-                raise NotImplementedError
+                raise NotImplementedError(
+                    f"Writing to Set field '{key}' with schema entry type '{type(entry).__name__}' is not supported yet."
+                )
+            
+        elif isinstance(key, int):
+            if not self.schema().is_static:
+                raise NotImplementedError(
+                    f"Setting individual items in a Set with dynamic/ragged schema '{self.dtype.__name__ if self.dtype else 'Struct'}' "
+                    "is not supported yet. Specialize the struct dimensions using .static(...) for dense storage."
+                )
+            
+            if not isinstance(value, Struct):
+                raise TypeError(f"Expected item of type Struct, got '{type(value).__name__}'.")
+
+            subview_struct = self[key]
+            for field_path, entry in value.schema().tree_iter():
+                field_data = value._storage.read_static_array(field_path, entry)
+                subview_struct._storage.write_static_array(field_path, entry, field_data)
+        else:
+            raise TypeError(f"Invalid Set key type '{type(key).__name__}'. Expected str or int.")
 
     @overload
     def __getitem__(self, key: str) -> Any: ...
@@ -194,14 +256,19 @@ class Set(Marker[T], SchemaConvertible):
         if isinstance(key, str):
             fields = self.schema().fields
             if key not in fields:
-                raise ValueError
-
+                raise ValueError(f"Field '{key}' not found in Set schema.")
 
             entry = fields[key]
 
-            if isinstance(entry, schema._ArrayEntryBase) and entry.is_static:
+            if isinstance(entry, _ArraySetEntry):
                 return self._storage.read_static_array(key, entry)
-            elif isinstance(entry, schema._SchemaEntry) and entry.is_static:
+            elif isinstance(entry, _RaggedArraySetEntry):
+                return self._storage.read_ragged_array(key, entry)
+            elif isinstance(entry, _SchemaEntry):
+                if not entry.is_static:
+                    raise NotImplementedError(
+                        f"Accessing nested dynamic/ragged struct Set field '{key}' is not supported yet."
+                    )
                 assert entry.schema.dtype is not None
 
                 new_path = (*self._storage.path, key)
@@ -227,7 +294,10 @@ class Set(Marker[T], SchemaConvertible):
             new_size = stop - start
 
             if not self.schema().is_static:
-                raise NotImplementedError("Slicing ragged sets is not supported yet")
+                raise NotImplementedError(
+                    f"Slicing a Set with dynamic/ragged schema '{self.dtype.__name__}' is not supported yet. "
+                    "Specialize the struct dimensions using .static(...) for dense slicing."
+                )
 
             new_offset = self._storage.compute_slice_offset(start, stop)
 
@@ -243,6 +313,12 @@ class Set(Marker[T], SchemaConvertible):
         elif isinstance(key, int):
             assert isinstance(self.dtype, type) and issubclass(self.dtype, Struct)
 
+            if not self.schema().is_static:
+                raise NotImplementedError(
+                    f"Indexing elements from a Set with dynamic/ragged schema '{self.dtype.__name__}' is not supported yet. "
+                    "Specialize the struct dimensions using .static(...) for dense indexing."
+                )
+
             new_offset = self._storage.compute_index_offset(key)
             subview = ArrayStorageView(
                 self.dtype.schema(),
@@ -253,4 +329,4 @@ class Set(Marker[T], SchemaConvertible):
 
             return self.dtype(_storage_view=subview)
 
-        raise NotImplementedError
+        raise TypeError(f"Invalid Set index type '{type(key).__name__}'. Expected str, slice, or int.")

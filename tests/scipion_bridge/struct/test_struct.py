@@ -729,15 +729,19 @@ def test_array_descriptor_error_handling():
 
     inst = Record()
 
-    # 1. Reading dynamic (non-static) array raises NotImplementedError
-    with pytest.raises(NotImplementedError, match="Dynamic array access on instance is not supported yet"):
+    # 1. Reading uninitialized dynamic array raises AttributeError
+    with pytest.raises(AttributeError, match="is dynamic and has not been initialized"):
         _ = inst.pixels
 
-    # 2. Writing dynamic (non-static) array raises NotImplementedError
-    with pytest.raises(NotImplementedError, match="Dynamic array assignment on instance is not supported yet"):
-        inst.pixels = np.ones((10, 10))
+    # 2. Writing valid dynamic array succeeds and is readable
+    inst.pixels = np.ones((10, 10))
+    assert np.array_equal(inst.pixels, np.ones((10, 10)))
 
-    # 3. Accessing/setting Array descriptor on non-Struct instance raises TypeError
+    # 3. Writing array with invalid rank raises ValueError
+    with pytest.raises(ValueError, match="Dimension count mismatch|Shape mismatch"):
+        inst.pixels = np.ones(10)
+
+    # 4. Accessing/setting Array descriptor on non-Struct instance raises TypeError
     class NonStruct:
         pixels = B.Array[float](shape=(10,))
 

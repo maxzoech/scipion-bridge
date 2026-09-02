@@ -487,14 +487,30 @@ def test_set_storage_incompatible_dtype_raises():
         data["foo"] = np.array([1.0 + 2.0j], dtype=np.complex128)
 
 
-@pytest.mark.skip(reason="Triage verification for now")
-def test_set_storage_unspecified_capacity_raises():
-    class Data(B.Struct):
-        pixels = B.Array[float](shape=(128, 128))
+def test_ragged_set_operations_raise_not_implemented():
+    class DynamicItem(B.Struct):
+        dim = B.Dim()
+        pixels = B.Array[float](shape=(dim, dim))
 
-    data = B.Set[Data]()
-    with pytest.raises(ValueError, match="Capacity must be explicitly specified"):
-        data["pixels"] = np.random.uniform(size=[5, 128, 128])
+    # Set of dynamic items has is_static == False
+    ragged_set = B.Set[DynamicItem](capacity=10)
+    assert not ragged_set.schema().is_static
+
+    # 1. Reading ragged column raises NotImplementedError
+    with pytest.raises(NotImplementedError, match="Ragged array storage reading"):
+        _ = ragged_set["pixels"]
+
+    # 2. Writing ragged column raises NotImplementedError
+    with pytest.raises(NotImplementedError, match="Ragged array storage writing"):
+        ragged_set["pixels"] = np.ones((5, 10, 10))
+
+    # 3. Slicing ragged set raises NotImplementedError
+    with pytest.raises(NotImplementedError, match="Slicing a Set with dynamic/ragged schema"):
+        _ = ragged_set[0:5]
+
+    # 4. Indexing element from ragged set raises NotImplementedError
+    with pytest.raises(NotImplementedError, match="Indexing elements from a Set with dynamic/ragged schema"):
+        _ = ragged_set[0]
 
 
 if __name__ == "__main__":
