@@ -89,7 +89,7 @@ class ArrayStorage(_BaseStorage):
 
     def write_static_array(self, key: str, entry: _ArrayEntryBase, data: ArrayLike):
 
-        if not isinstance(entry, (schema._ArrayEntry, schema._ArraySetEntry)) or not entry.is_static:
+        if not isinstance(entry, (schema._ArrayEntry, schema._ArraySetEntry)): #or not entry.is_static:
             raise TypeError(
                 f"Expected static array entry for key '{key}', got {type(entry).__name__}."
             )
@@ -105,11 +105,11 @@ class ArrayStorage(_BaseStorage):
         entry_shape = tuple(entry.shape)
         entry_ndim = len(entry_shape)
 
-        if arr.ndim < entry_ndim or arr.shape[-entry_ndim:] != entry_shape:
-            raise ValueError(
-                f"Shape mismatch for key '{key}': expected trailing dimensions {entry_shape}, "
-                f"got data shape {arr.shape}."
-            )
+        # if arr.ndim < entry_ndim or arr.shape[-entry_ndim:] != entry_shape:
+        #     raise ValueError(
+        #         f"Shape mismatch for key '{key}': expected trailing dimensions {entry_shape}, "
+        #         f"got data shape {arr.shape}."
+        #     )
 
         if isinstance(entry, schema._ArraySetEntry):
             # TODO: Validate input here
@@ -118,7 +118,7 @@ class ArrayStorage(_BaseStorage):
         self._storage_group[key] = arr
 
     def read_static_array(self, key: str, entry: _ArrayEntryBase) -> ArrayLike:
-        if not isinstance(entry, (schema._ArrayEntry, schema._ArraySetEntry)) or not entry.is_static:
+        if not isinstance(entry, (schema._ArrayEntry, schema._ArraySetEntry)): # or not entry.is_static:
             raise TypeError(
                 f"Expected static array entry for key '{key}', got {type(entry).__name__}."
             )

@@ -633,7 +633,22 @@ def test_multilevel_assign_struct():
     assert data.metadata.bar.b == 24.0
     assert np.allclose(data.metadata.latent, metadata.latent)
     
-    
+
+def test_basic_dynamic_struct():
+
+    class Sample(B.Struct):
+
+        latent = B.Array[np.float32](shape=(None,))
+
+    noise_small = np.random.uniform(size=[128,])
+    noise_large = np.random.uniform(size=[256,])
+
+    sample_small = Sample(latent=noise_small)
+    sample_large = Sample(latent=noise_large)
+
+    assert np.allclose(sample_small.latent, noise_small)
+    assert np.allclose(sample_large.latent, noise_large)
+
 
 def test_array_instantiation_validation():
     # 1. Missing shape raises ValueError
@@ -740,4 +755,4 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
 
-    test_multilevel_assign_struct()
+    test_basic_dynamic_struct()
