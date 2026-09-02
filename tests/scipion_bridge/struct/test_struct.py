@@ -509,7 +509,7 @@ def test_set_of_specialized_struct_schema():
         pixels = B.Array[float](shape=(H, H))
 
     Particle128 = Particle.static(H=128)
-    set_schema = B.Set[Particle128].schema()
+    set_schema = B.Set[Particle128].schema()  # type: ignore[valid-type]
     assert set_schema.is_static is True
     assert "pixels" in set_schema.fields
     assert_array_entry(set_schema.fields["pixels"], (128, 128), is_static=True)
@@ -525,7 +525,7 @@ def test_struct_containing_specialized_set():
     class Micrograph(B.Struct):
         W = B.Dim(None)
         raw = B.Array[float](shape=(W, W))
-        particles = B.Set[Particle64](capacity=10)
+        particles = B.Set[Particle64](capacity=10)  # type: ignore[valid-type]
 
     assert not Micrograph.schema().is_static
     MicrographFixed = Micrograph.static(W=1024)
@@ -635,7 +635,7 @@ def test_array_missing_dtype_error():
     # Defining a Struct with an Array lacking a dtype specification raises TypeError during class creation
     with pytest.raises(TypeError, match="missing a dtype specification"):
         class UnspecifiedArrayStruct(B.Struct):
-            pixels = B.Array(shape=(64, 64))
+            pixels = B.Array(shape=(64, 64))  # type: ignore[var-annotated]
 
 
 def test_array_schema_convertible_methods():

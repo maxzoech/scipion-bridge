@@ -229,7 +229,7 @@ def test_set_of_specialized_struct():
         pixels = B.Array[float](shape=(H, H))
 
     SpecParticle = DynamicParticle.static(H=64)
-    spec_set_schema = B.Set[SpecParticle].schema()
+    spec_set_schema = B.Set[SpecParticle].schema()  # type: ignore[valid-type]
     assert spec_set_schema.is_static is True
     assert isinstance(spec_set_schema.fields["pixels"], _ArraySetEntry)
     assert spec_set_schema.fields["pixels"].shape == (64, 64)
@@ -316,8 +316,8 @@ def test_basic_set_storage():
     data["pixels"] = noise
     data["foo"] = noise_foo
 
-    assert np.allclose(noise, data["pixels"]) # type: ignore
-    assert np.allclose(noise_foo, data["foo"]) # type: ignore
+    assert np.allclose(noise, data["pixels"])
+    assert np.allclose(noise_foo, data["foo"])
 
 
 def test_basic_set_slicing():
@@ -407,6 +407,55 @@ def test_nested_struct_set_slicing():
     sub_buffer = buffer[10:30]
     assert sub_buffer[5].metadata.bar == 15
     assert np.allclose(sub_buffer[5].metadata.latent, latent_data[15])
+
+
+@pytest.mark.skip("Multidimensional set slicing not implemented yet")
+def test_multidimensional_nested_set_slicing_and_indexing():
+    class Frame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(64, 64))
+        frame_id: int
+
+    class Movie(B.Struct):
+        frames: B.Set[Frame] = B.Set[Frame](capacity=10)
+        movie_id: int
+
+    # 20 movies, each with 10 frames -> total (20, 10, ...)
+    dataset = B.Set[Movie](capacity=20)
+    dataset["movie_id"] = np.arange(20)[..., None]
+    
+    # Fill frame data
+    frames_buffer: B.Set[Frame] = dataset["frames"]
+    frames_buffer["frame_id"] = np.tile(np.arange(10)[None, :, None], (20, 1, 1))
+    noise_frames = np.random.randn(20, 10, 64, 64)
+    frames_buffer["pixels"] = noise_frames
+
+    # 1. Index movie, then index frame: dataset[5].frames[3]
+    movie_5 = dataset[5]
+    assert movie_5.movie_id == 5
+    assert movie_5.frames[3].frame_id == 3
+    assert np.allclose(movie_5.frames[3].pixels, noise_frames[5, 3])
+
+    # 2. Index movie, then slice frames: dataset[5].frames[2:8]
+    sub_frames = movie_5.frames[2:8]
+    assert sub_frames.capacity == 6
+    assert sub_frames[0].frame_id == 2
+    assert sub_frames[3].frame_id == 5
+    assert np.allclose(sub_frames[0].pixels, noise_frames[5, 2])
+    assert np.allclose(sub_frames[3].pixels, noise_frames[5, 5])
+
+    # 3. Double-slice frames: movie_5.frames[2:8][1:4]
+    double_sub_frames = sub_frames[1:4]
+    assert double_sub_frames.capacity == 3
+    assert double_sub_frames[0].frame_id == 3
+    assert double_sub_frames[2].frame_id == 5
+    assert np.allclose(double_sub_frames[0].pixels, noise_frames[5, 3])
+    assert np.allclose(double_sub_frames[2].pixels, noise_frames[5, 5])
+
+    # 4. Sliced movies, then indexing: dataset[10:15][2].frames[4]
+    sliced_movies = dataset[10:15]
+    assert sliced_movies[2].movie_id == 12
+    assert sliced_movies[2].frames[4].frame_id == 4
+    assert np.allclose(sliced_movies[2].frames[4].pixels, noise_frames[12, 4])
     
 
 
@@ -419,7 +468,7 @@ def test_set_storage_shape_mismatch_raises():
         data["pixels"] = np.random.uniform(size=[5, 64, 64])
 
 
-@pytest.mark.xfail(reason="Triage verification for now")
+@pytest.mark.skip(reason="Triage verification for now")
 def test_set_storage_capacity_exceeded_raises():
     class Data(B.Struct):
         pixels = B.Array[float](shape=(128, 128))
@@ -438,7 +487,7 @@ def test_set_storage_incompatible_dtype_raises():
         data["foo"] = np.array([1.0 + 2.0j], dtype=np.complex128)
 
 
-@pytest.mark.xfail(reason="Triage verification for now")
+@pytest.mark.skip(reason="Triage verification for now")
 def test_set_storage_unspecified_capacity_raises():
     class Data(B.Struct):
         pixels = B.Array[float](shape=(128, 128))

@@ -182,7 +182,7 @@ class Set(Marker[T], SchemaConvertible):
                 raise NotImplementedError
 
     @overload
-    def __getitem__(self, key: str) -> Union[ArrayLike, Set]: ...
+    def __getitem__(self, key: str) -> Any: ...
 
     @overload
     def __getitem__(self, key: slice) -> Self: ...
@@ -190,7 +190,7 @@ class Set(Marker[T], SchemaConvertible):
     @overload
     def __getitem__(self, key: int) -> T: ...
     
-    def __getitem__(self, key: Union[str, slice, int]) -> Union[ArrayLike, Self, T, Set]:
+    def __getitem__(self, key: Union[str, slice, int]) -> Union[Any, Self, T]:
         if isinstance(key, str):
             fields = self.schema().fields
             if key not in fields:
@@ -223,47 +223,32 @@ class Set(Marker[T], SchemaConvertible):
             assert self.dtype is not None
             assert self.capacity is not None
 
-            indices = self._normalize_slice(key)
-            start, stop = indices
+            start, stop = self._normalize_slice(key)
             new_size = stop - start
 
-            if self.schema().is_static:
-                if self._storage.offset:
-                    base_first = self._storage.offset[0]
-                    base_start = base_first.start if isinstance(base_first, slice) and base_first.start is not None else (base_first[0] if isinstance(base_first, tuple) else (base_first or 0))
-                    base_tail = self._storage.offset[1:]
-                else:
-                    base_start = 0
-                    base_tail = tuple()
-
-                new_offset = slice(base_start + start, base_start + stop, 1)
-
-                subview = ArrayStorageView(
-                    self.schema(),
-                    parent=self._storage.parent or self._storage, 
-                    path=self._storage.path,
-                    offset=(new_offset, *base_tail)
-                )
-            else:
+            if not self.schema().is_static:
                 raise NotImplementedError("Slicing ragged sets is not supported yet")
 
+            new_offset = self._storage.compute_slice_offset(start, stop)
+
+            subview = ArrayStorageView(
+                self.schema(),
+                parent=self._storage.parent or self._storage, 
+                path=self._storage.path,
+                offset=new_offset,
+            )
+
             return type(self)(capacity=new_size, _storage_view=subview)
+
         elif isinstance(key, int):
-            assert isinstance(self.dtype, type) and issubclass(self.dtype, SchemaConvertible)
+            assert isinstance(self.dtype, type) and issubclass(self.dtype, Struct)
 
-            if self._storage.offset:
-                base_first = self._storage.offset[0]
-                base_start = base_first.start if isinstance(base_first, slice) and base_first.start is not None else (base_first[0] if isinstance(base_first, tuple) else (base_first or 0))
-                base_tail = self._storage.offset[1:]
-            else:
-                base_start = 0
-                base_tail = tuple()
-
+            new_offset = self._storage.compute_index_offset(key)
             subview = ArrayStorageView(
                 self.dtype.schema(),
                 parent=self._storage.parent or self._storage,
                 path=self._storage.path,
-                offset=(base_start + key, *base_tail)
+                offset=new_offset,
             )
 
             return self.dtype(_storage_view=subview)

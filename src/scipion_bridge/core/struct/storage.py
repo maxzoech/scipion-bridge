@@ -12,6 +12,8 @@ from scipion_bridge.backend.standalone.container import Container
 from scipion_bridge.core.environment.storage import ArrayStorageProvider
 from dependency_injector.wiring import Provide, inject
 
+IndexType = Union[slice, int]
+
 class _BaseStorage(metaclass=abc.ABCMeta):
 
     def __init__(self,
@@ -30,6 +32,30 @@ class _BaseStorage(metaclass=abc.ABCMeta):
     @property
     def root(self) -> str:
         return ".".join(self.path)
+
+    def compute_offset(self, item: IndexType) -> Tuple[IndexType, ...]:
+        """Compute the offset tuple when indexing or slicing along the active batch dimension."""
+        offset = self.offset or ()
+
+        if offset and isinstance(offset[-1], slice):
+
+            base = offset[-1].start or 0
+            new_last = (
+                slice(base + item.start, base + item.stop, item.step)
+                if isinstance(item, slice)
+                else base + item
+            )
+
+            return (*offset[:-1], new_last)
+        else:
+            
+            return (item,)
+        
+    def compute_slice_offset(self, start: int, stop: int) -> Tuple[IndexType, ...]:
+        return self.compute_offset(slice(start, stop, 1))
+
+    def compute_index_offset(self, index: int) -> Tuple[IndexType, ...]:
+        return self.compute_offset(index)
 
     def schema(self) -> Schema:
         return self._schema
