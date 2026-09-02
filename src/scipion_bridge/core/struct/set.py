@@ -186,8 +186,11 @@ class Set(Marker[T], SchemaConvertible):
 
     @overload
     def __getitem__(self, key: slice) -> Self: ...
+
+    @overload
+    def __getitem__(self, key: int) -> T: ...
     
-    def __getitem__(self, key) -> Union[ArrayLike, Set]:
+    def __getitem__(self, key: Union[str, slice, int]) -> Union[ArrayLike, Self, T]:
         if isinstance(key, str):
             fields = self.schema().fields
             if key not in fields:
@@ -205,32 +208,43 @@ class Set(Marker[T], SchemaConvertible):
             start, stop = indices
             new_size = stop - start
 
-            if self.schema().is_static:                
-                base_start = self._storage.offset[0] if self._storage.offset else 0
-                assert isinstance(base_start, slice)
-                
-                new_offset = slice(base_start.start + start, base_start.start + stop, 1)
-                base_offset = self._storage.offset or (new_offset,)
-                
+            if self.schema().is_static:
+                if self._storage.offset:
+                    base_first = self._storage.offset[0]
+                    base_start = base_first.start if isinstance(base_first, slice) and base_first.start is not None else (base_first[0] if isinstance(base_first, tuple) else (base_first or 0))
+                    base_tail = self._storage.offset[1:]
+                else:
+                    base_start = 0
+                    base_tail = tuple()
+
+                new_offset = slice(base_start + start, base_start + stop, 1)
+
                 subview = ArrayStorageView(
                     self.schema(),
                     parent=self._storage.parent or self._storage, 
                     root=self._storage.root,
-                    offset=(new_offset, *base_offset[1:])
+                    offset=(new_offset, *base_tail)
                 )
             else:
-                raise NotImplementedError("Sclicing ragged sets is not supported yet")
+                raise NotImplementedError("Slicing ragged sets is not supported yet")
 
             return type(self)(capacity=new_size, _storage_view=subview)
         elif isinstance(key, int):
             assert isinstance(self.dtype, type) and issubclass(self.dtype, SchemaConvertible)
 
-            tail_offset = self._storage.offset[1:] if self._storage.offset else tuple()
+            if self._storage.offset:
+                base_first = self._storage.offset[0]
+                base_start = base_first.start if isinstance(base_first, slice) and base_first.start is not None else (base_first[0] if isinstance(base_first, tuple) else (base_first or 0))
+                base_tail = self._storage.offset[1:]
+            else:
+                base_start = 0
+                base_tail = tuple()
+
             subview = ArrayStorageView(
                 self.dtype.schema(),
                 parent=self._storage.parent or self._storage,
                 root=self._storage.root,
-                offset=(key, *tail_offset)
+                offset=(base_start + key, *base_tail)
             )
 
             return self.dtype(_storage_view=subview)

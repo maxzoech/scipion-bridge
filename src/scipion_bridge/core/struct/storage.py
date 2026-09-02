@@ -115,13 +115,24 @@ class ArrayStorageView(_BaseStorage):
     def read_static_array(self, key: str, entry: _ArrayEntryBase) -> ArrayLike:
         assert self.parent is not None
 
+        key = ".".join([self.root, key])
+
         indices = self.offset or tuple()
         arr = self.parent.read_static_array(key, entry)
         return arr[indices] # type: ignore
 
 
     def write_static_array(self, key: str, entry: _ArrayEntryBase, data: ArrayLike):
-        raise NotImplementedError
+        assert self.parent is not None
+
+        key = ".".join([self.root, key])
+
+        if self.offset:
+            raise NotImplementedError
+
+        # indices = self.offset or tuple()
+
+        self.parent.write_static_array(key, entry, data)
 
 
     def __contains__(self, key: str) -> bool:

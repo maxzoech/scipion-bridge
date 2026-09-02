@@ -537,7 +537,7 @@ def test_struct_containing_specialized_set():
     MicrographFixed.print_schema()
 
 
-def test_basic_set_storage():
+def test_basic_struct_storage():
 
     class Data(B.Struct):
         pixels: B.Array[float] = B.Array[float](shape=(128, 128,))
@@ -552,12 +552,31 @@ def test_basic_set_storage():
     assert data.bar == 42.0
     assert np.allclose(data.pixels, noise)
 
-    # Verify that bar is serialized into data.storage as a shape (1,) static array
-    print(data.bar)
 
-    # assert stored_bar.shape == (1,)
-    # assert stored_bar[0] == 42.0
+def test_nested_struct_storage():
 
+    class Metadata(B.Struct):
+        latent = B.Array[np.float32](shape=(128,))
+        bar: float
+
+    class Data(B.Struct):
+        pixels = B.Array[float](shape=(128, 128))
+        metadata = Metadata()
+
+    data = Data()
+    latent_data = np.random.uniform(size=[128,]).astype(np.float32)
+    pixel_data = np.random.uniform(size=[128, 128]).astype(np.float64)
+
+    # Assign values across nested and primitive fields
+    data.metadata.latent = latent_data
+    data.metadata.bar = 3.14
+    data.pixels = pixel_data
+
+    # Assertions
+    assert np.allclose(data.metadata.latent, latent_data)
+    assert np.isclose(data.metadata.bar, 3.14)
+    assert np.allclose(data.pixels, pixel_data)
+    
 
 def test_array_instantiation_validation():
     # 1. Missing shape raises ValueError
@@ -664,4 +683,4 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
 
-    test_basic_set_storage()
+    test_nested_struct_storage()

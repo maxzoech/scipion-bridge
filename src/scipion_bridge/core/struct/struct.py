@@ -12,7 +12,7 @@ except ImportError:
 from .schema import _ArrayEntryBase, SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
 from ..utils.marker import Marker
 
-from .storage import _BaseStorage, ArrayStorage
+from .storage import _BaseStorage, ArrayStorage, ArrayStorageView
 
 def _is_supported_scalar_value(cls: Type) -> bool:
     try:
@@ -477,10 +477,31 @@ class Struct(Trait, SchemaConvertible):
         assert isinstance(storage, _BaseStorage)
 
         self._storage = storage
+        self._name = None
 
         for k, v in kwargs.items():
             setattr(self, k, v)
-        
+
+
+    def __get__(self, instance, owner):
+        if isinstance(instance, Struct):
+            assert self._name is not None
+            subview = ArrayStorageView(
+                self.schema(),
+                parent=instance._storage.parent or instance._storage,
+                root=self._name,
+                offset=self._storage.offset,
+            )
+
+            return type(self)(
+                _storage_view=subview,
+            )
+
+        return self
+
+
+    def __set_name__(self, owner, name):
+        self._name = name
 
     @classmethod
     def static(cls: Type[Self], **kwargs: Union[int, Arg]) -> Type[Self]:
