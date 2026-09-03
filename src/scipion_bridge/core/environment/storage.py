@@ -107,6 +107,16 @@ class ArrayStorageProvider(abc.ABC):
         ...
 
 
+class ArrowStorageProvider(ArrayStorageProvider):
+    """Array storage provider backed by Apache Arrow and NumPy staging structures."""
+
+    def create_group(self, shape_prefix: Tuple[int, ...] = ()) -> Any:
+        return NumPyStorageGroup()
+
+    def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
+        return np.concatenate([np.asarray(a) for a in arrays], axis=axis)
+
+
 class NumPyStorageProvider(ArrayStorageProvider):
     """Default array storage provider backed by NumPy in-memory data structures."""
 

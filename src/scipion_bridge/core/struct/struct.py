@@ -502,11 +502,8 @@ class Struct(Trait, SchemaConvertible):
         assert self._name is not None
         
         for key, entry in value.schema().tree_iter():
-            if entry.is_static:
-                data = value._storage.read_static_array(key, entry)
-                instance._storage.write_static_array(f"{self._name}.{key}", entry=entry, data=data)
-            else:
-                raise NotImplementedError
+            data = value._storage.read_static_array(key, entry)
+            instance._storage.write_static_array(f"{self._name}.{key}", entry=entry, data=data)
 
 
     def __set_name__(self, owner, name):

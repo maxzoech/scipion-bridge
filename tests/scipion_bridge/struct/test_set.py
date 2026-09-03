@@ -487,7 +487,7 @@ def test_set_storage_incompatible_dtype_raises():
         data["foo"] = np.array([1.0 + 2.0j], dtype=np.complex128)
 
 
-def test_ragged_set_operations_raise_not_implemented():
+def test_ragged_set_operations_supported():
     class DynamicItem(B.Struct):
         dim = B.Dim()
         pixels = B.Array[float](shape=(dim, dim))
@@ -496,21 +496,20 @@ def test_ragged_set_operations_raise_not_implemented():
     ragged_set = B.Set[DynamicItem](capacity=10)
     assert not ragged_set.schema().is_static
 
-    # 1. Reading ragged column raises NotImplementedError
-    with pytest.raises(NotImplementedError, match="Ragged array storage reading"):
-        _ = ragged_set["pixels"]
+    # 1. Reading ragged column returns a RaggedArrayView
+    col_view = ragged_set["pixels"]
+    assert len(col_view) == 10
 
-    # 2. Writing ragged column raises NotImplementedError
-    with pytest.raises(NotImplementedError, match="Ragged array storage writing"):
-        ragged_set["pixels"] = np.ones((5, 10, 10))
+    # 2. Writing ragged column succeeds
+    ragged_set["pixels"] = [np.ones((10, 10)) for _ in range(5)]
 
-    # 3. Slicing ragged set raises NotImplementedError
-    with pytest.raises(NotImplementedError, match="Slicing a Set with dynamic/ragged schema"):
-        _ = ragged_set[0:5]
+    # 3. Slicing ragged set succeeds
+    sliced = ragged_set[0:5]
+    assert len(sliced) == 5
 
-    # 4. Indexing element from ragged set raises NotImplementedError
-    with pytest.raises(NotImplementedError, match="Indexing elements from a Set with dynamic/ragged schema"):
-        _ = ragged_set[0]
+    # 4. Indexing element from ragged set succeeds
+    elem = ragged_set[0]
+    assert isinstance(elem, DynamicItem)
 
 
 def test_basic_ragged_set_assign():
@@ -525,6 +524,17 @@ def test_basic_ragged_set_assign():
 
     samples[0] = sample_1
     samples[1] = sample_2
+
+    # Verify per-element reading
+    assert np.allclose(samples[0].latent, sample_1.latent)
+    assert np.allclose(samples[1].latent, sample_2.latent)
+
+    # Verify column-wise reading
+    latent_view = samples["latent"]
+    assert np.allclose(latent_view[0], sample_1.latent)
+    assert np.allclose(latent_view[1], sample_2.latent)
+    assert len(latent_view[0]) == 128
+    assert len(latent_view[1]) == 256
 
 
 if __name__ == "__main__":
