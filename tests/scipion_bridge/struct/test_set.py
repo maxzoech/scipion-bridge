@@ -513,10 +513,24 @@ def test_ragged_set_operations_raise_not_implemented():
         _ = ragged_set[0]
 
 
+def test_basic_ragged_set_assign():
+
+    class Sample(B.Struct):
+        latent = B.Array[np.float32](shape=(None,))
+
+    sample_1 = Sample(latent=np.random.uniform(size=(128)))
+    sample_2 = Sample(latent=np.random.uniform(size=(256)))
+
+    samples = B.Set[Sample](capacity=10)
+
+    samples[0] = sample_1
+    samples[1] = sample_2
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
     
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
     
-    test_nested_struct_set_slicing()
+    test_basic_ragged_set_assign()

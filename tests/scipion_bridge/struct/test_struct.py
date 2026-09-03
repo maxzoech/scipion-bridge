@@ -637,7 +637,6 @@ def test_multilevel_assign_struct():
 def test_basic_dynamic_struct():
 
     class Sample(B.Struct):
-
         latent = B.Array[np.float32](shape=(None,))
 
     noise_small = np.random.uniform(size=[128,])
