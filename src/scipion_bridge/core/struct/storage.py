@@ -13,6 +13,7 @@ import pyarrow as pa
 from .schema import (
     Schema,
     Entry,
+    KeyPath,
     ArrayEntryBase,
     ArrayEntry,
     ArraySetEntry,
@@ -32,34 +33,32 @@ IndexType: TypeAlias = Union[slice, int]
 Offset: TypeAlias = Optional[Tuple[IndexType, ...]]
 
 
-def _lookup_entry(schema: Schema, key: str) -> Optional[ArrayEntryBase]:
-    """Look up a leaf ArrayEntryBase in a schema by dotted key path."""
-    head, _, tail = key.partition(".")
-
-    match schema.fields.get(head), tail:
-        case ArrayEntryBase() as leaf, "":
-            return leaf
-        
-        case Entry(children=Schema() as child), rest:
-            return _lookup_entry(child, rest)
-        
+def _lookup_entry(schema: Schema, path: KeyPath) -> Optional[ArrayEntryBase]:
+    """Look up a leaf ArrayEntryBase in a schema by KeyPath tuple."""
+    match path:
+        case (head,):
+            entry = schema.fields.get(head)
+            return entry if isinstance(entry, ArrayEntryBase) else None
+        case (head, *tail):
+            entry = schema.fields.get(head)
+            if entry is not None and entry.children is not None:
+                return _lookup_entry(entry.children, tuple(tail))
+            return None
         case _:
             return None
 
 
-def _get_nested_col(batch: Union[pa.RecordBatch, pa.StructArray], key: str) -> pa.Array:
-    """Navigate dotted path in a nested Arrow RecordBatch or StructArray."""
-    head, _, tail = key.partition(".")
-
-    match batch:
-        case pa.RecordBatch():
-            col = batch.column(head)
-        case pa.StructArray():
-            col = batch.field(head)
-        case _:
-            raise KeyError(f"Cannot resolve key segment '{head}' in '{type(batch).__name__}'.")
-
-    return _get_nested_col(col, tail) if tail else col
+def _get_nested_col(batch: Union[pa.RecordBatch, pa.StructArray], path: KeyPath) -> pa.Array:
+    """Navigate a KeyPath tuple in a nested Arrow RecordBatch or StructArray."""
+    curr: Any = batch
+    for segment in path:
+        if isinstance(curr, pa.RecordBatch):
+            curr = curr.column(segment)
+        elif isinstance(curr, pa.StructArray):
+            curr = curr.field(segment)
+        else:
+            raise KeyError(f"Cannot resolve path segment '{segment}' in '{type(curr).__name__}'.")
+    return curr
 
 
 class _BaseStorage(abc.ABC):
@@ -69,17 +68,17 @@ class _BaseStorage(abc.ABC):
         self,
         schema: Schema,
         parent: Optional["_BaseStorage"] = None,
-        path: Tuple[str, ...] = (),
+        path: KeyPath = (),
         offset: Offset = None,
     ) -> None:
         self._schema = schema
         self.parent = parent
         self.offset = offset
-        self.path = tuple(path)
+        self.path: KeyPath = tuple(path)
 
     @property
-    def root(self) -> str:
-        return ".".join(self.path)
+    def is_view(self) -> bool:
+        return self.parent is not None
 
     def compute_offset(self, item: IndexType) -> Tuple[IndexType, ...]:
         """Compute the offset tuple when indexing or slicing along the active batch dimension."""
@@ -111,7 +110,7 @@ class _BaseStorage(abc.ABC):
     @abc.abstractmethod
     def read(
         self,
-        key: str,
+        key: Union[str, KeyPath],
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
@@ -121,7 +120,7 @@ class _BaseStorage(abc.ABC):
     @abc.abstractmethod
     def write(
         self,
-        key: str,
+        key: Union[str, KeyPath],
         entry: Entry,
         data: Any,
         offset: Offset = None,
@@ -135,7 +134,7 @@ class _BaseStorage(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: Union[str, KeyPath]) -> bool:
         ...
 
 
@@ -143,11 +142,11 @@ class _StorageEngine(abc.ABC):
     """Abstract interface for polymorphic storage engines."""
 
     @abc.abstractmethod
-    def read(self, key: str, entry: Entry, offset: Offset = None) -> Any:
+    def read(self, key: KeyPath, entry: Entry, offset: Offset = None) -> Any:
         ...
 
     @abc.abstractmethod
-    def write(self, key: str, entry: Entry, data: Any, offset: Offset = None) -> None:
+    def write(self, key: KeyPath, entry: Entry, data: Any, offset: Offset = None) -> None:
         ...
 
     @abc.abstractmethod
@@ -155,7 +154,7 @@ class _StorageEngine(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: KeyPath) -> bool:
         ...
 
     @property
@@ -176,8 +175,8 @@ class _StagingEngine(_StorageEngine):
         self._schema = schema
         self._capacity = capacity
 
-        self._static_staging: Dict[str, np.ndarray] = {}
-        self._ragged_staging: Dict[str, List[Optional[np.ndarray]]] = {}
+        self._static_staging: Dict[KeyPath, np.ndarray] = {}
+        self._ragged_staging: Dict[KeyPath, List[Optional[np.ndarray]]] = {}
 
     @property
     def capacity(self) -> Optional[int]:
@@ -189,7 +188,7 @@ class _StagingEngine(_StorageEngine):
 
     def write(
         self,
-        key: str,
+        key: KeyPath,
         entry: Entry,
         data: Any,
         offset: Offset = None,
@@ -208,7 +207,7 @@ class _StagingEngine(_StorageEngine):
 
     def _write_static(
         self,
-        key: str,
+        key: KeyPath,
         entry: Union[ArrayEntry, ArraySetEntry],
         data: ArrayLike,
         offset: Offset = None,
@@ -264,7 +263,7 @@ class _StagingEngine(_StorageEngine):
 
     def _write_ragged(
         self,
-        key: str,
+        key: KeyPath,
         entry: RaggedArraySetEntry,
         data: Any,
         offset: Offset = None,
@@ -296,7 +295,7 @@ class _StagingEngine(_StorageEngine):
 
     def read(
         self,
-        key: str,
+        key: KeyPath,
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
@@ -311,7 +310,7 @@ class _StagingEngine(_StorageEngine):
                 f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
             )
 
-    def _prepare_entry(self, key: str):
+    def _prepare_entry(self, key: KeyPath) -> None:
         if key in self._static_staging:
             return
 
@@ -325,7 +324,7 @@ class _StagingEngine(_StorageEngine):
 
     def _read_static(
         self,
-        key: str,
+        key: KeyPath,
         entry: Union[ArrayEntry, ArraySetEntry],
         offset: Offset = None,
     ) -> ArrayLike:
@@ -348,96 +347,26 @@ class _StagingEngine(_StorageEngine):
 
         offset = offset or tuple()
         return array[offset]
-        
-        # if key not in self._static_staging:
-        #     schema_entry = _lookup_entry(self._schema, key) or entry
-        
-        #     entry_shape = tuple(dim for dim in schema_entry.shape if dim is not None)
-        #     if self._capacity is not None and isinstance(schema_entry, ArraySetEntry):
-        #         shape = (self._capacity, *entry_shape)
-        #     else:
-        #         shape = entry_shape
-        #     self._static_staging[key] = np.zeros(shape, dtype=schema_entry.dtype)
-        # arr = self._static_staging[key]
-
-        # if offset:
-        #     return arr[offset]
-        # return arr
 
     def _read_ragged(
         self,
-        key: str,
+        key: KeyPath,
         entry: RaggedArraySetEntry,
         offset: Offset = None,
     ) -> Any:
         raise NotImplementedError
-        
-        # if offset is not None:
-        #     idx = offset[0]
-        #     if isinstance(idx, int):
-        #         chunks = self._ragged_staging.get(key, [])
-        #         if idx < len(chunks) and chunks[idx] is not None:
-        #             return chunks[idx]
-        #         return np.empty(0, dtype=entry.dtype)
-
-        # chunks = self._ragged_staging.get(key, [])
-        # if self._capacity is not None and len(chunks) < self._capacity:
-        #     chunks = list(chunks) + [None] * (self._capacity - len(chunks))
-        # col = build_ragged_array(chunks, dtype=entry.dtype)
-
-        # if not isinstance(col, pa.ListArray):
-        #     raise TypeError(f"Expected ListArray for ragged field '{key}', got {type(col).__name__}")
-        # return RaggedArrayView(col, dtype=entry.dtype)
 
     def to_record_batch(self) -> pa.RecordBatch:
-        columns, names = self._build_columns(self._schema, prefix="")
+        columns, names = self._build_columns(self._schema, prefix=())
         return pa.RecordBatch.from_arrays(columns, names)
 
-    def _build_columns(self, schema: Schema, prefix: str) -> Tuple[List[pa.Array], List[str]]:
+    def _build_columns(self, schema: Schema, prefix: KeyPath = ()) -> Tuple[List[pa.Array], List[str]]:
         columns: List[pa.Array] = []
         names: List[str] = []
 
         raise NotImplementedError
 
-        for field_name, entry in schema.fields.items():
-            full_key = f"{prefix}.{field_name}" if prefix else field_name
-            names.append(field_name)
-
-            if entry.children is not None:
-                child_cols, child_names = self._build_columns(entry.children, prefix=full_key)
-                struct_col = pa.StructArray.from_arrays(child_cols, child_names)
-                columns.append(struct_col)
-            elif isinstance(entry, ArrayEntryBase):
-                if entry.is_static:
-                    arr = self._static_staging.get(full_key)
-                    entry_shape = tuple(dim for dim in entry.shape if dim is not None)
-                    if arr is None:
-                        cap = self._capacity or 1
-                        arr = np.zeros((cap, *entry_shape), dtype=entry.dtype)
-
-                    if self._capacity is not None and arr.shape[0] != self._capacity:
-                        full_shape = (self._capacity, *entry_shape)
-                        padded = np.zeros(full_shape, dtype=entry.dtype)
-                        copy_len = min(arr.shape[0], self._capacity)
-                        padded[:copy_len] = arr[:copy_len]
-                        arr = padded
-
-                    col = build_tensor_array(arr, shape=entry_shape, dtype=entry.dtype)
-                    columns.append(col)
-                else:
-                    chunks = self._ragged_staging.get(full_key, [])
-                    if self._capacity is not None and len(chunks) < self._capacity:
-                        chunks = list(chunks) + [None] * (self._capacity - len(chunks))
-                    col = build_ragged_array(chunks, dtype=entry.dtype)
-                    columns.append(col)
-            else:
-                raise TypeError(
-                    f"Unsupported schema entry '{type(entry).__name__}' for field '{field_name}'."
-                )
-
-        return columns, names
-
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: KeyPath) -> bool:
         return key in self._static_staging or key in self._ragged_staging
 
 
@@ -458,7 +387,7 @@ class _ArrowEngine(_StorageEngine):
 
     def write(
         self,
-        key: str,
+        key: KeyPath,
         entry: Entry,
         data: Any,
         offset: Offset = None,
@@ -467,44 +396,16 @@ class _ArrowEngine(_StorageEngine):
 
     def read(
         self,
-        key: str,
+        key: KeyPath,
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
         raise NotImplementedError
-        
-        schema_entry = _lookup_entry(self._schema, key) or entry
-
-        if isinstance(schema_entry, RaggedArraySetEntry):
-            col = _get_nested_col(self._batch, key)
-            if not isinstance(col, pa.ListArray):
-                raise TypeError(f"Expected ListArray for ragged column '{key}', got {type(col).__name__}")
-            if offset is not None:
-                idx = offset[0]
-                if isinstance(idx, int):
-                    scalar = col[idx]
-                    return scalar.values.to_numpy() if scalar.is_valid else np.empty(0, dtype=schema_entry.dtype)
-            return RaggedArrayView(col, dtype=schema_entry.dtype)
-
-        elif isinstance(schema_entry, (ArrayEntry, ArraySetEntry)):        
-            col = _get_nested_col(self._batch, key)
-            if hasattr(col, "to_numpy_ndarray"):
-                arr = col.to_numpy_ndarray()
-            else:
-                arr = col.to_numpy()
-            if offset:
-                return arr[offset]
-            return arr
-
-        else:
-            raise TypeError(
-                f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
-            )
 
     def to_record_batch(self) -> pa.RecordBatch:
         return self._batch
 
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: KeyPath) -> bool:
         try:
             _get_nested_col(self._batch, key)
             return True
@@ -539,22 +440,24 @@ class ArrayStorage(_BaseStorage):
 
     def write(
         self,
-        key: str,
+        key: Union[str, KeyPath],
         entry: Entry,
         data: Any,
         offset: Offset = None,
     ) -> None:
         """Write data via the active storage engine."""
-        self._engine.write(key, entry, data, offset=offset)
+        path = (key,) if isinstance(key, str) else key
+        self._engine.write(path, entry, data, offset=offset)
 
     def read(
         self,
-        key: str,
+        key: Union[str, KeyPath],
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
         """Read data via the active storage engine."""
-        return self._engine.read(key, entry, offset=offset)
+        path = (key,) if isinstance(key, str) else key
+        return self._engine.read(path, entry, offset=offset)
 
     def to_record_batch(self) -> pa.RecordBatch:
         """Freeze and compile the storage into an immutable Arrow RecordBatch."""
@@ -569,63 +472,46 @@ class ArrayStorage(_BaseStorage):
         """Construct an ArrayStorage directly wrapping a frozen Arrow RecordBatch."""
         return cls(schema=schema, capacity=len(batch), record_batch=batch)
 
-    def __contains__(self, key: str) -> bool:
-        return key in self._engine
+    def __contains__(self, key: Union[str, KeyPath]) -> bool:
+        path = (key,) if isinstance(key, str) else key
+        return path in self._engine
 
 
 class ArrayStorageView(_BaseStorage):
     """Sub-view into a parent storage with qualified path prefix and offset propagation."""
 
-    def qualify_key(self, key: str) -> str:
-        return ".".join((*self.path, key)) if self.path else key
+    def qualify_path(self, key: Union[str, KeyPath]) -> KeyPath:
+        if isinstance(key, str):
+            return (*self.path, key)
+        return (*self.path, *key)
 
-    def _resolve(self, key: str, offset: Offset) -> Tuple[str, Offset]:
-        full_key = self.qualify_key(key)
+    def qualify_key(self, key: Any) -> Any:
+        return self.qualify_path(key)
+
+    def _resolve(self, key: Union[str, KeyPath], offset: Offset) -> Tuple[KeyPath, Offset]:
+        full_path = self.qualify_path(key)
         merged = self.offset if offset is None else (*(self.offset or ()), *offset)
-        return full_key, merged
+        return full_path, merged
 
-    def read(self, key: str, entry: Entry, offset: Offset = None) -> Any:
+    def read(self, key: Union[str, KeyPath], entry: Entry, offset: Offset = None) -> Any:
         assert self.parent is not None
-        
-        full_key, effective_offset = self._resolve(key, offset)
-        return self.parent.read(full_key, entry, offset=effective_offset)
+        full_path, effective_offset = self._resolve(key, offset)
+        return self.parent.read(full_path, entry, offset=effective_offset)
 
-    def write(self, key: str, entry: Entry, data: Any, offset: Offset = None) -> None:
+    def write(self, key: Union[str, KeyPath], entry: Entry, data: Any, offset: Offset = None) -> None:
         assert self.parent is not None
-
-        full_key, effective_offset = self._resolve(key, offset)
-        self.parent.write(full_key, entry, data, offset=effective_offset)
+        full_path, effective_offset = self._resolve(key, offset)
+        self.parent.write(full_path, entry, data, offset=effective_offset)
 
     def to_record_batch(self) -> pa.RecordBatch:
         assert self.parent is not None
-
         parent_batch = self.parent.to_record_batch()
-
         raise NotImplementedError
-        # if self.path:
-        #     col = _get_nested_col(parent_batch, ".".join(self.path))
-        #     if isinstance(col, pa.StructArray):
-        #         batch = pa.RecordBatch.from_arrays(
-        #             [col.field(i) for i in range(col.type.num_fields)],
-        #             [col.type.field(i).name for i in range(col.type.num_fields)],
-        #         )
-        #     else:
-        #         batch = parent_batch
-        # else:
-        #     batch = parent_batch
 
-        # if self.offset and isinstance(self.offset[0], slice):
-        #     sl = self.offset[0]
-        #     start = sl.start or 0
-        #     stop = sl.stop if sl.stop is not None else len(batch)
-        #     return batch.slice(start, max(0, stop - start))
-
-        # return batch
-
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: Union[str, KeyPath]) -> bool:
         if self.parent is None:
             return False
-        return self.qualify_key(key) in self.parent
+        return self.qualify_path(key) in self.parent
 
 
 # Aliases for backward compatibility

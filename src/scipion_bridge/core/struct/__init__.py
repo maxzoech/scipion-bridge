@@ -3,6 +3,7 @@
 from .schema import (
     Entry,
     Schema,
+    KeyPath,
     ArrayEntryBase,
     ArrayEntry,
     ArraySetEntry,
@@ -28,6 +29,7 @@ __all__ = [
     "Arg",
     "Dim",
     "Entry",
+    "KeyPath",
     "Schema",
     "ArrayEntryBase",
     "ArrayEntry",

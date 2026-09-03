@@ -301,7 +301,7 @@ class Array(Marker[T], SchemaConvertible):
         if entry is None or not isinstance(entry, ArrayEntryBase):
             raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
 
-        arr = instance.storage.read(self.name, entry=entry)
+        arr = instance.storage.read((self.name,), entry=entry)
         if not isinstance(arr, np.ndarray):
             raise TypeError(f"Expected numpy.ndarray for field '{self.name}', got {type(arr).__name__}.")
 
@@ -326,7 +326,7 @@ class Array(Marker[T], SchemaConvertible):
             value = np.asarray(value).reshape([1])
 
         instance.storage.write(
-            self.name,
+            (self.name,),
             entry=entry,
             data=value,
         )
@@ -512,7 +512,7 @@ class Struct(Trait, SchemaConvertible):
 
         for key, entry in value.schema().tree_iter():
             data = value._storage.read(key, entry)
-            instance._storage.write(f"{self._name}.{key}", entry=entry, data=data)
+            instance._storage.write((self._name, *key), entry=entry, data=data)
 
     def __set_name__(self, owner: type, name: str) -> None:
         self._name = name

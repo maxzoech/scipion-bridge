@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Optional, Tuple, Type, Union
+from typing import Any, Dict, Iterator, Optional, Tuple, Type, Union, TypeAlias
 
 import numpy as np
+
+KeyPath: TypeAlias = Tuple[str, ...]
 
 
 class SchemaConvertible(metaclass=abc.ABCMeta):
@@ -219,10 +221,10 @@ class Schema:
         """True when every field in the schema has a fixed shape."""
         return all(entry.is_static for entry in self.fields.values())
 
-    def tree_iter(self, root: str = "") -> Iterator[Tuple[str, ArrayEntryBase]]:
-        """Yield (path, entry) for all leaf array entries in the schema."""
+    def tree_iter(self, root: KeyPath = ()) -> Iterator[Tuple[KeyPath, ArrayEntryBase]]:
+        """Yield (path_tuple, entry) for all leaf array entries in the schema."""
         for field_name, entry in self.fields.items():
-            path = f"{root}.{field_name}" if root else field_name
+            path = (*root, field_name)
             if entry.children is not None:
                 yield from entry.children.tree_iter(root=path)
             elif isinstance(entry, ArrayEntryBase):

@@ -118,8 +118,12 @@ def test_arrow_2d_slicing():
             value=i * 10,
         )
 
-    # 2D slice: data_set[2:5, "pixels"]
-    sliced_pixels = data_set[2:5, "pixels"]
+    # 2D indexing data_set[2:5, "pixels"] is rejected
+    with pytest.raises(TypeError, match="Invalid Set index type"):
+        _ = data_set[2:5, "pixels"]
+
+    # Chained slicing data_set[2:5]["pixels"] is supported
+    sliced_pixels = data_set[2:5]["pixels"]
     assert sliced_pixels.shape == (3, 16, 16)
     assert np.all(sliced_pixels[0] == 2)
     assert np.all(sliced_pixels[1] == 3)
@@ -260,5 +264,96 @@ def test_polymorphic_storage_engine_lifecycle_and_views():
     assert direct_storage.is_frozen
     assert isinstance(direct_storage._engine, _ArrowEngine)
     assert direct_storage.capacity == 4
-    assert np.allclose(direct_storage.read("pixels", set_schema.fields["pixels"]), noise)
+
+
+def test_keypath_schema_tree_iter_and_view_qualification():
+    """Verify KeyPath tuples across schema tree iteration and storage view qualification."""
+    from scipion_bridge.core.struct.schema import KeyPath
+    from scipion_bridge.core.struct.storage import ArrayStorageView
+
+    class Metadata(B.Struct):
+        tag: int
+        rate: float
+
+    class Frame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(32, 32))
+        metadata: Metadata
+
+    frame_schema = Frame.schema()
+
+    # 1. Verify Schema.tree_iter yields (KeyPath, ArrayEntryBase)
+    leaves = dict(frame_schema.tree_iter())
+    assert ("pixels",) in leaves
+    assert ("metadata", "tag") in leaves
+    assert ("metadata", "rate") in leaves
+    for path, entry in leaves.items():
+        assert isinstance(path, tuple)
+        assert all(isinstance(seg, str) for seg in path)
+
+    # 2. Verify ArrayStorageView qualification with KeyPath tuples
+    root_storage = ArrayStorage(schema=frame_schema)
+    meta_view = ArrayStorageView(schema=Metadata.schema(), parent=root_storage, path=("metadata",))
+
+    assert meta_view.qualify_path(("tag",)) == ("metadata", "tag")
+    assert meta_view.qualify_path("tag") == ("metadata", "tag")
+
+    # 3. Verify literal dots are preserved without string splitting
+    assert meta_view.qualify_path(("channel.1",)) == ("metadata", "channel.1")
+    assert meta_view.qualify_path("channel.1") == ("metadata", "channel.1")
+
+
+def test_struct_storage_keypath_direct_read_write():
+    """Verify Struct reading and writing using atomic KeyPath tuples and single strings."""
+    class Sample(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(4, 4))
+        label: int
+
+    schema = Sample.schema()
+    storage = ArrayStorage(schema=schema)
+
+    # Write using KeyPath tuple
+    data = np.ones((4, 4), dtype=np.float32)
+    storage.write(("pixels",), schema.fields["pixels"], data)
+
+    # Read using KeyPath tuple and string
+    assert np.allclose(storage.read(("pixels",), schema.fields["pixels"]), data)
+    assert np.allclose(storage.read("pixels", schema.fields["pixels"]), data)
+
+    # Membership check
+    assert ("pixels",) in storage
+    assert "pixels" in storage
+    assert ("nonexistent",) not in storage
+
+
+def test_set_indexing_three_primitives():
+    """Verify strictly the 3 primitives: set[int], set[slice], set[str] and rejection of tuples."""
+    class Sub(B.Struct):
+        val: int
+
+    class Container(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(8, 8))
+        sub: Sub
+
+    s = B.Set[Container](capacity=5)
+
+    # 1. Single string field access (column write)
+    noise = np.random.randn(5, 8, 8).astype(np.float32)
+    s["pixels"] = noise
+    assert ("pixels",) in s._storage
+
+    # 2. Row index read (int)
+    item = s[0]
+    assert isinstance(item, Container)
+
+    # 3. Row slice read (slice)
+    sub_set = s[1:3]
+    assert isinstance(sub_set, B.Set)
+    assert len(sub_set) == 2
+
+    # 4. Multi-component tuple indexing raises TypeError
+    with pytest.raises(TypeError, match="Invalid Set index type"):
+        _ = s["sub", "val"]
+
+    with pytest.raises(TypeError, match="Invalid Set key type"):
+        s["sub", "val"] = np.ones((5, 1))
 

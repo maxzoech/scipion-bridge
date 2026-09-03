@@ -15,6 +15,7 @@ from typing import (
     Type,
     TypeVar,
     Union,
+    cast,
     overload,
 )
 from typing_extensions import Self
@@ -25,6 +26,7 @@ import pyarrow as pa
 from .struct import Struct, Arg, Trait
 from .schema import (
     Entry,
+    KeyPath,
     SchemaConvertible,
     Schema,
     ArrayEntryBase,
@@ -250,107 +252,106 @@ class Set(Marker[T], SchemaConvertible):
 
         return start, stop
 
-    def __setitem__(self, key: Union[str, int], value: Any) -> None:
-        if isinstance(key, str):
-            fields = self.schema().fields
-            if key not in fields:
-                raise ValueError(f"Field '{key}' not found in Set schema.")
+    def __setitem__(self, key: Union[int, str], value: Any) -> None:
+        match key:
+            case int(idx):
+                if not isinstance(value, Struct):
+                    raise ValueError(f"Expected value to be of subclass Struct, got {type(value).__name__}")
 
-            entry = fields[key]
-            if isinstance(entry, ArrayEntryBase):
-                self._storage.write(key, entry, value)
-            else:
-                raise NotImplementedError(
-                    f"Writing to Set field '{key}' with schema entry type '{type(entry).__name__}' is not supported yet."
-                )
+                subview_struct = self[idx]
+                for field_path, entry in value.schema().tree_iter():
 
-        elif isinstance(key, int):
-            if not isinstance(value, Struct):
-                raise TypeError(f"Expected item of type Struct, got '{type(value).__name__}'.")
+                    target_entry = _lookup_entry(self.schema(), field_path)
+                    assert target_entry is not None
 
-            subview_struct = self[key]
-            for field_path, entry in value.schema().tree_iter():
-                target_entry = _lookup_entry(self.schema(), field_path) or entry
-                field_data = value._storage.read(field_path, entry)
-                subview_struct._storage.write(field_path, target_entry, field_data)
-        else:
-            raise TypeError(f"Invalid Set key type '{type(key).__name__}'. Expected str or int.")
+                    field_data = value._storage.read(field_path, entry)
+                    subview_struct._storage.write(field_path, target_entry, field_data)
 
-    @overload
-    def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
+            case str(field_name):
+                fields = self.schema().fields
+                assert field_name in fields
+                
+                schema_entry = fields[field_name]
+                if isinstance(schema_entry, ArrayEntryBase):
+                    self._storage.write((field_name,), schema_entry, value)
+                else:
+                    raise NotImplementedError(
+                        f"Writing to Set field '{field_name}' with schema entry type '{type(schema_entry).__name__}' is not supported yet."
+                    )
 
-    @overload
-    def __getitem__(self, key: slice) -> Self: ...
+            case _:
+                raise TypeError(f"Invalid Set key type '{type(key).__name__}'. Expected int or str.")
 
     @overload
     def __getitem__(self, key: int) -> T: ...
 
     @overload
-    def __getitem__(self, key: Tuple[slice, str]) -> Any: ...
+    def __getitem__(self, key: slice) -> Self: ...
+
+    @overload
+    def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
 
     def __getitem__(
-        self, key: Union[str, slice, int, Tuple[slice, str]]
-    ) -> Union[NDArray, RaggedArrayView, Self, T, Any]:
-        # 2D Slicing: set[slice, "col"]
-        if isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], slice) and isinstance(key[1], str):
-            return self[key[0]][key[1]]
+        self, key: Union[int, slice, str]
+    ) -> Union[T, Self, NDArray, RaggedArrayView, "Set[Any]"]:
+        match key:
+            case int(idx):
+                assert (isinstance(self.dtype, type) and issubclass(self.dtype, Struct))
 
-        if isinstance(key, str):
-            fields = self.schema().fields
-            if key not in fields:
-                raise ValueError(f"Field '{key}' not found in Set schema.")
-
-            entry = fields[key]
-
-            if isinstance(entry, ArrayEntryBase):
-                return self._storage.read(key, entry)
-            elif isinstance(entry, SchemaEntry):
-                if entry.schema.dtype is None:
-                    raise TypeError("SchemaEntry has no dtype associated.")
-                new_path = (*self._storage.path, key)
-                sliced_view = ArrayStorageView(
-                    entry.schema,
-                    parent=(self._storage.parent or self._storage),
-                    path=new_path,
-                    offset=self._storage.offset,
+                new_offset = self._storage.compute_index_offset(idx)
+                subview = ArrayStorageView(
+                    self.dtype.schema(),
+                    parent=self._storage.parent or self._storage,
+                    path=self._storage.path,
+                    offset=new_offset,
                 )
-                return Set[entry.schema.dtype](
-                    capacity=self.capacity,
-                    _storage_view=sliced_view,
+
+                return cast(T, self.dtype(_storage_view=subview))
+
+            case slice() as sl:
+                assert self.dtype is not None
+                assert self.capacity is not None
+
+
+                start, stop = self._normalize_slice(sl)
+                new_size = stop - start
+
+                new_offset = self._storage.compute_slice_offset(start, stop)
+                subview = ArrayStorageView(
+                    self.schema(),
+                    parent=self._storage.parent or self._storage,
+                    path=self._storage.path,
+                    offset=new_offset,
                 )
-            raise NotImplementedError(
-                f"Reading Set field '{key}' with schema entry type '{type(entry).__name__}' is not supported yet."
-            )
+                return type(self)(capacity=new_size, _storage_view=subview)
 
-        elif isinstance(key, slice):
-            if self.dtype is None:
-                raise TypeError("Cannot slice a Set with unspecialized element type.")
-            if self.capacity is None:
-                raise ValueError("Cannot slice a Set with unknown capacity.")
+            case str(field_name):
+                fields = self.schema().fields
+                if field_name not in fields:
+                    raise ValueError(f"Field '{field_name}' not found in Set schema.")
 
-            start, stop = self._normalize_slice(key)
-            new_size = stop - start
+                entry = fields[field_name]
+                if isinstance(entry, ArrayEntryBase):
+                    return self._storage.read((field_name,), entry)
+                elif isinstance(entry, SchemaEntry):
+                    assert entry.schema.dtype is not None
+                    
+                    new_path = (*self._storage.path, field_name)
+                    sliced_view = ArrayStorageView(
+                        entry.schema,
+                        parent=(self._storage.parent or self._storage),
+                        path=new_path,
+                        offset=self._storage.offset,
+                    )
+                    sub_cls: Any = entry.schema.dtype
+                    return Set[sub_cls](
+                        capacity=self.capacity,
+                        _storage_view=sliced_view,
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Reading Set field '{field_name}' with schema entry type '{type(entry).__name__}' is not supported yet."
+                    )
 
-            new_offset = self._storage.compute_slice_offset(start, stop)
-            subview = ArrayStorageView(
-                self.schema(),
-                parent=self._storage.parent or self._storage,
-                path=self._storage.path,
-                offset=new_offset,
-            )
-            return type(self)(capacity=new_size, _storage_view=subview)
-
-        elif isinstance(key, int):
-            if not (isinstance(self.dtype, type) and issubclass(self.dtype, Struct)):
-                raise TypeError(f"Element type must be a Struct subclass, got '{self.dtype}'.")
-
-            new_offset = self._storage.compute_index_offset(key)
-            subview = ArrayStorageView(
-                self.dtype.schema(),
-                parent=self._storage.parent or self._storage,
-                path=self._storage.path,
-                offset=new_offset,
-            )
-            return self.dtype(_storage_view=subview)
-
-        raise TypeError(f"Invalid Set index type '{type(key).__name__}'. Expected str, slice, or int.")
+            case _:
+                raise TypeError(f"Invalid Set index type '{type(key).__name__}'. Expected int, slice, or str.")
