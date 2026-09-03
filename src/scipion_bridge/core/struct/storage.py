@@ -370,22 +370,24 @@ class _StagingEngine(_StorageEngine):
         entry: RaggedArraySetEntry,
         offset: Offset = None,
     ) -> Any:
-        if offset is not None:
-            idx = offset[0]
-            if isinstance(idx, int):
-                chunks = self._ragged_staging.get(key, [])
-                if idx < len(chunks) and chunks[idx] is not None:
-                    return chunks[idx]
-                return np.empty(0, dtype=entry.dtype)
+        raise NotImplementedError
+        
+        # if offset is not None:
+        #     idx = offset[0]
+        #     if isinstance(idx, int):
+        #         chunks = self._ragged_staging.get(key, [])
+        #         if idx < len(chunks) and chunks[idx] is not None:
+        #             return chunks[idx]
+        #         return np.empty(0, dtype=entry.dtype)
 
-        chunks = self._ragged_staging.get(key, [])
-        if self._capacity is not None and len(chunks) < self._capacity:
-            chunks = list(chunks) + [None] * (self._capacity - len(chunks))
-        col = build_ragged_array(chunks, dtype=entry.dtype)
+        # chunks = self._ragged_staging.get(key, [])
+        # if self._capacity is not None and len(chunks) < self._capacity:
+        #     chunks = list(chunks) + [None] * (self._capacity - len(chunks))
+        # col = build_ragged_array(chunks, dtype=entry.dtype)
 
-        if not isinstance(col, pa.ListArray):
-            raise TypeError(f"Expected ListArray for ragged field '{key}', got {type(col).__name__}")
-        return RaggedArrayView(col, dtype=entry.dtype)
+        # if not isinstance(col, pa.ListArray):
+        #     raise TypeError(f"Expected ListArray for ragged field '{key}', got {type(col).__name__}")
+        # return RaggedArrayView(col, dtype=entry.dtype)
 
     def to_record_batch(self) -> pa.RecordBatch:
         columns, names = self._build_columns(self._schema, prefix="")
@@ -394,6 +396,8 @@ class _StagingEngine(_StorageEngine):
     def _build_columns(self, schema: Schema, prefix: str) -> Tuple[List[pa.Array], List[str]]:
         columns: List[pa.Array] = []
         names: List[str] = []
+
+        raise NotImplementedError
 
         for field_name, entry in schema.fields.items():
             full_key = f"{prefix}.{field_name}" if prefix else field_name
@@ -467,6 +471,8 @@ class _ArrowEngine(_StorageEngine):
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
+        raise NotImplementedError
+        
         schema_entry = _lookup_entry(self._schema, key) or entry
 
         if isinstance(schema_entry, RaggedArraySetEntry):
@@ -579,41 +585,42 @@ class ArrayStorageView(_BaseStorage):
         return full_key, merged
 
     def read(self, key: str, entry: Entry, offset: Offset = None) -> Any:
-        if self.parent is None:
-            raise RuntimeError("ArrayStorageView has no parent storage.")
+        assert self.parent is not None
+        
         full_key, effective_offset = self._resolve(key, offset)
         return self.parent.read(full_key, entry, offset=effective_offset)
 
     def write(self, key: str, entry: Entry, data: Any, offset: Offset = None) -> None:
-        if self.parent is None:
-            raise RuntimeError("ArrayStorageView has no parent storage.")
+        assert self.parent is not None
+
         full_key, effective_offset = self._resolve(key, offset)
         self.parent.write(full_key, entry, data, offset=effective_offset)
 
     def to_record_batch(self) -> pa.RecordBatch:
-        if self.parent is None:
-            raise RuntimeError("ArrayStorageView has no parent storage.")
+        assert self.parent is not None
+
         parent_batch = self.parent.to_record_batch()
 
-        if self.path:
-            col = _get_nested_col(parent_batch, ".".join(self.path))
-            if isinstance(col, pa.StructArray):
-                batch = pa.RecordBatch.from_arrays(
-                    [col.field(i) for i in range(col.type.num_fields)],
-                    [col.type.field(i).name for i in range(col.type.num_fields)],
-                )
-            else:
-                batch = parent_batch
-        else:
-            batch = parent_batch
+        raise NotImplementedError
+        # if self.path:
+        #     col = _get_nested_col(parent_batch, ".".join(self.path))
+        #     if isinstance(col, pa.StructArray):
+        #         batch = pa.RecordBatch.from_arrays(
+        #             [col.field(i) for i in range(col.type.num_fields)],
+        #             [col.type.field(i).name for i in range(col.type.num_fields)],
+        #         )
+        #     else:
+        #         batch = parent_batch
+        # else:
+        #     batch = parent_batch
 
-        if self.offset and isinstance(self.offset[0], slice):
-            sl = self.offset[0]
-            start = sl.start or 0
-            stop = sl.stop if sl.stop is not None else len(batch)
-            return batch.slice(start, max(0, stop - start))
+        # if self.offset and isinstance(self.offset[0], slice):
+        #     sl = self.offset[0]
+        #     start = sl.start or 0
+        #     stop = sl.stop if sl.stop is not None else len(batch)
+        #     return batch.slice(start, max(0, stop - start))
 
-        return batch
+        # return batch
 
     def __contains__(self, key: str) -> bool:
         if self.parent is None:
