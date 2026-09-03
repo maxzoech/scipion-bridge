@@ -1,31 +1,26 @@
+"""Utilities for bridging scipion-bridge schemas/structures with Apache Arrow."""
+
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, List, Optional, Sequence, Tuple, Union
 import numpy as np
+from numpy.typing import NDArray
 import pyarrow as pa
 
-from ..schema import (
-    Schema,
-    _ArrayEntryBase,
-    _ArrayEntry,
-    _ArraySetEntry,
-    _RaggedArraySetEntry,
-    _SchemaEntry,
-    _SchemaSetEntry,
-)
+from ..schema import Schema, ArrayEntryBase
 
 
-class RaggedArrayView(Sequence[np.ndarray]):
+class RaggedArrayView(Sequence[NDArray]):
     """A zero-copy sequence view over an Apache Arrow ListArray returning 1D NumPy slices."""
 
     def __init__(self, list_array: pa.ListArray, dtype: np.dtype) -> None:
         self._list_array = list_array
-        self.dtype = dtype
+        self.dtype = np.dtype(dtype)
 
     def __len__(self) -> int:
         return len(self._list_array)
 
-    def __getitem__(self, item: Union[int, slice]) -> Union[np.ndarray, "RaggedArrayView"]:
+    def __getitem__(self, item: Union[int, slice]) -> Union[NDArray, "RaggedArrayView"]:
         if isinstance(item, slice):
             sliced = self._list_array[item]
             return RaggedArrayView(sliced, self.dtype)
@@ -46,7 +41,7 @@ class RaggedArrayView(Sequence[np.ndarray]):
         for i in range(len(self)):
             yield self[i]
 
-    def to_list(self) -> List[np.ndarray]:
+    def to_list(self) -> List[NDArray]:
         return list(self)
 
     def __eq__(self, other: Any) -> bool:
@@ -57,7 +52,11 @@ class RaggedArrayView(Sequence[np.ndarray]):
         return False
 
     def __repr__(self) -> str:
-        return f"RaggedArrayView(length={len(self)}, dtype={self.dtype})"
+        if len(self) <= 3:
+            shapes = [tuple(arr.shape) for arr in self]
+            return f"RaggedArrayView(len={len(self)}, shapes={shapes}, dtype={self.dtype})"
+        shapes = [tuple(self[i].shape) for i in range(3)]
+        return f"RaggedArrayView(len={len(self)}, shapes={shapes}..., dtype={self.dtype})"
 
 
 def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
@@ -69,7 +68,7 @@ def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
             child_pa_schema = schema_to_arrow_schema(entry.children)
             field_type = pa.struct([child_pa_schema.field(i) for i in range(len(child_pa_schema))])
             fields.append(pa.field(name, field_type))
-        elif isinstance(entry, _ArrayEntryBase):
+        elif isinstance(entry, ArrayEntryBase):
             pa_dtype = pa.from_numpy_dtype(entry.dtype)
             if entry.is_static:
                 shape = tuple(dim for dim in entry.shape if dim is not None)
@@ -111,4 +110,3 @@ def build_ragged_array(chunks: Sequence[Optional[np.ndarray]], dtype: np.dtype) 
     pa_offsets = pa.array(offsets, type=pa.int32())
     pa_values = pa.array(flat, type=pa.from_numpy_dtype(dtype))
     return pa.ListArray.from_arrays(pa_offsets, pa_values)
-

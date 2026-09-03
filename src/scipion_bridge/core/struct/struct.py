@@ -1,18 +1,36 @@
-import numpy as np
+"""Descriptor and metaprogramming layer for Struct definition and materialization."""
 
-from typing import Type, TypeVar, Tuple, Union, Any, Optional, Dict, cast, overload
-from typing_extensions import Self
+from __future__ import annotations
+
+from typing import (
+    Any,
+    Dict,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
+from typing_extensions import Self, TypeAlias
+import numpy as np
 from numpy.typing import NDArray
 
-try:
-    from typing import TypeAlias
-except ImportError:
-    from typing_extensions import TypeAlias
-
-from .schema import _ArrayEntryBase, SchemaConvertible, Entry, Schema, _SchemaEntry, _ArrayEntry
+from .schema import (
+    ArrayEntryBase,
+    ArrayEntry,
+    SchemaConvertible,
+    Entry,
+    Schema,
+    SchemaEntry,
+    _ArrayEntryBase,
+    _SchemaEntry,
+    _ArrayEntry,
+)
 from ..utils.marker import Marker
-
 from .storage import _BaseStorage, ArrayStorage, ArrayStorageView
+
 
 def _is_supported_scalar_value(cls: Type) -> bool:
     try:
@@ -22,7 +40,26 @@ def _is_supported_scalar_value(cls: Type) -> bool:
         return False
 
 
+def _init_default_trait_field(owner_cls: Type["Trait"], dtype: Type) -> Any:
+    """Initialize a default field marker for a Trait annotation."""
+    if _is_supported_scalar_value(dtype):
+        return Array(
+            dtype=np.dtype(dtype),
+            shape=(Dim(1),),
+            owner_cls=owner_cls,
+            is_scalar=True,
+        )
+    elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
+        return dtype.default()
+    else:
+        raise TypeError(
+            f"Unsupported field type {dtype!r}. "
+            "Expected a supported scalar type or a valid schema convertible type."
+        )
+
+
 class Arg:
+    """Class-level dimension specification or named parameter."""
 
     def __init__(
         self,
@@ -30,14 +67,13 @@ class Arg:
         *,
         name: Optional[str] = None,
     ) -> None:
-        
         if value is not None and (
             not isinstance(value, (int, Arg)) or isinstance(value, bool)
         ):
             raise TypeError(
                 f"Expected Dim, int, or None, but got {type(value).__name__}: {value!r}"
             )
-        
+
         self._value = value
         self.name = name
         self._owner: Optional[type] = None
@@ -45,7 +81,6 @@ class Arg:
     def __set_name__(self, owner: Any, name: str) -> None:
         if self.name is None:
             self.name = name
-
         self._owner = owner
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
@@ -84,7 +119,6 @@ class Arg:
         """Recursively resolves down to the underlying integer or None."""
         if isinstance(self._value, Arg):
             return self._value._resolve_value()
-
         return self._value
 
     def validate(self, other: Any) -> None:
@@ -133,7 +167,6 @@ class Arg:
 
 
 Dim: TypeAlias = Arg
-
 
 T = TypeVar("T", bound=Union[np.generic, float, int, bool])
 
@@ -192,7 +225,6 @@ class Array(Marker[T], SchemaConvertible):
             if isinstance(dim, Arg):
                 if not dim.name:
                     return dim.value
-
                 if self._owner_cls is not None:
                     target = getattr(self._owner_cls, dim.name, dim)
                     return target.value if isinstance(target, Arg) else target
@@ -224,17 +256,16 @@ class Array(Marker[T], SchemaConvertible):
             raise TypeError(
                 f"Owner class '{self._owner_cls}' must be a subclass of Trait."
             )
-        return _ArrayEntry(np.dtype(self.dtype), shape=self.shape)
+        return ArrayEntry(np.dtype(self.dtype), shape=self.shape)
 
     def _bind(self, owner: Type["Trait"]) -> "Array[T]":
-        bound = type(self)(
+        return type(self)(
             dtype=self._dtype,
             shape=self.shape_spec,
             owner_cls=owner,
             name=self.name,
             is_scalar=self.is_scalar,
         )
-        return bound
 
     def __set_name__(self, owner: type, name: str) -> None:
         super().__set_name__(owner, name)
@@ -250,16 +281,13 @@ class Array(Marker[T], SchemaConvertible):
         if instance is None:
             if owner is None:
                 return self
-            
             if self.dtype is None:
                 raise TypeError(
                     f"Array field '{self.name}' on '{owner.__name__}' is missing a dtype specification. "
                     f"Specify a dtype using Array[dtype](...) or Array(dtype=...)."
                 )
-            
             if self._owner_cls is None or self._owner_cls != owner:
                 return self._bind(owner)
-        
             return self
 
         if not isinstance(instance, Struct):
@@ -270,41 +298,38 @@ class Array(Marker[T], SchemaConvertible):
             raise AttributeError("Array descriptor name is not set.")
 
         entry = instance.schema().fields.get(self.name)
-
-        if entry is None or not isinstance(entry, _ArrayEntryBase):
+        if entry is None or not isinstance(entry, ArrayEntryBase):
             raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
 
-        arr = instance.storage.read_static_array(self.name, entry=entry)
-        assert isinstance(arr, np.ndarray)
+        arr = instance.storage.read(self.name, entry=entry)
+        if not isinstance(arr, np.ndarray):
+            raise TypeError(f"Expected numpy.ndarray for field '{self.name}', got {type(arr).__name__}.")
 
         if self.is_scalar:
             return arr.item()
-        
         return arr
 
     def __set__(self, instance: Any, value: Any) -> None:
-
         if not isinstance(instance, Struct):
             raise TypeError(
                 f"Cannot assign Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
             )
-        
         if self.name is None:
             raise AttributeError("Array descriptor name is not set.")
 
         schema = instance.schema()
         entry = schema.fields.get(self.name)
-        if entry is None or not isinstance(entry, _ArrayEntryBase):
+        if entry is None or not isinstance(entry, ArrayEntryBase):
             raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
 
         if np.ndim(value) == 0 and self.is_scalar:
             value = np.asarray(value).reshape([1])
 
-        instance.storage.write_static_array(
+        instance.storage.write(
             self.name,
             entry=entry,
-            data=value
-        )        
+            data=value,
+        )
 
     def __repr__(self) -> str:
         dtype_str = getattr(self.dtype, "name", getattr(self.dtype, "__name__", str(self.dtype))) if self.dtype is not None else "?"
@@ -327,22 +352,6 @@ class Trait:
             cls._arg_specs = {}
             return
 
-        def _init_default(dtype: Type):
-            if _is_supported_scalar_value(dtype):
-                return Array(
-                    dtype=np.dtype(dtype),
-                    shape=(Dim(1),),
-                    owner_cls=cls,
-                    is_scalar=True,
-                )
-            elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
-                return dtype.default()
-            else:
-                raise TypeError(
-                    f"Unsupported field type {dtype!r}. "
-                    "Expected a supported scalar type or a valid schema convertible type."
-                )
-
         cls_name = cls.__name__
         annotations = cls.__dict__.get("__annotations__", {})
 
@@ -354,7 +363,7 @@ class Trait:
         }
 
         unassigned_fields = {
-            k: _init_default(v)
+            k: _init_default_trait_field(cls, v)
             for k, v in annotations.items()
             if not k.startswith("_") and k not in assigned_fields
         }
@@ -387,15 +396,11 @@ class Trait:
         for k, v in assigned_fields.items():
             if k in arg_specs:
                 arg_specs[k].validate(v)
-
             if isinstance(v, Arg):
                 arg_specs[k] = v
 
         for k, v in unassigned_fields.items():
             if isinstance(v, (Array, Marker, SchemaConvertible)):
-                # Manually trigger __set_name__ here because we are dynamically
-                # synthesizing these fields, and therefore have to fake standard
-                # Python behaviour
                 v.__set_name__(cls, k)
                 setattr(cls, k, v)
 
@@ -463,26 +468,29 @@ class Struct(Trait, SchemaConvertible):
         )
 
     def __init__(self, **kwargs: Any) -> None:
-
         storage = kwargs.pop("_storage_view", None)
         if storage is None:
             storage = ArrayStorage(schema=self._bridge_schema)
 
-        assert isinstance(storage, _BaseStorage)
+        if not isinstance(storage, _BaseStorage):
+            raise TypeError(f"Expected _BaseStorage instance, got {type(storage).__name__}")
 
         self._storage = storage
-        self._name = None
 
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-
-    def __get__(self, instance, owner):
+    def __get__(
+        self,
+        instance: Optional["Struct"],
+        owner: Optional[Type["Struct"]] = None,
+    ) -> Any:
         if isinstance(instance, Struct):
-            assert self._name is not None
+            if self._name is None:
+                raise AttributeError("Struct descriptor name is not set.")
             parent = instance._storage.parent or instance._storage
             new_path = (*instance._storage.path, self._name)
-            
+
             subview = ArrayStorageView(
                 self.schema(),
                 parent=parent,
@@ -490,23 +498,23 @@ class Struct(Trait, SchemaConvertible):
                 offset=instance._storage.offset,
             )
 
-            return type(self)(
-                _storage_view=subview,
-            )
+            return type(self)(_storage_view=subview)
 
         return self
 
-    def __set__(self, instance, value):
-        assert isinstance(instance, Struct)
-        assert isinstance(value, Struct)
-        assert self._name is not None
-        
+    def __set__(self, instance: Any, value: Any) -> None:
+        if not isinstance(instance, Struct):
+            raise TypeError(f"Expected Struct instance, got '{type(instance).__name__}'.")
+        if not isinstance(value, Struct):
+            raise TypeError(f"Expected Struct value, got '{type(value).__name__}'.")
+        if self._name is None:
+            raise AttributeError("Struct descriptor name is not set.")
+
         for key, entry in value.schema().tree_iter():
-            data = value._storage.read_static_array(key, entry)
-            instance._storage.write_static_array(f"{self._name}.{key}", entry=entry, data=data)
+            data = value._storage.read(key, entry)
+            instance._storage.write(f"{self._name}.{key}", entry=entry, data=data)
 
-
-    def __set_name__(self, owner, name):
+    def __set_name__(self, owner: type, name: str) -> None:
         self._name = name
 
     @classmethod
@@ -518,7 +526,7 @@ class Struct(Trait, SchemaConvertible):
                     f"'{cls.__name__}.static()' got unexpected dimension argument: {k!r}. "
                     f"Available dimensions: {list(cls._arg_specs.keys())}"
                 )
-            
+
         args_suffix = "__".join(f"{k}{v}" for k, v in sorted(kwargs.items()))
         subclass_name = f"{cls.__name__}_{args_suffix}" if args_suffix else f"{cls.__name__}_Static"
 
@@ -532,8 +540,4 @@ class Struct(Trait, SchemaConvertible):
         return cast(Type[Self], subtype)
 
     def convert_to_entry(self) -> Entry:
-        return _SchemaEntry(
-            schema=self.schema(),
-        )
-
-
+        return SchemaEntry(schema=self.schema())

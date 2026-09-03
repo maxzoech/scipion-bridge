@@ -1,12 +1,16 @@
+"""Schema definitions for Struct and Set data structures."""
+
+from __future__ import annotations
+
 import abc
 from dataclasses import dataclass
+from typing import Any, Dict, Iterator, Optional, Tuple, Type, Union
 
 import numpy as np
 
-from typing import Iterator, Optional, Dict, Tuple, Type, Union, Any
-
 
 class SchemaConvertible(metaclass=abc.ABCMeta):
+    """Abstract base for classes or objects convertible to a schema representation."""
 
     @classmethod
     @abc.abstractmethod
@@ -26,12 +30,12 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
 
     @classmethod
     def print_schema(cls) -> None:
-        assert cls.schema is not None
         cls.schema().print_tree()
 
-    def __set_name__(self, name, owner):
+    def __set_name__(self, name: str, owner: type) -> None:
         pass
-    
+
+
 class Entry(metaclass=abc.ABCMeta):
     """Abstract base for all schema field entries."""
 
@@ -57,25 +61,22 @@ class Entry(metaclass=abc.ABCMeta):
         ...
 
 
-class _ArrayEntryBase(Entry):
+@dataclass
+class ArrayEntryBase(Entry):
     """Shared behaviour for all array-backed entry types."""
 
     dtype: np.dtype
-    shape: Tuple[Union[int, None], ...]
+    shape: Tuple[Optional[int], ...]
 
-    def __init__(
-        self,
-        dtype: np.dtype,
-        shape: Tuple[Union[int, None], ...],
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.dtype = dtype
-        self.shape = tuple(shape)
+    def __post_init__(self) -> None:
+        if not isinstance(self.dtype, np.dtype):
+            object.__setattr__(self, "dtype", np.dtype(self.dtype))
+        object.__setattr__(self, "shape", tuple(self.shape))
 
     @property
     @abc.abstractmethod
-    def entry_name(self) -> str: ...
+    def entry_name(self) -> str:
+        ...
 
     @property
     def is_static(self) -> bool:
@@ -84,55 +85,36 @@ class _ArrayEntryBase(Entry):
 
     def format_entry(self, name: str) -> str:
         dtype_str = self.dtype.name if hasattr(self.dtype, "name") else str(self.dtype)
-        shape_str = list(self.shape)
-
-        return f"{name}: {self.entry_name}[{dtype_str}], shape: {shape_str})"
+        return f"{name}: {self.entry_name}[{dtype_str}], shape: {list(self.shape)})"
 
 
-class _ArrayEntry(_ArrayEntryBase):
+@dataclass
+class ArrayEntry(ArrayEntryBase):
     """An array field whose shape may or may not be fully static."""
-
-    def __init__(
-        self,
-        dtype: np.dtype,
-        shape: Tuple[Union[int, None], ...],
-    ) -> None:
-        super().__init__(dtype=dtype, shape=shape)
 
     @property
     def entry_name(self) -> str:
         return "Array"
 
     def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
-        if self.is_static:
-            return _ArraySetEntry(
-                dtype=self.dtype,
-                shape=self.shape,
-                capacity=capacity,
-            )
-        else:
-            return _RaggedArraySetEntry(
-                dtype=self.dtype,
-                shape=self.shape,
-                capacity=capacity,
-            )
+        entry_cls = ArraySetEntry if self.is_static else RaggedArraySetEntry
+        return entry_cls(
+            dtype=self.dtype,
+            shape=self.shape,
+            capacity=capacity,
+        )
 
 
-class _ArraySetEntry(_ArrayEntryBase):
+@dataclass
+class ArraySetEntry(ArrayEntryBase):
     """A fixed-shape array field inside a Set context."""
 
-    def __init__(
-        self,
-        dtype: np.dtype,
-        shape: Tuple[Union[int, None], ...],
-        capacity: Optional[int] = None,
-    ) -> None:
-        # Enforce that ArraySet only receives fully concrete integer dimensions
-        if any(dim is None for dim in shape):
-            raise ValueError(f"ArraySet shape must be fully static, got: {shape}")
+    capacity: Optional[int] = None
 
-        super().__init__(dtype=dtype, shape=shape)
-        self.capacity = capacity
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if any(dim is None for dim in self.shape):
+            raise ValueError(f"ArraySet shape must be fully static, got: {self.shape}")
 
     @property
     def is_static(self) -> bool:
@@ -143,22 +125,18 @@ class _ArraySetEntry(_ArrayEntryBase):
         return "ArraySet"
 
     def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
-        return _ArraySetEntry(
-            dtype=self.dtype, shape=self.shape, capacity=capacity or self.capacity
+        return ArraySetEntry(
+            dtype=self.dtype,
+            shape=self.shape,
+            capacity=capacity if capacity is not None else self.capacity,
         )
 
 
-class _RaggedArraySetEntry(_ArrayEntryBase):
+@dataclass
+class RaggedArraySetEntry(ArrayEntryBase):
     """A variable-shape array field inside a Set."""
 
-    def __init__(
-        self,
-        dtype: np.dtype,
-        shape: Tuple[Union[int, None], ...],
-        capacity: Optional[int] = None,
-    ) -> None:
-        super().__init__(dtype=dtype, shape=shape)
-        self.capacity = capacity
+    capacity: Optional[int] = None
 
     @property
     def is_static(self) -> bool:
@@ -169,45 +147,39 @@ class _RaggedArraySetEntry(_ArrayEntryBase):
         return "RaggedArraySet"
 
     def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
-        return _RaggedArraySetEntry(
+        return RaggedArraySetEntry(
             dtype=self.dtype,
             shape=self.shape,
-            capacity=(capacity or self.capacity),
+            capacity=capacity if capacity is not None else self.capacity,
         )
 
 
-class _SchemaEntry(Entry):
+@dataclass
+class SchemaEntry(Entry):
     """Wraps a nested struct type and its schema for record instantiation."""
 
-    def __init__(self, schema: "Schema") -> None:
-        super().__init__()
-        self.schema = schema
+    schema: "Schema"
 
     @property
     def is_static(self) -> bool:
         return self.schema.is_static
 
     @property
-    def children(self) -> "Schema":
+    def children(self) -> Optional["Schema"]:
         return self.schema
 
     def format_entry(self, name: str) -> str:
         return f"{name} (struct)"
 
     def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
-        return _SchemaEntry(schema=self.schema.to_set_schema(capacity=capacity))
+        return SchemaEntry(schema=self.schema.to_set_schema(capacity=capacity))
 
 
-class _SchemaSetEntry(_SchemaEntry):
+@dataclass
+class SchemaSetEntry(SchemaEntry):
     """Wraps a Set[Foo] container entry capable of instantiating Foo elements."""
 
-    def __init__(
-        self,
-        schema: "Schema",
-        capacity: Optional[int] = None,
-    ) -> None:
-        super().__init__(schema=schema)
-        self.capacity = capacity
+    capacity: Optional[int] = None
 
     @property
     def is_static(self) -> bool:
@@ -219,9 +191,9 @@ class _SchemaSetEntry(_SchemaEntry):
         return f"{name}: Set[{cls_name}](size: {size_str})"
 
     def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
-        return _SchemaSetEntry(
+        return SchemaSetEntry(
             schema=self.schema.to_set_schema(capacity=capacity),
-            capacity=self.capacity,
+            capacity=capacity if capacity is not None else self.capacity,
         )
 
 
@@ -247,26 +219,14 @@ class Schema:
         """True when every field in the schema has a fixed shape."""
         return all(entry.is_static for entry in self.fields.values())
 
-    def tree_iter(self, root: str = "") -> Iterator[Tuple[str, _ArrayEntryBase]]:
-        """Yield (path, entry) for all leaf entries in the schema."""
+    def tree_iter(self, root: str = "") -> Iterator[Tuple[str, ArrayEntryBase]]:
+        """Yield (path, entry) for all leaf array entries in the schema."""
         for field_name, entry in self.fields.items():
             path = f"{root}.{field_name}" if root else field_name
             if entry.children is not None:
                 yield from entry.children.tree_iter(root=path)
-            else:
-                assert isinstance(entry, _ArrayEntryBase)
+            elif isinstance(entry, ArrayEntryBase):
                 yield path, entry
-
-    #     def iter_leaves(self, prefix: str = "") -> Iterator[Tuple[str, Entry]]:
-    #         """Yield (path, entry) for all leaf entries in the schema."""
-    #         yield from self.tree_iter(root=prefix)
-
-    #     def map_leaves(self, func: Callable[[str, Entry], Any], prefix: str = "") -> Dict[str, Any]:
-    #         """Apply func to all leaf entries, returning a dictionary mapping path -> result."""
-    #         return {
-    #             path: func(path, entry)
-    #             for path, entry in self.iter_leaves(prefix=prefix)
-    #         }
 
     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
         """Print the schema in a hierarchical tree format."""
@@ -289,3 +249,12 @@ class Schema:
                     _print_node(entry.children, prefix + extension)
 
         _print_node(self)
+
+
+# Backward compatibility aliases
+_ArrayEntryBase = ArrayEntryBase
+_ArrayEntry = ArrayEntry
+_ArraySetEntry = ArraySetEntry
+_RaggedArraySetEntry = RaggedArraySetEntry
+_SchemaEntry = SchemaEntry
+_SchemaSetEntry = SchemaSetEntry

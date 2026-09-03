@@ -5,35 +5,40 @@ N-dimensional arrays across the outer batch dimension.
 """
 
 from __future__ import annotations
+
 from typing import (
-    Self,
+    Any,
+    Dict,
+    Optional,
+    Sequence,
+    Tuple,
     Type,
     TypeVar,
-    Dict,
     Union,
-    Any,
-    Optional,
-    Tuple,
-    Sequence,
     overload,
 )
-
+from typing_extensions import Self
 import numpy as np
+from numpy.typing import NDArray
 import pyarrow as pa
-from numpy.typing import ArrayLike
 
 from .struct import Struct, Arg, Trait
-from . import schema
 from .schema import (
     Entry,
     SchemaConvertible,
     Schema,
+    ArrayEntryBase,
+    SchemaEntry,
+    SchemaSetEntry,
+    ArraySetEntry,
+    RaggedArraySetEntry,
     _SchemaSetEntry,
     _ArraySetEntry,
     _RaggedArraySetEntry,
     _SchemaEntry,
 )
 from .storage import _BaseStorage, ArrayStorage, ArrayStorageView, _lookup_entry
+from .utils.arrow_utils import RaggedArrayView
 from ..utils.marker import Marker
 
 T = TypeVar("T", bound=Struct)
@@ -58,7 +63,7 @@ class BoundSetView(SchemaConvertible):
 
     @classmethod
     def schema(cls) -> Schema:
-        raise NotImplementedError
+        raise NotImplementedError("Cannot get schema directly from BoundSetView.")
 
     @property
     def capacity(self) -> Optional[int]:
@@ -70,16 +75,23 @@ class BoundSetView(SchemaConvertible):
 
     def convert_to_entry(self) -> Entry:
         set_schema = self._element_cls.schema().to_set_schema(capacity=self.capacity)
-        return _SchemaSetEntry(
+        return SchemaSetEntry(
             schema=set_schema,
             capacity=self.capacity,
         )
 
 
 class Set(Marker[T], SchemaConvertible):
+    """Sequence container for Struct instances backed by Apache Arrow columnar storage."""
 
     _bridge_schema: Schema
     _capacity: Arg
+
+    @overload
+    def __init__(self, capacity: Sequence[T], **kwargs: Any) -> None: ...
+
+    @overload
+    def __init__(self, capacity: Optional[Union[int, Arg]] = None, **kwargs: Any) -> None: ...
 
     def __init__(
         self,
@@ -103,7 +115,8 @@ class Set(Marker[T], SchemaConvertible):
             "_storage_view",
             ArrayStorage(schema=self.schema(), capacity=cap_val),
         )
-        assert isinstance(storage, _BaseStorage)
+        if not isinstance(storage, _BaseStorage):
+            raise TypeError(f"Expected _BaseStorage instance, got {type(storage).__name__}")
         self._storage = storage
 
         if items_to_populate is not None:
@@ -115,7 +128,8 @@ class Set(Marker[T], SchemaConvertible):
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         if instance is None and owner is not None:
-            assert self.dtype is not None
+            if self.dtype is None:
+                raise TypeError("Cannot create BoundSetView without a defined dtype.")
             return BoundSetView(
                 element_cls=self.dtype,
                 capacity_spec=self._capacity,
@@ -146,12 +160,8 @@ class Set(Marker[T], SchemaConvertible):
             return self.capacity
         for key, entry in self.schema().tree_iter():
             if key in self._storage:
-                if entry.is_static:
-                    arr = self._storage.read_static_array(key, entry)
-                    return len(arr)
-                else:
-                    ragged_view = self._storage.read_ragged_array(key, entry)
-                    return len(ragged_view)
+                val = self._storage.read(key, entry)
+                return len(val)
         return 0
 
     @classmethod
@@ -162,7 +172,8 @@ class Set(Marker[T], SchemaConvertible):
 
         first = sets[0]
         element_cls = first.dtype
-        assert element_cls is not None
+        if element_cls is None:
+            raise TypeError("Cannot concatenate Sets with unspecified element type.")
 
         batches = [s.to_arrow() for s in sets]
         table = pa.Table.from_batches(batches)
@@ -189,7 +200,7 @@ class Set(Marker[T], SchemaConvertible):
     def convert_to_entry(self) -> Entry:
         if self.dtype is None:
             raise TypeError("Cannot convert unsubscripted Set to schema entry.")
-        return _SchemaSetEntry(
+        return SchemaSetEntry(
             schema=self.schema(),
             capacity=self.capacity,
         )
@@ -240,10 +251,8 @@ class Set(Marker[T], SchemaConvertible):
                 raise ValueError(f"Field '{key}' not found in Set schema.")
 
             entry = fields[key]
-            if isinstance(entry, _ArraySetEntry):
-                self._storage.write_static_array(key, entry, value)
-            elif isinstance(entry, _RaggedArraySetEntry):
-                self._storage.write_ragged_array(key, entry, value)
+            if isinstance(entry, ArrayEntryBase):
+                self._storage.write(key, entry, value)
             else:
                 raise NotImplementedError(
                     f"Writing to Set field '{key}' with schema entry type '{type(entry).__name__}' is not supported yet."
@@ -255,18 +264,14 @@ class Set(Marker[T], SchemaConvertible):
 
             subview_struct = self[key]
             for field_path, entry in value.schema().tree_iter():
-                target_entry = _lookup_entry(self.schema(), field_path)
-                if target_entry is not None and not target_entry.is_static:
-                    field_data = value._storage.read_static_array(field_path, entry)
-                    subview_struct._storage.write_ragged_array(field_path, target_entry, field_data)
-                else:
-                    field_data = value._storage.read_static_array(field_path, entry)
-                    subview_struct._storage.write_static_array(field_path, entry, field_data)
+                target_entry = _lookup_entry(self.schema(), field_path) or entry
+                field_data = value._storage.read(field_path, entry)
+                subview_struct._storage.write(field_path, target_entry, field_data)
         else:
             raise TypeError(f"Invalid Set key type '{type(key).__name__}'. Expected str or int.")
 
     @overload
-    def __getitem__(self, key: str) -> Any: ...
+    def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
 
     @overload
     def __getitem__(self, key: slice) -> Self: ...
@@ -277,7 +282,9 @@ class Set(Marker[T], SchemaConvertible):
     @overload
     def __getitem__(self, key: Tuple[slice, str]) -> Any: ...
 
-    def __getitem__(self, key: Union[str, slice, int, Tuple[slice, str]]) -> Union[Any, Self, T]:
+    def __getitem__(
+        self, key: Union[str, slice, int, Tuple[slice, str]]
+    ) -> Union[NDArray, RaggedArrayView, Self, T, Any]:
         # 2D Slicing: set[slice, "col"]
         if isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], slice) and isinstance(key[1], str):
             return self[key[0]][key[1]]
@@ -289,12 +296,11 @@ class Set(Marker[T], SchemaConvertible):
 
             entry = fields[key]
 
-            if isinstance(entry, _ArraySetEntry):
-                return self._storage.read_static_array(key, entry)
-            elif isinstance(entry, _RaggedArraySetEntry):
-                return self._storage.read_ragged_array(key, entry)
-            elif isinstance(entry, _SchemaEntry):
-                assert entry.schema.dtype is not None
+            if isinstance(entry, ArrayEntryBase):
+                return self._storage.read(key, entry)
+            elif isinstance(entry, SchemaEntry):
+                if entry.schema.dtype is None:
+                    raise TypeError("SchemaEntry has no dtype associated.")
                 new_path = (*self._storage.path, key)
                 sliced_view = ArrayStorageView(
                     entry.schema,
@@ -306,10 +312,15 @@ class Set(Marker[T], SchemaConvertible):
                     capacity=self.capacity,
                     _storage_view=sliced_view,
                 )
+            raise NotImplementedError(
+                f"Reading Set field '{key}' with schema entry type '{type(entry).__name__}' is not supported yet."
+            )
 
         elif isinstance(key, slice):
-            assert self.dtype is not None
-            assert self.capacity is not None
+            if self.dtype is None:
+                raise TypeError("Cannot slice a Set with unspecialized element type.")
+            if self.capacity is None:
+                raise ValueError("Cannot slice a Set with unknown capacity.")
 
             start, stop = self._normalize_slice(key)
             new_size = stop - start
@@ -324,7 +335,8 @@ class Set(Marker[T], SchemaConvertible):
             return type(self)(capacity=new_size, _storage_view=subview)
 
         elif isinstance(key, int):
-            assert isinstance(self.dtype, type) and issubclass(self.dtype, Struct)
+            if not (isinstance(self.dtype, type) and issubclass(self.dtype, Struct)):
+                raise TypeError(f"Element type must be a Struct subclass, got '{self.dtype}'.")
 
             new_offset = self._storage.compute_index_offset(key)
             subview = ArrayStorageView(

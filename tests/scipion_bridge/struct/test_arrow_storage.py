@@ -3,7 +3,16 @@ import pytest
 import pyarrow as pa
 
 import scipion_bridge as B
-from scipion_bridge.core.struct import RaggedArrayView
+from scipion_bridge.core.struct import (
+    RaggedArrayView,
+    ArrayEntry,
+    ArraySetEntry,
+    RaggedArraySetEntry,
+    SchemaEntry,
+    SchemaSetEntry,
+    ArrayStorage,
+    Schema,
+)
 from scipion_bridge.core.struct.utils.dask_serialization import serialize_set, deserialize_set
 
 
@@ -89,10 +98,12 @@ def test_arrow_ragged_array_view():
     assert np.array_equal(latent_view[1], np.array([3.0, 4.0, 5.0], dtype=np.float32))
     assert np.array_equal(latent_view[2], np.array([6.0], dtype=np.float32))
 
-    # Test list conversion
+    # Test list conversion and repr
     as_list = latent_view.to_list()
     assert len(as_list) == 3
     assert all(isinstance(arr, np.ndarray) for arr in as_list)
+    assert "RaggedArrayView" in repr(latent_view)
+    assert "shapes=" in repr(latent_view)
 
 
 def test_arrow_2d_slicing():
@@ -165,3 +176,34 @@ def test_dask_ipc_roundtrip():
     assert len(recovered[0].metadata.latent) == 15
     assert np.allclose(recovered[0].metadata.latent, 7.7)
 
+
+def test_unified_storage_read_write_and_schema_dataclasses():
+    # Verify dataclass behaviour
+    entry = ArrayEntry(dtype=np.dtype("float32"), shape=(10, 10))
+    assert entry.is_static
+    assert repr(entry).startswith("ArrayEntry(")
+
+    set_entry = entry.to_set_entry(capacity=5)
+    assert isinstance(set_entry, ArraySetEntry)
+    assert set_entry.capacity == 5
+
+    ragged = RaggedArraySetEntry(dtype=np.dtype("int32"), shape=(None,), capacity=4)
+    assert not ragged.is_static
+
+    # Verify unified read/write on ArrayStorage
+    schema = Schema(dtype=None, fields={"data": set_entry, "ragged": ragged})
+    storage = ArrayStorage(schema=schema, capacity=5)
+
+    # Test static write and read
+    arr_data = np.ones((5, 10, 10), dtype=np.float32)
+    storage.write("data", set_entry, arr_data)
+    read_data = storage.read("data", set_entry)
+    assert np.array_equal(read_data, arr_data)
+
+    # Test ragged write and read
+    ragged_items = [np.array([1, 2], dtype=np.int32), np.array([3], dtype=np.int32)]
+    storage.write("ragged", ragged, ragged_items)
+    ragged_view = storage.read("ragged", ragged)
+    assert isinstance(ragged_view, RaggedArrayView)
+    assert np.array_equal(ragged_view[0], np.array([1, 2], dtype=np.int32))
+    assert np.array_equal(ragged_view[1], np.array([3], dtype=np.int32))
