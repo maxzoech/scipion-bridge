@@ -543,4 +543,4 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
     
-    test_basic_ragged_set_assign()
+    test_basic_set_storage()

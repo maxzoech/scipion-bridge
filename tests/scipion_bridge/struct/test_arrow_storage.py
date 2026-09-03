@@ -207,3 +207,58 @@ def test_unified_storage_read_write_and_schema_dataclasses():
     assert isinstance(ragged_view, RaggedArrayView)
     assert np.array_equal(ragged_view[0], np.array([1, 2], dtype=np.int32))
     assert np.array_equal(ragged_view[1], np.array([3], dtype=np.int32))
+
+
+def test_polymorphic_storage_engine_lifecycle_and_views():
+    from scipion_bridge.core.struct.storage import (
+        _StagingEngine,
+        _ArrowEngine,
+        ArrayStorageView,
+    )
+
+    class Item(B.Struct):
+        pixels = B.Array[float](shape=(16, 16))
+        tag: int
+
+    set_schema = B.Set[Item].schema()
+
+    # 1. Staging mode initially
+    storage = ArrayStorage(schema=set_schema, capacity=4)
+    assert not storage.is_frozen
+    assert isinstance(storage._engine, _StagingEngine)
+    assert storage.capacity == 4
+
+    # Write initial data
+    noise = np.random.randn(4, 16, 16).astype(np.float32)
+    storage.write("pixels", set_schema.fields["pixels"], noise)
+
+    # 2. Create an ArrayStorageView BEFORE freezing
+    view = ArrayStorageView(schema=set_schema, parent=storage, path=(), offset=(1,))
+    view_pixels_before = view.read("pixels", set_schema.fields["pixels"])
+    assert np.allclose(view_pixels_before, noise[1])
+
+    # 3. Freeze storage into an Arrow RecordBatch
+    batch = storage.to_record_batch()
+    assert isinstance(batch, pa.RecordBatch)
+    assert batch.num_rows == 4
+    assert storage.is_frozen
+    assert isinstance(storage._engine, _ArrowEngine)
+
+    # 4. Verify existing ArrayStorageView remains fully valid and readable after freeze
+    view_pixels_after = view.read("pixels", set_schema.fields["pixels"])
+    assert np.allclose(view_pixels_after, noise[1])
+
+    # 5. Verify mutation is strictly rejected on frozen engine
+    with pytest.raises(RuntimeError, match="Cannot mutate a frozen Set"):
+        storage.write("pixels", set_schema.fields["pixels"], noise)
+
+    with pytest.raises(RuntimeError, match="Cannot mutate a frozen Set"):
+        view.write("pixels", set_schema.fields["pixels"], noise[0])
+
+    # 6. Direct ingestion via from_record_batch starts immediately as _ArrowEngine
+    direct_storage = ArrayStorage.from_record_batch(batch, schema=set_schema)
+    assert direct_storage.is_frozen
+    assert isinstance(direct_storage._engine, _ArrowEngine)
+    assert direct_storage.capacity == 4
+    assert np.allclose(direct_storage.read("pixels", set_schema.fields["pixels"]), noise)
+

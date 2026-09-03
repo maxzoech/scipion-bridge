@@ -130,46 +130,62 @@ class _BaseStorage(abc.ABC):
         ...
 
     @abc.abstractmethod
+    def to_record_batch(self) -> pa.RecordBatch:
+        """Freeze and compile the storage into an immutable Arrow RecordBatch."""
+        ...
+
+    @abc.abstractmethod
     def __contains__(self, key: str) -> bool:
         ...
 
 
-class ArrayStorage(_BaseStorage):
-    """Unified Arrow-backed storage engine for Struct and Set containers."""
+class _StorageEngine(abc.ABC):
+    """Abstract interface for polymorphic storage engines."""
 
-    def __init__(
-        self,
-        schema: Schema,
-        capacity: Optional[int] = None,
-        record_batch: Optional[pa.RecordBatch] = None,
-    ) -> None:
-        super().__init__(schema=schema, parent=None, path=(), offset=None)
+    @abc.abstractmethod
+    def read(self, key: str, entry: Entry, offset: Offset = None) -> Any:
+        ...
+
+    @abc.abstractmethod
+    def write(self, key: str, entry: Entry, data: Any, offset: Offset = None) -> None:
+        ...
+
+    @abc.abstractmethod
+    def to_record_batch(self) -> pa.RecordBatch:
+        ...
+
+    @abc.abstractmethod
+    def __contains__(self, key: str) -> bool:
+        ...
+
+    @property
+    @abc.abstractmethod
+    def capacity(self) -> Optional[int]:
+        ...
+
+    @property
+    @abc.abstractmethod
+    def is_frozen(self) -> bool:
+        ...
+
+
+class _StagingEngine(_StorageEngine):
+    """Mutable staging engine backed by in-memory NumPy dictionaries."""
+
+    def __init__(self, schema: Schema, capacity: Optional[int] = None) -> None:
         self._schema = schema
-
         self._capacity = capacity
-        if record_batch is not None:
-            self._capacity = len(record_batch)
-
-        self._frozen_batch: Optional[pa.RecordBatch] = record_batch
 
         self._static_staging: Dict[str, np.ndarray] = {}
         self._ragged_staging: Dict[str, List[Optional[np.ndarray]]] = {}
 
-
     @property
     def capacity(self) -> Optional[int]:
-        if self._frozen_batch is not None:
-            return len(self._frozen_batch)
-        
         return self._capacity
 
     @property
     def is_frozen(self) -> bool:
-        return self._frozen_batch is not None
-
-    def _check_not_frozen(self) -> None:
-        if self._frozen_batch is not None:
-            raise RuntimeError("Cannot mutate a frozen Set.")
+        return False
 
     def write(
         self,
@@ -178,18 +194,17 @@ class ArrayStorage(_BaseStorage):
         data: Any,
         offset: Offset = None,
     ) -> None:
-        """Write data to static or ragged staging buffers based on the entry type."""
-        self._check_not_frozen()
         schema_entry = _lookup_entry(self._schema, key) or entry
 
-        if isinstance(schema_entry, RaggedArraySetEntry):
-            self._write_ragged(key, schema_entry, data, offset=offset)
-        elif isinstance(schema_entry, (ArrayEntry, ArraySetEntry)):
-            self._write_static(key, schema_entry, data, offset=offset)
-        else:
-            raise TypeError(
-                f"Unsupported schema entry '{type(entry).__name__}' for write to key '{key}'."
-            )
+        match schema_entry:
+            case RaggedArraySetEntry():
+                self._write_ragged(key, schema_entry, data, offset=offset)
+            case ArrayEntry() | ArraySetEntry():
+                self._write_static(key, schema_entry, data, offset=offset)
+            case _:
+                raise TypeError(
+                    f"Unsupported schema entry '{type(entry).__name__}' for write to key '{key}'."
+                )
 
     def _write_static(
         self,
@@ -207,10 +222,12 @@ class ArrayStorage(_BaseStorage):
         arr = arr.astype(entry.dtype, copy=False)
 
         if offset:
-            if key not in self._static_staging:
-                _ = self._read_static(key, entry)
-            self._static_staging[key][offset] = arr
-            return
+            raise NotImplementedError
+            # if key not in self._static_staging:
+            #     _ = self._read_static(key, entry)
+
+            # self._static_staging[key][offset] = arr
+            # return
 
         # Full column / root write validation
         if isinstance(entry, ArraySetEntry):
@@ -283,7 +300,6 @@ class ArrayStorage(_BaseStorage):
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
-        """Read data from frozen Arrow batch or mutable staging buffers."""
         schema_entry = _lookup_entry(self._schema, key) or entry
 
         if isinstance(schema_entry, RaggedArraySetEntry):
@@ -295,36 +311,58 @@ class ArrayStorage(_BaseStorage):
                 f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
             )
 
+    def _prepare_entry(self, key: str):
+        if key in self._static_staging:
+            return
+
+        schema_entry = _lookup_entry(self._schema, key)
+        assert isinstance(schema_entry, (ArrayEntry, ArraySetEntry))
+
+        if not schema_entry.is_static and isinstance(schema_entry, ArrayEntry):
+            raise AttributeError(
+                f"Field '{key}' is dynamic and has not been initialized."
+            )
+
     def _read_static(
         self,
         key: str,
         entry: Union[ArrayEntry, ArraySetEntry],
         offset: Offset = None,
     ) -> ArrayLike:
-        if self._frozen_batch is not None:
-            col = _get_nested_col(self._frozen_batch, key)
-            if hasattr(col, "to_numpy_ndarray"):
-                arr = col.to_numpy_ndarray()
-            else:
-                arr = col.to_numpy()
-        else:
-            if key not in self._static_staging:
-                schema_entry = _lookup_entry(self._schema, key) or entry
-                if not schema_entry.is_static and isinstance(schema_entry, ArrayEntry):
-                    raise AttributeError(
-                        f"Field '{key}' is dynamic and has not been initialized."
-                    )
-                entry_shape = tuple(dim for dim in schema_entry.shape if dim is not None)
-                if self._capacity is not None and isinstance(schema_entry, ArraySetEntry):
-                    shape = (self._capacity, *entry_shape)
-                else:
-                    shape = entry_shape
-                self._static_staging[key] = np.zeros(shape, dtype=schema_entry.dtype)
-            arr = self._static_staging[key]
 
-        if offset:
-            return arr[offset]
-        return arr
+        if isinstance(entry, ArraySetEntry):
+            raise NotImplementedError
+        
+        if key not in self._static_staging:
+            if not entry.is_static and isinstance(entry, ArrayEntry):
+                raise AttributeError(
+                    f"Field '{key}' is dynamic and has not been initialized."
+                )
+
+            entry_shape = tuple(dim for dim in entry.shape if dim is not None)
+            assert len(entry_shape) == len(entry.shape), "Some dimensions in entry.shape were None"
+
+            self._static_staging[key] = np.zeros(entry_shape, dtype=entry.dtype)
+        
+        array = self._static_staging[key]
+
+        offset = offset or tuple()
+        return array[offset]
+        
+        # if key not in self._static_staging:
+        #     schema_entry = _lookup_entry(self._schema, key) or entry
+        
+        #     entry_shape = tuple(dim for dim in schema_entry.shape if dim is not None)
+        #     if self._capacity is not None and isinstance(schema_entry, ArraySetEntry):
+        #         shape = (self._capacity, *entry_shape)
+        #     else:
+        #         shape = entry_shape
+        #     self._static_staging[key] = np.zeros(shape, dtype=schema_entry.dtype)
+        # arr = self._static_staging[key]
+
+        # if offset:
+        #     return arr[offset]
+        # return arr
 
     def _read_ragged(
         self,
@@ -335,40 +373,23 @@ class ArrayStorage(_BaseStorage):
         if offset is not None:
             idx = offset[0]
             if isinstance(idx, int):
-                if self._frozen_batch is not None:
-                    col = _get_nested_col(self._frozen_batch, key)
-                    if not isinstance(col, pa.ListArray):
-                        raise TypeError(f"Expected ListArray for ragged column '{key}', got {type(col).__name__}")
-                    scalar = col[idx]
-                    return scalar.values.to_numpy() if scalar.is_valid else np.empty(0, dtype=entry.dtype)
-                else:
-                    chunks = self._ragged_staging.get(key, [])
-                    if idx < len(chunks) and chunks[idx] is not None:
-                        return chunks[idx]
-                    return np.empty(0, dtype=entry.dtype)
+                chunks = self._ragged_staging.get(key, [])
+                if idx < len(chunks) and chunks[idx] is not None:
+                    return chunks[idx]
+                return np.empty(0, dtype=entry.dtype)
 
-        # Whole column read: return RaggedArrayView
-        if self._frozen_batch is not None:
-            col = _get_nested_col(self._frozen_batch, key)
-        else:
-            chunks = self._ragged_staging.get(key, [])
-            if self._capacity is not None and len(chunks) < self._capacity:
-                chunks = list(chunks) + [None] * (self._capacity - len(chunks))
-            col = build_ragged_array(chunks, dtype=entry.dtype)
+        chunks = self._ragged_staging.get(key, [])
+        if self._capacity is not None and len(chunks) < self._capacity:
+            chunks = list(chunks) + [None] * (self._capacity - len(chunks))
+        col = build_ragged_array(chunks, dtype=entry.dtype)
 
         if not isinstance(col, pa.ListArray):
             raise TypeError(f"Expected ListArray for ragged field '{key}', got {type(col).__name__}")
         return RaggedArrayView(col, dtype=entry.dtype)
 
     def to_record_batch(self) -> pa.RecordBatch:
-        """Freeze and compile the storage into an immutable Arrow RecordBatch."""
-        if self._frozen_batch is not None:
-            return self._frozen_batch
-
         columns, names = self._build_columns(self._schema, prefix="")
-        batch = pa.RecordBatch.from_arrays(columns, names)
-        self._frozen_batch = batch
-        return self._frozen_batch
+        return pa.RecordBatch.from_arrays(columns, names)
 
     def _build_columns(self, schema: Schema, prefix: str) -> Tuple[List[pa.Array], List[str]]:
         columns: List[pa.Array] = []
@@ -412,19 +433,138 @@ class ArrayStorage(_BaseStorage):
 
         return columns, names
 
+    def __contains__(self, key: str) -> bool:
+        return key in self._static_staging or key in self._ragged_staging
+
+
+class _ArrowEngine(_StorageEngine):
+    """Immutable zero-copy storage engine wrapping an Apache Arrow RecordBatch."""
+
+    def __init__(self, schema: Schema, batch: pa.RecordBatch) -> None:
+        self._schema = schema
+        self._batch = batch
+
+    @property
+    def capacity(self) -> Optional[int]:
+        return len(self._batch)
+
+    @property
+    def is_frozen(self) -> bool:
+        return True
+
+    def write(
+        self,
+        key: str,
+        entry: Entry,
+        data: Any,
+        offset: Offset = None,
+    ) -> None:
+        raise RuntimeError("Cannot mutate a frozen Set.")
+
+    def read(
+        self,
+        key: str,
+        entry: Entry,
+        offset: Offset = None,
+    ) -> Any:
+        schema_entry = _lookup_entry(self._schema, key) or entry
+
+        if isinstance(schema_entry, RaggedArraySetEntry):
+            col = _get_nested_col(self._batch, key)
+            if not isinstance(col, pa.ListArray):
+                raise TypeError(f"Expected ListArray for ragged column '{key}', got {type(col).__name__}")
+            if offset is not None:
+                idx = offset[0]
+                if isinstance(idx, int):
+                    scalar = col[idx]
+                    return scalar.values.to_numpy() if scalar.is_valid else np.empty(0, dtype=schema_entry.dtype)
+            return RaggedArrayView(col, dtype=schema_entry.dtype)
+
+        elif isinstance(schema_entry, (ArrayEntry, ArraySetEntry)):        
+            col = _get_nested_col(self._batch, key)
+            if hasattr(col, "to_numpy_ndarray"):
+                arr = col.to_numpy_ndarray()
+            else:
+                arr = col.to_numpy()
+            if offset:
+                return arr[offset]
+            return arr
+
+        else:
+            raise TypeError(
+                f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
+            )
+
+    def to_record_batch(self) -> pa.RecordBatch:
+        return self._batch
+
+    def __contains__(self, key: str) -> bool:
+        try:
+            _get_nested_col(self._batch, key)
+            return True
+        except (KeyError, IndexError):
+            return False
+
+
+class ArrayStorage(_BaseStorage):
+    """Unified Arrow-backed storage engine delegating to polymorphic _StorageEngine implementations."""
+
+    def __init__(
+        self,
+        schema: Schema,
+        capacity: Optional[int] = None,
+        record_batch: Optional[pa.RecordBatch] = None,
+    ) -> None:
+        super().__init__(schema=schema, parent=None, path=(), offset=None)
+        self._schema = schema
+
+        if record_batch is not None:
+            self._engine: _StorageEngine = _ArrowEngine(schema, record_batch)
+        else:
+            self._engine = _StagingEngine(schema, capacity=capacity)
+
+    @property
+    def capacity(self) -> Optional[int]:
+        return self._engine.capacity
+
+    @property
+    def is_frozen(self) -> bool:
+        return self._engine.is_frozen
+
+    def write(
+        self,
+        key: str,
+        entry: Entry,
+        data: Any,
+        offset: Offset = None,
+    ) -> None:
+        """Write data via the active storage engine."""
+        self._engine.write(key, entry, data, offset=offset)
+
+    def read(
+        self,
+        key: str,
+        entry: Entry,
+        offset: Offset = None,
+    ) -> Any:
+        """Read data via the active storage engine."""
+        return self._engine.read(key, entry, offset=offset)
+
+    def to_record_batch(self) -> pa.RecordBatch:
+        """Freeze and compile the storage into an immutable Arrow RecordBatch."""
+        batch = self._engine.to_record_batch()
+        if not self._engine.is_frozen:
+            # Transition to immutable Arrow engine and drop staging buffers
+            self._engine = _ArrowEngine(self._schema, batch)
+        return batch
+
     @classmethod
     def from_record_batch(cls, batch: pa.RecordBatch, schema: Schema) -> "ArrayStorage":
         """Construct an ArrayStorage directly wrapping a frozen Arrow RecordBatch."""
         return cls(schema=schema, capacity=len(batch), record_batch=batch)
 
     def __contains__(self, key: str) -> bool:
-        if self._frozen_batch is not None:
-            try:
-                _get_nested_col(self._frozen_batch, key)
-                return True
-            except (KeyError, IndexError):
-                return False
-        return key in self._static_staging or key in self._ragged_staging
+        return key in self._engine
 
 
 class ArrayStorageView(_BaseStorage):
