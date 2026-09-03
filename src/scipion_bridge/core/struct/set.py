@@ -123,7 +123,8 @@ class Set(Marker[T], SchemaConvertible):
             for idx, item in enumerate(items_to_populate):
                 self[idx] = item
 
-    def __set_name__(self, owner: Type[Struct], name: str) -> None:
+    def __set_name__(self, owner: type, name: str):
+        super().__set_name__(owner, name)
         del self._storage
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
@@ -134,6 +135,11 @@ class Set(Marker[T], SchemaConvertible):
                 element_cls=self.dtype,
                 capacity_spec=self._capacity,
                 owner_cls=owner,
+            )
+        if isinstance(instance, Struct):
+            name_str = f" '{self.name}'" if self.name else ""
+            raise NotImplementedError(
+                f"Accessing nested Set{name_str} on a Struct instance is not supported yet."
             )
         return self
 

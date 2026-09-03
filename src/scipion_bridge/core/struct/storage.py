@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+from functools import reduce
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, TypeAlias
 
 import numpy as np
@@ -145,27 +146,21 @@ class ArrayStorage(_BaseStorage):
         super().__init__(schema=schema, parent=None, path=(), offset=None)
         self._schema = schema
 
-        if capacity is not None:
-            self._capacity = capacity
-        elif record_batch is not None:
+        self._capacity = capacity
+        if record_batch is not None:
             self._capacity = len(record_batch)
-        else:
-            self._capacity = self._infer_capacity(schema)
 
         self._frozen_batch: Optional[pa.RecordBatch] = record_batch
+
         self._static_staging: Dict[str, np.ndarray] = {}
         self._ragged_staging: Dict[str, List[Optional[np.ndarray]]] = {}
 
-    def _infer_capacity(self, schema: Schema) -> Optional[int]:
-        for _, entry in schema.tree_iter():
-            if hasattr(entry, "capacity") and entry.capacity is not None:
-                return entry.capacity
-        return None
 
     @property
     def capacity(self) -> Optional[int]:
         if self._frozen_batch is not None:
             return len(self._frozen_batch)
+        
         return self._capacity
 
     @property
