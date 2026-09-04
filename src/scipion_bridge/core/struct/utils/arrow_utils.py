@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, List, Optional, Sequence, Tuple, Union, overload
 import numpy as np
 from numpy.typing import NDArray
 import pyarrow as pa
@@ -19,6 +19,12 @@ class RaggedArrayView(Sequence[NDArray]):
 
     def __len__(self) -> int:
         return len(self._list_array)
+
+    @overload
+    def __getitem__(self, item: int) -> NDArray: ...
+
+    @overload
+    def __getitem__(self, item: slice) -> "RaggedArrayView": ...
 
     def __getitem__(self, item: Union[int, slice]) -> Union[NDArray, "RaggedArrayView"]:
         if isinstance(item, slice):

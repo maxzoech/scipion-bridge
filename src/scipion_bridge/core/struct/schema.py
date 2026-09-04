@@ -34,7 +34,7 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     def print_schema(cls) -> None:
         cls.schema().print_tree()
 
-    def __set_name__(self, name: str, owner: type) -> None:
+    def __set_name__(self, owner: type, name: str) -> None:
         pass
 
 

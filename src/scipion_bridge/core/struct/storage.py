@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 from functools import reduce
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, TypeAlias
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, TypeAlias, cast
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -36,13 +36,21 @@ Offset: TypeAlias = Optional[Tuple[IndexType, ...]]
 def _lookup_entry(schema: Schema, path: KeyPath) -> Optional[ArrayEntryBase]:
     """Look up a leaf ArrayEntryBase in a schema by KeyPath tuple."""
     match path:
+        case ("root", *tail):
+            return _lookup_in_schema(schema, tuple(tail))
+        case _:
+            return _lookup_in_schema(schema, path)
+
+
+def _lookup_in_schema(schema: Schema, path: KeyPath) -> Optional[ArrayEntryBase]:
+    match path:
         case (head,):
             entry = schema.fields.get(head)
             return entry if isinstance(entry, ArrayEntryBase) else None
         case (head, *tail):
             entry = schema.fields.get(head)
             if entry is not None and entry.children is not None:
-                return _lookup_entry(entry.children, tuple(tail))
+                return _lookup_in_schema(entry.children, tuple(tail))
             return None
         case _:
             return None
@@ -68,7 +76,7 @@ class _BaseStorage(abc.ABC):
         self,
         schema: Schema,
         parent: Optional["_BaseStorage"] = None,
-        path: KeyPath = (),
+        path: KeyPath = ("root",),
         offset: Offset = None,
     ) -> None:
         self._schema = schema
@@ -80,40 +88,57 @@ class _BaseStorage(abc.ABC):
     def is_view(self) -> bool:
         return self.parent is not None
 
-    def compute_offset(self, item: IndexType) -> Tuple[IndexType, ...]:
-        """Compute the offset tuple when indexing or slicing along the active batch dimension."""
+    @property
+    def root_storage(self) -> "ArrayStorage":
+        curr: _BaseStorage = self
+        while curr.parent is not None:
+            curr = curr.parent
+        return cast("ArrayStorage", curr)
 
-        match self.offset, item:
-            case (*prefix, slice() as base), slice() as current:
-                base_start = base.start or 0
-
-                start = base_start + (current.start or 0)
-                stop = base_start + current.stop if current.stop is not None else None
-
-                return (*prefix, slice(start, stop))
-
-            case (*prefix, slice() as base), int(idx):
-                return (*prefix, (base.start or 0) + idx)
-
-            case tuple() as prefix, item:
-                return (*prefix, item)
-
-            case None, _:
-                return (item,)
-            
-            case _:
-                raise NotImplementedError
+    def qualify_path(self, key: Union[str, KeyPath]) -> KeyPath:
+        if isinstance(key, str):
+            return (*self.path, key)
+        return (*self.path, *key)
 
     def compute_slice_offset(self, start: int, stop: int) -> Tuple[IndexType, ...]:
-        return self.compute_offset(slice(start, stop))
+        """Compute the offset tuple when slicing a range along the active batch dimension."""
+        if not self.offset:
+            return (slice(start, stop),)
+
+        *prefix, last = self.offset
+        match last:
+            case slice() as base:
+                base_start = base.start or 0
+                new_start = base_start + start
+                new_stop = base_start + stop
+                return (*prefix, slice(new_start, new_stop))
+            case _:
+                raise ValueError(
+                    f"Cannot slice dimension '{last}' that is already an indexed integer."
+                )
 
     def compute_index_offset(self, index: int) -> Tuple[IndexType, ...]:
-        return self.compute_offset(index)
+        """Compute the offset tuple when selecting an element index along the active batch dimension."""
+        if not self.offset:
+            return (index,)
+
+        *prefix, last = self.offset
+        match last:
+            case slice() as base:
+                base_start = base.start or 0
+                return (*prefix, base_start + index)
+            case _:
+                raise ValueError(
+                    f"Cannot index dimension '{last}' that is already an indexed integer."
+                )
+
+    def descend_set_offset(self) -> Tuple[IndexType, ...]:
+        """Compute the offset tuple when descending into a child Set dimension."""
+        return (*(self.offset or ()), slice(None, None, None))
 
     def schema(self) -> Schema:
         return self._schema
 
-    @abc.abstractmethod
     def read(
         self,
         key: Union[str, KeyPath],
@@ -121,9 +146,10 @@ class _BaseStorage(abc.ABC):
         offset: Offset = None,
     ) -> Any:
         """Read data for the specified schema entry at the given offset."""
-        ...
+        full_path = self.qualify_path(key)
+        effective_offset = self.offset if offset is None else offset
+        return self.root_storage._engine.read(full_path, entry, offset=effective_offset)
 
-    @abc.abstractmethod
     def write(
         self,
         key: Union[str, KeyPath],
@@ -132,16 +158,18 @@ class _BaseStorage(abc.ABC):
         offset: Offset = None,
     ) -> None:
         """Write data for the specified schema entry at the given offset."""
-        ...
+        full_path = self.qualify_path(key)
+        effective_offset = self.offset if offset is None else offset
+        self.root_storage._engine.write(full_path, entry, data, offset=effective_offset)
 
     @abc.abstractmethod
     def to_record_batch(self) -> pa.RecordBatch:
         """Freeze and compile the storage into an immutable Arrow RecordBatch."""
         ...
 
-    @abc.abstractmethod
     def __contains__(self, key: Union[str, KeyPath]) -> bool:
-        ...
+        full_path = self.qualify_path(key)
+        return full_path in self.root_storage._engine
 
 
 class _StorageEngine(abc.ABC):
@@ -192,6 +220,19 @@ class _StagingEngine(_StorageEngine):
     def is_frozen(self) -> bool:
         return False
 
+    def _resolve_key(self, key: KeyPath) -> KeyPath:
+        if key in self._static_staging or key in self._ragged_staging:
+            return key
+        if key and key[0] != "root":
+            root_key = ("root", *key)
+            if root_key in self._static_staging or root_key in self._ragged_staging:
+                return root_key
+        elif key and key[0] == "root":
+            tail_key = key[1:]
+            if tail_key in self._static_staging or tail_key in self._ragged_staging:
+                return tail_key
+        return key
+
     def write(
         self,
         key: KeyPath,
@@ -199,6 +240,7 @@ class _StagingEngine(_StorageEngine):
         data: Any,
         offset: Offset = None,
     ) -> None:
+        key = self._resolve_key(key)
         schema_entry = _lookup_entry(self._schema, key) or entry
 
         match schema_entry:
@@ -218,6 +260,7 @@ class _StagingEngine(_StorageEngine):
         data: ArrayLike,
         offset: Offset = None,
     ) -> None:
+        key = self._resolve_key(key)
         arr = np.asanyarray(data)
         if not np.can_cast(arr.dtype, entry.dtype, casting="same_kind"):
             raise TypeError(
@@ -226,13 +269,51 @@ class _StagingEngine(_StorageEngine):
 
         arr = arr.astype(entry.dtype, copy=False)
 
-        if offset:
-            raise NotImplementedError
-            # if key not in self._static_staging:
-            #     _ = self._read_static(key, entry)
+        is_sub_offset = (
+            offset is not None
+            and offset != ()
+            and any(
+                isinstance(idx, int)
+                or (
+                    isinstance(idx, slice)
+                    and (idx.start is not None or idx.stop is not None or idx.step is not None)
+                )
+                for idx in offset
+            )
+        )
 
-            # self._static_staging[key][offset] = arr
-            # return
+        if is_sub_offset:
+            assert offset is not None
+            int_dims = tuple(d for d in entry.shape if d is not None)
+            if key not in self._static_staging:
+                if isinstance(entry, ArraySetEntry):
+                    idx_req = 1
+                    if offset and isinstance(offset[0], int):
+                        idx_req = offset[0] + 1
+                    elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
+                        idx_req = offset[0].stop
+
+                    cap = entry.capacity or self.capacity or idx_req
+                    cap = max(cap, idx_req)
+                    self._static_staging[key] = np.zeros((cap, *int_dims), dtype=entry.dtype)
+                else:
+                    self._static_staging[key] = np.zeros(int_dims, dtype=entry.dtype)
+            else:
+                if isinstance(entry, ArraySetEntry):
+                    current_buf = self._static_staging[key]
+                    idx_req = 1
+                    if offset and isinstance(offset[0], int):
+                        idx_req = offset[0] + 1
+                    elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
+                        idx_req = offset[0].stop
+                    if idx_req > len(current_buf):
+                        new_cap = max(idx_req, len(current_buf) * 2)
+                        new_buf = np.zeros((new_cap, *int_dims), dtype=entry.dtype)
+                        new_buf[:len(current_buf)] = current_buf
+                        self._static_staging[key] = new_buf
+
+            self._static_staging[key][offset] = arr
+            return
 
         # Full column / root write validation
         if isinstance(entry, ArraySetEntry):
@@ -265,14 +346,17 @@ class _StagingEngine(_StorageEngine):
         self._static_staging[key] = arr
 
     def _write_ragged(
-            self,
-            key: KeyPath,
-            entry: RaggedArraySetEntry,
-            data: Any,
-            offset: Offset = None,
-        ) -> None:
-        
+        self,
+        key: KeyPath,
+        entry: RaggedArraySetEntry,
+        data: Any,
+        offset: Offset = None,
+    ) -> None:
+        key = self._resolve_key(key)
         capacity = self.capacity or 0
+        if not self.capacity and isinstance(data, (list, tuple, RaggedArrayView)):
+            capacity = max(capacity, len(data))
+
         if key not in self._ragged_staging:
             self._ragged_staging[key] = [None] * capacity
 
@@ -289,7 +373,7 @@ class _StagingEngine(_StorageEngine):
                     self._write_ragged(key, entry, item, offset=(i,))
 
             # Recursive case 2: decompose bulk column write into per-element writes
-            case None:
+            case None | ():
                 if not isinstance(data, (list, tuple, RaggedArrayView)):
                     raise ValueError
 
@@ -305,6 +389,7 @@ class _StagingEngine(_StorageEngine):
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
+        key = self._resolve_key(key)
         schema_entry = _lookup_entry(self._schema, key) or entry
 
         if isinstance(schema_entry, RaggedArraySetEntry):
@@ -317,6 +402,7 @@ class _StagingEngine(_StorageEngine):
             )
 
     def _prepare_entry(self, key: KeyPath) -> None:
+        key = self._resolve_key(key)
         if key in self._static_staging:
             return
 
@@ -334,21 +420,20 @@ class _StagingEngine(_StorageEngine):
         entry: Union[ArrayEntry, ArraySetEntry],
         offset: Offset = None,
     ) -> ArrayLike:
-
+        key = self._resolve_key(key)
         if key not in self._static_staging:
-            raise AttributeError()
+            schema_entry = _lookup_entry(self._schema, key)
+            if schema_entry is not None and not schema_entry.is_static and isinstance(schema_entry, ArrayEntry):
+                raise AttributeError(
+                    f"Field '{key}' is dynamic and has not been initialized."
+                )
+            raise AttributeError(f"Field '{key}' has not been initialized.")
 
-        match entry:
-            case ArrayEntry():
-                return self._static_staging[key]
+        arr = self._static_staging[key]
+        if offset is None or offset == ():
+            return arr
 
-            case ArraySetEntry():
-                offset = offset or tuple()
-                return self._static_staging[key][offset]
-    
-            case _:
-                raise NotImplementedError
-
+        return arr[offset]
 
     def _read_ragged(
         self,
@@ -356,23 +441,24 @@ class _StagingEngine(_StorageEngine):
         entry: RaggedArraySetEntry,
         offset: Offset = None,
     ) -> Any:
-
+        key = self._resolve_key(key)
         match offset:
             case (int(index),):
                 return self._ragged_staging[key][index]
 
-            case (slice(),) as sl:
-                sl, = sl
-                length = len(self._ragged_staging[key])
-                items = [self._read_ragged(key, entry, (i,)) for i in range(*sl.indices(length))]
-                return items
-
-            case None:
+            case (slice() as sl,):
                 if key not in self._ragged_staging:
-                    raise AttributeError 
+                    raise AttributeError(f"Field '{key}' has not been initialized.")
+                chunks = self._ragged_staging[key][sl]
+                return RaggedArrayView(build_ragged_array(chunks, entry.dtype), entry.dtype)
 
-                return self._read_ragged(key, entry, offset=(slice(None, None, None),))
-                
+            case None | ():
+                if key not in self._ragged_staging:
+                    raise AttributeError(f"Field '{key}' has not been initialized.")
+
+                chunks = self._ragged_staging[key]
+                return RaggedArrayView(build_ragged_array(chunks, entry.dtype), entry.dtype)
+
             case _:
                 raise NotImplementedError
 
@@ -387,7 +473,8 @@ class _StagingEngine(_StorageEngine):
         raise NotImplementedError
 
     def __contains__(self, key: KeyPath) -> bool:
-        return key in self._static_staging or key in self._ragged_staging
+        resolved = self._resolve_key(key)
+        return resolved in self._static_staging or resolved in self._ragged_staging
 
 
 class _ArrowEngine(_StorageEngine):
@@ -441,8 +528,10 @@ class ArrayStorage(_BaseStorage):
         schema: Schema,
         capacity: Optional[int] = None,
         record_batch: Optional[pa.RecordBatch] = None,
+        path: KeyPath = ("root",),
+        offset: Offset = None,
     ) -> None:
-        super().__init__(schema=schema, parent=None, path=(), offset=None)
+        super().__init__(schema=schema, parent=None, path=path, offset=offset)
         self._schema = schema
 
         if record_batch is not None:
@@ -458,27 +547,6 @@ class ArrayStorage(_BaseStorage):
     def is_frozen(self) -> bool:
         return self._engine.is_frozen
 
-    def write(
-        self,
-        key: Union[str, KeyPath],
-        entry: Entry,
-        data: Any,
-        offset: Offset = None,
-    ) -> None:
-        """Write data via the active storage engine."""
-        path = (key,) if isinstance(key, str) else key
-        self._engine.write(path, entry, data, offset=offset)
-
-    def read(
-        self,
-        key: Union[str, KeyPath],
-        entry: Entry,
-        offset: Offset = None,
-    ) -> Any:
-        """Read data via the active storage engine."""
-        path = (key,) if isinstance(key, str) else key
-        return self._engine.read(path, entry, offset=offset)
-
     def to_record_batch(self) -> pa.RecordBatch:
         """Freeze and compile the storage into an immutable Arrow RecordBatch."""
         batch = self._engine.to_record_batch()
@@ -492,46 +560,17 @@ class ArrayStorage(_BaseStorage):
         """Construct an ArrayStorage directly wrapping a frozen Arrow RecordBatch."""
         return cls(schema=schema, capacity=len(batch), record_batch=batch)
 
-    def __contains__(self, key: Union[str, KeyPath]) -> bool:
-        path = (key,) if isinstance(key, str) else key
-        return path in self._engine
-
 
 class ArrayStorageView(_BaseStorage):
     """Sub-view into a parent storage with qualified path prefix and offset propagation."""
 
-    def qualify_path(self, key: Union[str, KeyPath]) -> KeyPath:
-        if isinstance(key, str):
-            return (*self.path, key)
-        return (*self.path, *key)
-
     def qualify_key(self, key: Any) -> Any:
         return self.qualify_path(key)
-
-    def _resolve(self, key: Union[str, KeyPath], offset: Offset) -> Tuple[KeyPath, Offset]:
-        full_path = self.qualify_path(key)
-        merged = self.offset if offset is None else (*(self.offset or ()), *offset)
-        return full_path, merged
-
-    def read(self, key: Union[str, KeyPath], entry: Entry, offset: Offset = None) -> Any:
-        assert self.parent is not None
-        full_path, effective_offset = self._resolve(key, offset)
-        return self.parent.read(full_path, entry, offset=effective_offset)
-
-    def write(self, key: Union[str, KeyPath], entry: Entry, data: Any, offset: Offset = None) -> None:
-        assert self.parent is not None
-        full_path, effective_offset = self._resolve(key, offset)
-        self.parent.write(full_path, entry, data, offset=effective_offset)
 
     def to_record_batch(self) -> pa.RecordBatch:
         assert self.parent is not None
         parent_batch = self.parent.to_record_batch()
         raise NotImplementedError
-
-    def __contains__(self, key: Union[str, KeyPath]) -> bool:
-        if self.parent is None:
-            return False
-        return self.qualify_path(key) in self.parent
 
 
 # Aliases for backward compatibility

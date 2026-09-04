@@ -115,7 +115,12 @@ class Set(Marker[T], SchemaConvertible):
 
         storage = kwargs.get(
             "_storage_view",
-            ArrayStorage(schema=self.schema(), capacity=cap_val),
+            ArrayStorage(
+                schema=self.schema(),
+                capacity=cap_val,
+                path=("root",),
+                offset=(slice(None, None, None),),
+            ),
         )
         if not isinstance(storage, _BaseStorage):
             raise TypeError(f"Expected _BaseStorage instance, got {type(storage).__name__}")
@@ -139,22 +144,23 @@ class Set(Marker[T], SchemaConvertible):
                 owner_cls=owner,
             )
         if isinstance(instance, Struct):
+            if self.name is None:
+                raise AttributeError("Descriptor name is not set.")
 
             _schema = self.schema()
             assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
-            
+
+            new_path = (*instance._storage.path, self.name)
+            new_offset = instance._storage.descend_set_offset()
             subview = ArrayStorageView(
                 self.schema(),
                 parent=instance._storage.parent or instance._storage,
-                path=(*instance._storage.path, self.name),
-                offset=instance._storage.offset,
+                path=new_path,
+                offset=new_offset,
             )
 
-            return Set[_schema.dtype](_storage_view=subview)
-
-            raise NotImplementedError(
-                f"Accessing nested Set{name_str} on a Struct instance is not supported yet."
-            )
+            elem_cls: Any = _schema.dtype
+            return Set[elem_cls](capacity=self.capacity, _storage_view=subview)
         return self
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -211,7 +217,7 @@ class Set(Marker[T], SchemaConvertible):
         """Construct a Set[T] wrapping an Arrow RecordBatch."""
         set_schema = element_cls.schema().to_set_schema(capacity=len(batch))
         storage = ArrayStorage.from_record_batch(batch, schema=set_schema)
-        return cls[element_cls](capacity=len(batch), _storage_view=storage)
+        return cast(Any, cls)[element_cls](capacity=len(batch), _storage_view=storage)
 
     @property
     def capacity(self) -> Optional[int]:
@@ -343,6 +349,23 @@ class Set(Marker[T], SchemaConvertible):
                 entry = fields[field_name]
                 if isinstance(entry, ArrayEntryBase):
                     return self._storage.read((field_name,), entry)
+                elif isinstance(entry, SchemaSetEntry):
+                    assert entry.schema.dtype is not None
+                    
+                    new_path = (*self._storage.path, field_name)
+                    new_offset = self._storage.descend_set_offset()
+                    sliced_view = ArrayStorageView(
+                        entry.schema,
+                        parent=(self._storage.parent or self._storage),
+                        path=new_path,
+                        offset=new_offset,
+                    )
+                    sub_cls: Any = entry.schema.dtype
+                    return Set[sub_cls](
+                        capacity=entry.capacity,
+                        _storage_view=sliced_view,
+                    )
+                
                 elif isinstance(entry, SchemaEntry):
                     assert entry.schema.dtype is not None
                     
@@ -353,7 +376,7 @@ class Set(Marker[T], SchemaConvertible):
                         path=new_path,
                         offset=self._storage.offset,
                     )
-                    sub_cls: Any = entry.schema.dtype
+                    sub_cls = entry.schema.dtype
                     return Set[sub_cls](
                         capacity=self.capacity,
                         _storage_view=sliced_view,

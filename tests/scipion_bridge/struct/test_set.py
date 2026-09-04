@@ -467,7 +467,41 @@ def test_multidimensional_nested_set_slicing_and_indexing(as_engine):
     assert sliced_movies[2].movie_id == 12
     assert sliced_movies[2].frames[4].frame_id == 4
     assert np.allclose(sliced_movies[2].frames[4].pixels, noise_frames[12, 4])
-    
+
+
+def test_multidimensional_2d_slice_both_axes(as_engine):
+    class Frame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(64, 64))
+        frame_id: int
+
+    class Movie(B.Struct):
+        frames: B.Set[Frame] = B.Set[Frame](capacity=10)
+        movie_id: int
+
+    # 20 movies, each with 10 frames -> total tensor (20, 10, 64, 64)
+    dataset = B.Set[Movie](capacity=20)
+    dataset["movie_id"] = np.arange(20)[..., None]
+
+    # Populate 3D grid of frames (20, 10, 64, 64)
+    frames_buffer = dataset["frames"]
+    noise_frames = np.random.randn(20, 10, 64, 64).astype(np.float32)
+    frames_buffer["pixels"] = noise_frames
+
+    dataset = as_engine(dataset)
+
+    # 1. SLICE DIMENSION 0: Take 5 movies (indices 2 to 7)
+    five_movies = dataset[2:7]
+    assert len(five_movies) == 5
+
+    # 2. SLICE DIMENSION 1: Take 3 frames (indices 1 to 4) from those 5 movies
+    sub_frames = five_movies["frames"][1:4]
+
+    # 3. VERIFY SHAPE: 5 movies x 3 frames x (64, 64) pixels
+    extracted_pixels = sub_frames["pixels"]
+    assert extracted_pixels.shape == (5, 3, 64, 64)
+
+    # 4. VERIFY DATA: Matches exact 2D tensor slice noise_frames[2:7, 1:4]
+    assert np.allclose(extracted_pixels, noise_frames[2:7, 1:4])
 
 
 def test_set_storage_shape_mismatch_raises():
@@ -555,4 +589,4 @@ if __name__ == "__main__":
     container = configure_default_env()
 
     
-    test_multidimensional_nested_set_slicing_and_indexing(as_engine=lambda x: x)
+    test_basic_set_slicing(as_engine=lambda x: x)
