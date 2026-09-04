@@ -262,36 +262,39 @@ class _StagingEngine(_StorageEngine):
         self._static_staging[key] = arr
 
     def _write_ragged(
-        self,
-        key: KeyPath,
-        entry: RaggedArraySetEntry,
-        data: Any,
-        offset: Offset = None,
-    ) -> None:
+            self,
+            key: KeyPath,
+            entry: RaggedArraySetEntry,
+            data: Any,
+            offset: Offset = None,
+        ) -> None:
+        
+        capacity = self.capacity or 0
         if key not in self._ragged_staging:
-            cap = self._capacity or 0
-            self._ragged_staging[key] = [None] * cap
+            self._ragged_staging[key] = [None] * capacity
 
-        if offset is not None:
-            idx = offset[0]
-            if isinstance(idx, int):
-                while len(self._ragged_staging[key]) <= idx:
-                    self._ragged_staging[key].append(None)
-                self._ragged_staging[key][idx] = np.ascontiguousarray(data, dtype=entry.dtype)
-            elif isinstance(idx, slice):
-                base_start = idx.start or 0
-                for i, d in enumerate(data):
-                    target_i = base_start + i
-                    while len(self._ragged_staging[key]) <= target_i:
-                        self._ragged_staging[key].append(None)
-                    self._ragged_staging[key][target_i] = np.ascontiguousarray(d, dtype=entry.dtype)
-        else:
-            if isinstance(data, (list, tuple, np.ndarray, RaggedArrayView)):
-                self._ragged_staging[key] = [
-                    np.ascontiguousarray(x, dtype=entry.dtype) for x in data
-                ]
-            else:
-                self._ragged_staging[key] = [np.ascontiguousarray(data, dtype=entry.dtype)]
+        match offset:
+            case (int(idx),):
+                slots = self._ragged_staging[key]
+                if len(slots) <= idx:
+                    slots.extend([None] * (idx + 1 - len(slots)))
+
+                slots[idx] = np.ascontiguousarray(data, dtype=entry.dtype)
+
+            case (slice() as sl,):
+                for i, item in zip(range(*sl.indices(capacity)), data):
+                    self._write_ragged(key, entry, item, offset=(i,))
+
+            # Recursive case 2: decompose bulk column write into per-element writes
+            case None:
+                if not isinstance(data, (list, tuple, RaggedArrayView)):
+                    raise ValueError
+
+                for i, item in enumerate(data):
+                    self._write_ragged(key, entry, item, offset=(i,))
+
+            case _:
+                raise TypeError(f"Unsupported offset pattern '{offset}' for ragged write.")
 
     def read(
         self,
@@ -328,33 +331,18 @@ class _StagingEngine(_StorageEngine):
         entry: Union[ArrayEntry, ArraySetEntry],
         offset: Offset = None,
     ) -> ArrayLike:
-        
+
+        if key not in self._static_staging:
+            raise AttributeError()
 
         match entry:
             case ArrayEntry():
-                if key not in self._static_staging:
-                    if not entry.is_static:
-                        raise AttributeError(
-                            f"Field '{key}' is dynamic and has not been initialized."
-                        )
-
-                    entry_shape = tuple(dim for dim in entry.shape if dim is not None)
-                    assert len(entry_shape) == len(entry.shape), "Some dimensions in entry.shape were None"
-                    assert offset is None
-
-                    self._static_staging[key] = np.zeros(entry_shape, dtype=entry.dtype)
-
                 return self._static_staging[key]
 
             case ArraySetEntry():
-                assert key in self._static_staging
-                if key not in self._static_staging:
-                    raise AttributeError(
-                        f"Field '{key}' not been initialized."
-                    )
-
+                offset = offset or tuple()
                 return self._static_staging[key][offset]
-                
+    
             case _:
                 raise NotImplementedError
 
@@ -365,7 +353,25 @@ class _StagingEngine(_StorageEngine):
         entry: RaggedArraySetEntry,
         offset: Offset = None,
     ) -> Any:
-        raise NotImplementedError
+
+        match offset:
+            case (int(index),):
+                return self._ragged_staging[key][index]
+
+            case (slice(),) as sl:
+                sl, = sl
+                length = len(self._ragged_staging[key])
+                items = [self._read_ragged(key, entry, (i,)) for i in range(*sl.indices(length))]
+                return items
+
+            case None:
+                if key not in self._ragged_staging:
+                    raise AttributeError 
+
+                return self._read_ragged(key, entry, offset=(slice(None, None, None),))
+                
+            case _:
+                raise NotImplementedError
 
     def to_record_batch(self) -> pa.RecordBatch:
         columns, names = self._build_columns(self._schema, prefix=())
