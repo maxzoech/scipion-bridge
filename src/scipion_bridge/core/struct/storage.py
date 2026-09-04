@@ -95,8 +95,14 @@ class _BaseStorage(abc.ABC):
             case (*prefix, slice() as base), int(idx):
                 return (*prefix, (base.start or 0) + idx)
 
-            case _:
+            case tuple() as prefix, item:
+                return (*prefix, item)
+
+            case None, _:
                 return (item,)
+            
+            case _:
+                raise NotImplementedError
 
     def compute_slice_offset(self, start: int, stop: int) -> Tuple[IndexType, ...]:
         return self.compute_offset(slice(start, stop))
@@ -242,10 +248,7 @@ class _StagingEngine(_StorageEngine):
                         f"Shape mismatch for key '{key}': expected dimension {dim_idx} to be {expected_dim}, "
                         f"got {actual_dim}."
                     )
-            if entry.capacity is not None and arr.shape[0] > entry.capacity:
-                raise ValueError(
-                    f"Capacity mismatch for key '{key}': data batch size {arr.shape[0]} exceeds capacity {entry.capacity}."
-                )
+            
         elif isinstance(entry, ArrayEntry):
             if arr.ndim != len(entry.shape):
                 raise ValueError(

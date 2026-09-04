@@ -419,8 +419,7 @@ def test_nested_struct_set_slicing(as_engine):
     assert np.allclose(sub_buffer[5].metadata.latent, latent_data[15])
 
 
-@pytest.mark.skip("Multidimensional set slicing not implemented yet")
-def test_multidimensional_nested_set_slicing_and_indexing():
+def test_multidimensional_nested_set_slicing_and_indexing(as_engine):
     class Frame(B.Struct):
         pixels: B.Array[float] = B.Array(shape=(64, 64))
         frame_id: int
@@ -438,6 +437,8 @@ def test_multidimensional_nested_set_slicing_and_indexing():
     frames_buffer["frame_id"] = np.tile(np.arange(10)[None, :, None], (20, 1, 1))
     noise_frames = np.random.randn(20, 10, 64, 64)
     frames_buffer["pixels"] = noise_frames
+
+    dataset = as_engine(dataset)
 
     # 1. Index movie, then index frame: dataset[5].frames[3]
     movie_5 = dataset[5]
@@ -554,4 +555,4 @@ if __name__ == "__main__":
     container = configure_default_env()
 
     
-    test_ragged_set_operations_supported(as_engine=lambda x: x)
+    test_multidimensional_nested_set_slicing_and_indexing(as_engine=lambda x: x)

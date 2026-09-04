@@ -139,7 +139,19 @@ class Set(Marker[T], SchemaConvertible):
                 owner_cls=owner,
             )
         if isinstance(instance, Struct):
-            name_str = f" '{self.name}'" if self.name else ""
+
+            _schema = self.schema()
+            assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
+            
+            subview = ArrayStorageView(
+                self.schema(),
+                parent=instance._storage.parent or instance._storage,
+                path=(*instance._storage.path, self.name),
+                offset=instance._storage.offset,
+            )
+
+            return Set[_schema.dtype](_storage_view=subview)
+
             raise NotImplementedError(
                 f"Accessing nested Set{name_str} on a Struct instance is not supported yet."
             )
@@ -310,8 +322,6 @@ class Set(Marker[T], SchemaConvertible):
 
             case slice() as sl:
                 assert self.dtype is not None
-                assert self.capacity is not None
-
 
                 start, stop = self._normalize_slice(sl)
                 new_size = stop - start
