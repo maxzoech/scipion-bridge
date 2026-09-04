@@ -334,14 +334,14 @@ def test_basic_set_slicing():
     buffer["pixels"] = data_pixels
     buffer["foo"] = data_foo
 
-    assert np.allclose(buffer[1:5]["pixels"], data_pixels[1:5])
-    assert np.allclose(buffer[1:5]["foo"], data_foo[1:5])
+    assert np.allclose(buffer[1:5]["pixels"], data_pixels[1:5]) # type: ignore
+    assert np.allclose(buffer[1:5]["foo"], data_foo[1:5]) # type: ignore
 
-    assert np.allclose(buffer[:5]["pixels"], data_pixels[:5])
-    assert np.allclose(buffer[:5]["foo"], data_foo[:5])
+    assert np.allclose(buffer[:5]["pixels"], data_pixels[:5]) # type: ignore
+    assert np.allclose(buffer[:5]["foo"], data_foo[:5]) # type: ignore
 
-    assert np.allclose(buffer[5:]["pixels"], data_pixels[5:])
-    assert np.allclose(buffer[5:]["foo"], data_foo[5:])
+    assert np.allclose(buffer[5:]["pixels"], data_pixels[5:]) # type: ignore
+    assert np.allclose(buffer[5:]["foo"], data_foo[5:]) # type: ignore
 
 
 def test_set_double_slicing():
@@ -357,13 +357,13 @@ def test_set_double_slicing():
 
     buffer_slice = buffer[16:]
     assert buffer_slice.capacity == 16
-    assert np.allclose(buffer_slice["pixels"], data_pixels[16:])
+    assert np.allclose(buffer_slice["pixels"], data_pixels[16:]) # type: ignore
 
     # Second slice relative to the first: indices [4:9] -> root indices [20:25] (length 5)
     buffer_subslice = buffer_slice[4:9]
     assert buffer_subslice.capacity == 5
     assert buffer_subslice["pixels"].shape == (5, 128, 128) # type: ignore
-    assert np.allclose(buffer_subslice["pixels"], data_pixels[20:25])
+    assert np.allclose(buffer_subslice["pixels"], data_pixels[20:25]) # type: ignore
 
 
 def test_set_index_reading():
@@ -543,4 +543,4 @@ if __name__ == "__main__":
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
     
-    test_basic_set_storage()
+    test_set_double_slicing()

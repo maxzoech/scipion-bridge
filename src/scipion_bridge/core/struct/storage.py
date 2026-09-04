@@ -328,25 +328,36 @@ class _StagingEngine(_StorageEngine):
         entry: Union[ArrayEntry, ArraySetEntry],
         offset: Offset = None,
     ) -> ArrayLike:
-
-        if isinstance(entry, ArraySetEntry):
-            raise NotImplementedError
         
-        if key not in self._static_staging:
-            if not entry.is_static and isinstance(entry, ArrayEntry):
-                raise AttributeError(
-                    f"Field '{key}' is dynamic and has not been initialized."
-                )
 
-            entry_shape = tuple(dim for dim in entry.shape if dim is not None)
-            assert len(entry_shape) == len(entry.shape), "Some dimensions in entry.shape were None"
+        match entry:
+            case ArrayEntry():
+                if key not in self._static_staging:
+                    if not entry.is_static:
+                        raise AttributeError(
+                            f"Field '{key}' is dynamic and has not been initialized."
+                        )
 
-            self._static_staging[key] = np.zeros(entry_shape, dtype=entry.dtype)
-        
-        array = self._static_staging[key]
+                    entry_shape = tuple(dim for dim in entry.shape if dim is not None)
+                    assert len(entry_shape) == len(entry.shape), "Some dimensions in entry.shape were None"
+                    assert offset is None
 
-        offset = offset or tuple()
-        return array[offset]
+                    self._static_staging[key] = np.zeros(entry_shape, dtype=entry.dtype)
+
+                return self._static_staging[key]
+
+            case ArraySetEntry():
+                assert key in self._static_staging
+                if key not in self._static_staging:
+                    raise AttributeError(
+                        f"Field '{key}' not been initialized."
+                    )
+
+                return self._static_staging[key][offset]
+                
+            case _:
+                raise NotImplementedError
+
 
     def _read_ragged(
         self,
