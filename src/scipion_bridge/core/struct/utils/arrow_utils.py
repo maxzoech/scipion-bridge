@@ -40,7 +40,7 @@ class RaggedArrayView(Sequence[NDArray]):
             scalar = self._list_array[item]
             if not scalar.is_valid:
                 return np.empty(0, dtype=self.dtype)
-            return scalar.values.to_numpy()
+            return scalar.values.to_numpy(zero_copy_only=False)
         raise TypeError(f"Invalid RaggedArrayView index type '{type(item).__name__}'.")
 
     def __iter__(self):

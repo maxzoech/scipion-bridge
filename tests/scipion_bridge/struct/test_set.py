@@ -504,6 +504,55 @@ def test_multidimensional_2d_slice_both_axes(as_engine):
     assert np.allclose(extracted_pixels, noise_frames[2:7, 1:4])
 
 
+def test_multidimensional_2d_slice_both_axes_ragged(as_engine):
+    class Foo(B.Struct):
+        bar: int
+
+    class Frame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(None,))
+        frame_id: int
+
+        metadata: B.Set[Foo] = B.Set[Foo](capacity=10)
+
+    class Movie(B.Struct):
+        frames: B.Set[Frame] = B.Set[Frame](capacity=None)
+        movie_id: int
+
+    # 20 movies, each with 10 frames -> 2D grid of ragged arrays
+    dataset = B.Set[Movie](capacity=20)
+    dataset.print_schema()
+
+    dataset["movie_id"] = np.arange(20)[..., None]
+
+    # Populate 2D grid of frames (20 movies x 10 frames with variable lengths)
+    frames_buffer = dataset[:20]["frames"]
+    noise_frames = [
+        [np.random.randn(10 + m * 5 + f).astype(np.float32) for f in range(10)]
+        for m in range(20)
+    ]
+    frames_buffer["pixels"] = noise_frames
+
+    dataset = as_engine(dataset)
+
+    # 1. SLICE DIMENSION 0: Take 5 movies (indices 2 to 7)
+    five_movies = dataset[2:7]
+    assert len(five_movies) == 5
+
+    # 2. SLICE DIMENSION 1: Take 3 frames (indices 1 to 4) from those 5 movies
+    sub_frames = five_movies["frames"][1:4]
+
+    # 3. VERIFY SHAPE / STRUCTURE: 5 movies x 3 frames
+    extracted_pixels = sub_frames["pixels"]
+    assert len(extracted_pixels) == 5
+
+    # 4. VERIFY DATA: Matches exact 2D slice noise_frames[2:7][1:4]
+    for i in range(5):
+        assert len(extracted_pixels[i]) == 3
+        for j in range(3):
+            expected = noise_frames[2 + i][1 + j]
+            assert np.allclose(extracted_pixels[i][j], expected)
+
+
 def test_set_storage_shape_mismatch_raises():
     class Data(B.Struct):
         pixels = B.Array[float](shape=(128, 128))
@@ -589,4 +638,4 @@ if __name__ == "__main__":
     container = configure_default_env()
 
     
-    test_basic_set_slicing(as_engine=lambda x: x)
+    test_multidimensional_2d_slice_both_axes_ragged(as_engine=lambda x: x)

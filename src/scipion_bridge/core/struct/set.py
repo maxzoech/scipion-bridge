@@ -213,8 +213,22 @@ class Set(Marker[T], SchemaConvertible):
         raise NotImplementedError("Storage does not support to_record_batch.")
 
     @classmethod
-    def from_arrow(cls, element_cls: Type[T], batch: pa.RecordBatch) -> "Set[T]":
+    def from_arrow(
+        cls,
+        element_cls_or_batch: Union[Type[T], pa.RecordBatch],
+        batch: Optional[pa.RecordBatch] = None,
+    ) -> "Set[T]":
         """Construct a Set[T] wrapping an Arrow RecordBatch."""
+        if batch is None:
+            if not isinstance(element_cls_or_batch, pa.RecordBatch):
+                raise TypeError("Expected RecordBatch as argument.")
+            batch = element_cls_or_batch
+            if cls._dtype is None:
+                raise TypeError("Cannot determine element type from unsubscripted Set class.")
+            element_cls = cast(Type[T], cls._dtype)
+        else:
+            element_cls = cast(Type[T], element_cls_or_batch)
+
         set_schema = element_cls.schema().to_set_schema(capacity=len(batch))
         storage = ArrayStorage.from_record_batch(batch, schema=set_schema)
         return cast(Any, cls)[element_cls](capacity=len(batch), _storage_view=storage)

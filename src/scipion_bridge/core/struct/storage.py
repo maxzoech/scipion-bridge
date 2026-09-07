@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import abc
-from functools import reduce
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, TypeAlias, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, TypeAlias, cast
 
+import awkward as ak
 import numpy as np
-from numpy.typing import ArrayLike
 import pyarrow as pa
 
 from .schema import (
@@ -18,10 +17,8 @@ from .schema import (
     ArrayEntry,
     ArraySetEntry,
     RaggedArraySetEntry,
-    _ArrayEntryBase,
-    _ArrayEntry,
-    _ArraySetEntry,
-    _RaggedArraySetEntry,
+    SchemaEntry,
+    SchemaSetEntry,
 )
 from .utils.arrow_utils import (
     RaggedArrayView,
@@ -56,7 +53,9 @@ def _lookup_in_schema(schema: Schema, path: KeyPath) -> Optional[ArrayEntryBase]
             return None
 
 
-def _get_nested_col(batch: Union[pa.RecordBatch, pa.StructArray], path: KeyPath) -> pa.Array:
+def _get_nested_col(
+    batch: Union[pa.RecordBatch, pa.StructArray], path: KeyPath
+) -> pa.Array:
     """Navigate a KeyPath tuple in a nested Arrow RecordBatch or StructArray."""
     curr: Any = batch
     for segment in path:
@@ -65,7 +64,9 @@ def _get_nested_col(batch: Union[pa.RecordBatch, pa.StructArray], path: KeyPath)
         elif isinstance(curr, pa.StructArray):
             curr = curr.field(segment)
         else:
-            raise KeyError(f"Cannot resolve path segment '{segment}' in '{type(curr).__name__}'.")
+            raise KeyError(
+                f"Cannot resolve path segment '{segment}' in '{type(curr).__name__}'."
+            )
     return curr
 
 
@@ -172,66 +173,155 @@ class _BaseStorage(abc.ABC):
         return full_path in self.root_storage._engine
 
 
+def _read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Offset) -> Any:
+    """Resolve a read on a RaggedArraySetEntry from an Awkward array slice."""
+    is_element_index = (
+        offset is not None
+        and len(offset) > 0
+        and all(isinstance(idx, int) for idx in offset)
+    )
+    if is_element_index:
+        try:
+            return ak.to_numpy(sliced)
+        except (ValueError, TypeError, pa.lib.ArrowInvalid):
+            return sliced
+
+    if sliced.ndim == 2 and (
+        offset is None or (len(offset) == 1 and isinstance(offset[0], slice))
+    ):
+        try:
+            pa_arr = ak.to_arrow(sliced, extensionarray=False)
+            if isinstance(pa_arr, pa.ChunkedArray):
+                pa_arr = pa_arr.combine_chunks()
+            if isinstance(pa_arr, (pa.ListArray, pa.LargeListArray)):
+                return RaggedArrayView(pa_arr, entry.dtype)
+        except (ValueError, TypeError, pa.lib.ArrowInvalid):
+            pass
+
+    return sliced
+
+
 class _StorageEngine(abc.ABC):
     """Abstract interface for polymorphic storage engines."""
 
-    @abc.abstractmethod
-    def read(self, key: KeyPath, entry: Entry, offset: Offset = None) -> Any:
-        ...
+    def _resolve_key(self, key: KeyPath) -> KeyPath:
+        """Canonically normalize keys to be schema-relative by stripping the container 'root' prefix."""
+        if key and key[0] == "root":
+            return key[1:]
+        return key
 
     @abc.abstractmethod
-    def write(self, key: KeyPath, entry: Entry, data: Any, offset: Offset = None) -> None:
-        ...
+    def read(self, key: KeyPath, entry: Entry, offset: Offset = None) -> Any: ...
 
     @abc.abstractmethod
-    def to_record_batch(self) -> pa.RecordBatch:
-        ...
+    def write(
+        self, key: KeyPath, entry: Entry, data: Any, offset: Offset = None
+    ) -> None: ...
 
     @abc.abstractmethod
-    def __contains__(self, key: KeyPath) -> bool:
-        ...
+    def to_record_batch(self) -> pa.RecordBatch: ...
+
+    @abc.abstractmethod
+    def __contains__(self, key: KeyPath) -> bool: ...
 
     @property
     @abc.abstractmethod
-    def capacity(self) -> Optional[int]:
-        ...
+    def capacity(self) -> Optional[int]: ...
 
     @property
     @abc.abstractmethod
-    def is_frozen(self) -> bool:
-        ...
+    def is_frozen(self) -> bool: ...
 
 
 class _StagingEngine(_StorageEngine):
-    """Mutable staging engine backed by in-memory NumPy dictionaries."""
+    """Unified Awkward-backed mutable staging engine for Struct and Set data structures."""
 
     def __init__(self, schema: Schema, capacity: Optional[int] = None) -> None:
         self._schema = schema
         self._capacity = capacity
-
-        self._static_staging: Dict[KeyPath, np.ndarray] = {}
-        self._ragged_staging: Dict[KeyPath, List[Optional[np.ndarray]]] = {}
+        # Single unified mapping: KeyPath -> staged buffer (np.ndarray, nested list, or ak.Array)
+        self._staging: Dict[KeyPath, Any] = {}
 
     @property
     def capacity(self) -> Optional[int]:
-        return self._capacity
+        if self._capacity is not None:
+            return self._capacity
+        for val in self._staging.values():
+            try:
+                return len(val)
+            except TypeError:
+                continue
+        return None
 
     @property
     def is_frozen(self) -> bool:
         return False
 
-    def _resolve_key(self, key: KeyPath) -> KeyPath:
-        if key in self._static_staging or key in self._ragged_staging:
-            return key
-        if key and key[0] != "root":
-            root_key = ("root", *key)
-            if root_key in self._static_staging or root_key in self._ragged_staging:
-                return root_key
-        elif key and key[0] == "root":
-            tail_key = key[1:]
-            if tail_key in self._static_staging or tail_key in self._ragged_staging:
-                return tail_key
-        return key
+    def __contains__(self, key: KeyPath) -> bool:
+        resolved = self._resolve_key(key)
+        return resolved in self._staging
+
+    def _validate_dtype(self, data: Any, target_dtype: np.dtype, key: KeyPath) -> None:
+        """Verify data dtype compatibility with schema entry."""
+        if isinstance(data, (np.ndarray, np.generic)):
+            if not np.can_cast(data.dtype, target_dtype, casting="same_kind"):
+                raise TypeError(
+                    f"Cannot cast data of dtype '{data.dtype}' to field '{key}' dtype '{target_dtype}'."
+                )
+        elif isinstance(data, (int, float, complex, bool, str)):
+            scalar_arr = np.asanyarray(data)
+            if not np.can_cast(scalar_arr.dtype, target_dtype, casting="same_kind"):
+                raise TypeError(
+                    f"Cannot cast data of dtype '{scalar_arr.dtype}' to field '{key}' dtype '{target_dtype}'."
+                )
+        elif isinstance(data, (list, tuple)):
+            if len(data) > 0:
+                self._validate_dtype(data[0], target_dtype, key)
+
+    def _validate_shape(
+        self,
+        key: KeyPath,
+        entry: Union[ArrayEntry, ArraySetEntry],
+        arr: np.ndarray,
+    ) -> None:
+        """Validate tensor shape compatibility with static schema entry."""
+        if isinstance(entry, ArraySetEntry):
+            entry_ndim = len(entry.shape)
+            if arr.ndim < entry_ndim:
+                raise ValueError(
+                    f"Shape mismatch for key '{key}': expected at least {entry_ndim} dimensions, "
+                    f"got data shape {arr.shape}."
+                )
+            for dim_idx, (expected_dim, actual_dim) in enumerate(
+                zip(entry.shape, arr.shape[-entry_ndim:])
+            ):
+                if expected_dim is not None and expected_dim != actual_dim:
+                    raise ValueError(
+                        f"Shape mismatch for key '{key}': expected dimension {dim_idx} to be {expected_dim}, "
+                        f"got {actual_dim}."
+                    )
+        elif isinstance(entry, ArrayEntry):
+            if arr.ndim != len(entry.shape):
+                raise ValueError(
+                    f"Dimension count mismatch for key '{key}': expected {len(entry.shape)} dimensions, "
+                    f"got {arr.ndim} (shape {arr.shape})."
+                )
+            for dim_idx, (expected_dim, actual_dim) in enumerate(
+                zip(entry.shape, arr.shape)
+            ):
+                if expected_dim is not None and expected_dim != actual_dim:
+                    raise ValueError(
+                        f"Shape mismatch for key '{key}': expected dimension {dim_idx} to be {expected_dim}, "
+                        f"got {actual_dim}."
+                    )
+
+    def _prepare_ragged_data(self, data: Any, dtype: np.dtype) -> Any:
+        """Recursively prepare ragged input into contiguous arrays of expected dtype."""
+        if isinstance(data, RaggedArrayView):
+            data = list(data)
+        if isinstance(data, (list, tuple)):
+            return [self._prepare_ragged_data(item, dtype) for item in data]
+        return np.ascontiguousarray(data, dtype=dtype)
 
     def write(
         self,
@@ -243,31 +333,12 @@ class _StagingEngine(_StorageEngine):
         key = self._resolve_key(key)
         schema_entry = _lookup_entry(self._schema, key) or entry
 
-        match schema_entry:
-            case RaggedArraySetEntry():
-                self._write_ragged(key, schema_entry, data, offset=offset)
-            case ArrayEntry() | ArraySetEntry():
-                self._write_static(key, schema_entry, data, offset=offset)
-            case _:
-                raise TypeError(
-                    f"Unsupported schema entry '{type(entry).__name__}' for write to key '{key}'."
-                )
-
-    def _write_static(
-        self,
-        key: KeyPath,
-        entry: Union[ArrayEntry, ArraySetEntry],
-        data: ArrayLike,
-        offset: Offset = None,
-    ) -> None:
-        key = self._resolve_key(key)
-        arr = np.asanyarray(data)
-        if not np.can_cast(arr.dtype, entry.dtype, casting="same_kind"):
+        if not isinstance(schema_entry, ArrayEntryBase):
             raise TypeError(
-                f"Cannot cast data of dtype '{arr.dtype}' to field '{key}' dtype '{entry.dtype}'."
+                f"Unsupported schema entry '{type(entry).__name__}' for write to key '{key}'."
             )
 
-        arr = arr.astype(entry.dtype, copy=False)
+        self._validate_dtype(data, schema_entry.dtype, key)
 
         is_sub_offset = (
             offset is not None
@@ -276,112 +347,150 @@ class _StagingEngine(_StorageEngine):
                 isinstance(idx, int)
                 or (
                     isinstance(idx, slice)
-                    and (idx.start is not None or idx.stop is not None or idx.step is not None)
+                    and (
+                        idx.start is not None
+                        or idx.stop is not None
+                        or idx.step is not None
+                    )
                 )
                 for idx in offset
             )
         )
 
-        if is_sub_offset:
+        if not is_sub_offset:
+            self._write_full(key, schema_entry, data)
+        else:
             assert offset is not None
-            int_dims = tuple(d for d in entry.shape if d is not None)
-            if key not in self._static_staging:
-                if isinstance(entry, ArraySetEntry):
-                    idx_req = 1
-                    if offset and isinstance(offset[0], int):
-                        idx_req = offset[0] + 1
-                    elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
-                        idx_req = offset[0].stop
+            self._write_sub_offset(key, schema_entry, data, offset)
 
-                    cap = entry.capacity or self.capacity or idx_req
-                    cap = max(cap, idx_req)
-                    self._static_staging[key] = np.zeros((cap, *int_dims), dtype=entry.dtype)
-                else:
-                    self._static_staging[key] = np.zeros(int_dims, dtype=entry.dtype)
+    def _write_full(
+        self,
+        key: KeyPath,
+        entry: ArrayEntryBase,
+        data: Any,
+    ) -> None:
+        if isinstance(entry, (ArrayEntry, ArraySetEntry)):
+            arr = np.asanyarray(data)
+            arr = arr.astype(entry.dtype, copy=False)
+            self._validate_shape(key, entry, arr)
+            self._staging[key] = arr
+        elif isinstance(entry, RaggedArraySetEntry):
+            prepared = self._prepare_ragged_data(data, entry.dtype)
+            self._staging[key] = prepared
+
+    def _write_sub_offset(
+        self,
+        key: KeyPath,
+        entry: ArrayEntryBase,
+        data: Any,
+        offset: Tuple[IndexType, ...],
+    ) -> None:
+        if isinstance(entry, (ArrayEntry, ArraySetEntry)):
+            self._write_sub_offset_static(key, entry, data, offset)
+        elif isinstance(entry, RaggedArraySetEntry):
+            self._write_sub_offset_ragged(key, entry, data, offset)
+
+    def _write_sub_offset_static(
+        self,
+        key: KeyPath,
+        entry: Union[ArrayEntry, ArraySetEntry],
+        data: Any,
+        offset: Tuple[IndexType, ...],
+    ) -> None:
+        arr = np.asanyarray(data).astype(entry.dtype, copy=False)
+        int_dims = tuple(d for d in entry.shape if d is not None)
+
+        idx_req = 1
+        if offset and isinstance(offset[0], int):
+            idx_req = offset[0] + 1
+        elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
+            idx_req = offset[0].stop
+
+        if key not in self._staging:
+            if isinstance(entry, ArraySetEntry):
+                cap = entry.capacity or self.capacity or idx_req
+                cap = max(cap, idx_req)
+                self._staging[key] = np.zeros((cap, *int_dims), dtype=entry.dtype)
             else:
-                if isinstance(entry, ArraySetEntry):
-                    current_buf = self._static_staging[key]
-                    idx_req = 1
-                    if offset and isinstance(offset[0], int):
-                        idx_req = offset[0] + 1
-                    elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
-                        idx_req = offset[0].stop
-                    if idx_req > len(current_buf):
-                        new_cap = max(idx_req, len(current_buf) * 2)
-                        new_buf = np.zeros((new_cap, *int_dims), dtype=entry.dtype)
-                        new_buf[:len(current_buf)] = current_buf
-                        self._static_staging[key] = new_buf
+                self._staging[key] = np.zeros(int_dims, dtype=entry.dtype)
+        else:
+            if isinstance(entry, ArraySetEntry):
+                current_buf = self._staging[key]
+                if idx_req > len(current_buf):
+                    new_cap = max(idx_req, len(current_buf) * 2)
+                    new_buf = np.zeros((new_cap, *int_dims), dtype=entry.dtype)
+                    new_buf[: len(current_buf)] = current_buf
+                    self._staging[key] = new_buf
 
-            self._static_staging[key][offset] = arr
-            return
+        self._staging[key][offset] = arr
 
-        # Full column / root write validation
-        if isinstance(entry, ArraySetEntry):
-            entry_ndim = len(entry.shape)
-            if arr.ndim < entry_ndim:
-                raise ValueError(
-                    f"Shape mismatch for key '{key}': expected at least {entry_ndim} dimensions, "
-                    f"got data shape {arr.shape}."
-                )
-            for dim_idx, (expected_dim, actual_dim) in enumerate(zip(entry.shape, arr.shape[-entry_ndim:])):
-                if expected_dim is not None and expected_dim != actual_dim:
-                    raise ValueError(
-                        f"Shape mismatch for key '{key}': expected dimension {dim_idx} to be {expected_dim}, "
-                        f"got {actual_dim}."
-                    )
-            
-        elif isinstance(entry, ArrayEntry):
-            if arr.ndim != len(entry.shape):
-                raise ValueError(
-                    f"Dimension count mismatch for key '{key}': expected {len(entry.shape)} dimensions, "
-                    f"got {arr.ndim} (shape {arr.shape})."
-                )
-            for dim_idx, (expected_dim, actual_dim) in enumerate(zip(entry.shape, arr.shape)):
-                if expected_dim is not None and expected_dim != actual_dim:
-                    raise ValueError(
-                        f"Shape mismatch for key '{key}': expected dimension {dim_idx} to be {expected_dim}, "
-                        f"got {actual_dim}."
-                    )
-
-        self._static_staging[key] = arr
-
-    def _write_ragged(
+    def _write_sub_offset_ragged(
         self,
         key: KeyPath,
         entry: RaggedArraySetEntry,
         data: Any,
-        offset: Offset = None,
+        offset: Tuple[IndexType, ...],
     ) -> None:
-        key = self._resolve_key(key)
-        capacity = self.capacity or 0
-        if not self.capacity and isinstance(data, (list, tuple, RaggedArrayView)):
-            capacity = max(capacity, len(data))
+        cap = entry.capacity or self.capacity or 0
+        if offset and isinstance(offset[0], int):
+            cap = max(cap, offset[0] + 1)
+        elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
+            cap = max(cap, offset[0].stop)
+        elif not cap and isinstance(data, (list, tuple, RaggedArrayView)):
+            cap = max(cap, len(data))
 
-        if key not in self._ragged_staging:
-            self._ragged_staging[key] = [None] * capacity
+        if key not in self._staging:
+            self._staging[key] = [None] * cap
 
+        prepared = self._prepare_ragged_data(data, entry.dtype)
+        self._assign_ragged(self._staging[key], offset, prepared, entry.dtype)
+
+    def _assign_ragged(
+        self,
+        slots: list,
+        offset: Tuple[IndexType, ...],
+        data: Any,
+        dtype: np.dtype,
+    ) -> None:
         match offset:
             case (int(idx),):
-                slots = self._ragged_staging[key]
                 if len(slots) <= idx:
                     slots.extend([None] * (idx + 1 - len(slots)))
+                slots[idx] = data
 
-                slots[idx] = np.ascontiguousarray(data, dtype=entry.dtype)
+            case (int(idx), *tail):
+                if len(slots) <= idx:
+                    slots.extend([None] * (idx + 1 - len(slots)))
+                if slots[idx] is None:
+                    slots[idx] = []
+                self._assign_ragged(slots[idx], tuple(tail), data, dtype)
 
             case (slice() as sl,):
-                for i, item in zip(range(*sl.indices(capacity)), data):
-                    self._write_ragged(key, entry, item, offset=(i,))
+                needed = len(data) if hasattr(data, "__len__") else 0
+                stop = sl.stop if sl.stop is not None else max(len(slots), needed)
+                if len(slots) < stop:
+                    slots.extend([None] * (stop - len(slots)))
+                indices = range(*sl.indices(len(slots)))
+                for i, item in zip(indices, data):
+                    slots[i] = item
 
-            # Recursive case 2: decompose bulk column write into per-element writes
+            case (slice() as sl, *tail):
+                needed = len(data) if hasattr(data, "__len__") else 0
+                stop = sl.stop if sl.stop is not None else max(len(slots), needed)
+                if len(slots) < stop:
+                    slots.extend([None] * (stop - len(slots)))
+                indices = range(*sl.indices(len(slots)))
+                for i, item in zip(indices, data):
+                    if slots[i] is None:
+                        slots[i] = []
+                    self._assign_ragged(slots[i], tuple(tail), item, dtype)
+
             case None | ():
-                if not isinstance(data, (list, tuple, RaggedArrayView)):
-                    raise ValueError
-
-                for i, item in enumerate(data):
-                    self._write_ragged(key, entry, item, offset=(i,))
-
-            case _:
-                raise TypeError(f"Unsupported offset pattern '{offset}' for ragged write.")
+                if isinstance(data, (list, tuple)):
+                    for i, item in enumerate(data):
+                        self._assign_ragged(slots, (i,), item, dtype)
+                else:
+                    slots.append(data)
 
     def read(
         self,
@@ -390,91 +499,238 @@ class _StagingEngine(_StorageEngine):
         offset: Offset = None,
     ) -> Any:
         key = self._resolve_key(key)
-        schema_entry = _lookup_entry(self._schema, key) or entry
-
-        if isinstance(schema_entry, RaggedArraySetEntry):
-            return self._read_ragged(key, schema_entry, offset=offset)
-        elif isinstance(schema_entry, (ArrayEntry, ArraySetEntry)):
-            return self._read_static(key, schema_entry, offset=offset)
-        else:
-            raise TypeError(
-                f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
-            )
-
-    def _prepare_entry(self, key: KeyPath) -> None:
-        key = self._resolve_key(key)
-        if key in self._static_staging:
-            return
-
-        schema_entry = _lookup_entry(self._schema, key)
-        assert isinstance(schema_entry, (ArrayEntry, ArraySetEntry))
-
-        if not schema_entry.is_static and isinstance(schema_entry, ArrayEntry):
-            raise AttributeError(
-                f"Field '{key}' is dynamic and has not been initialized."
-            )
-
-    def _read_static(
-        self,
-        key: KeyPath,
-        entry: Union[ArrayEntry, ArraySetEntry],
-        offset: Offset = None,
-    ) -> ArrayLike:
-        key = self._resolve_key(key)
-        if key not in self._static_staging:
+        if key not in self._staging:
             schema_entry = _lookup_entry(self._schema, key)
-            if schema_entry is not None and not schema_entry.is_static and isinstance(schema_entry, ArrayEntry):
+            if (
+                schema_entry is not None
+                and not schema_entry.is_static
+                and isinstance(schema_entry, ArrayEntry)
+            ):
                 raise AttributeError(
                     f"Field '{key}' is dynamic and has not been initialized."
                 )
             raise AttributeError(f"Field '{key}' has not been initialized.")
 
-        arr = self._static_staging[key]
-        if offset is None or offset == ():
-            return arr
+        schema_entry = _lookup_entry(self._schema, key) or entry
+        raw = self._staging[key]
 
-        return arr[offset]
+        if isinstance(schema_entry, (ArrayEntry, ArraySetEntry)):
+            if offset is None or offset == ():
+                return raw
+            return raw[offset]
 
-    def _read_ragged(
-        self,
-        key: KeyPath,
-        entry: RaggedArraySetEntry,
-        offset: Offset = None,
-    ) -> Any:
-        key = self._resolve_key(key)
-        match offset:
-            case (int(index),):
-                return self._ragged_staging[key][index]
-
-            case (slice() as sl,):
-                if key not in self._ragged_staging:
-                    raise AttributeError(f"Field '{key}' has not been initialized.")
-                chunks = self._ragged_staging[key][sl]
-                return RaggedArrayView(build_ragged_array(chunks, entry.dtype), entry.dtype)
-
-            case None | ():
-                if key not in self._ragged_staging:
-                    raise AttributeError(f"Field '{key}' has not been initialized.")
-
-                chunks = self._ragged_staging[key]
-                return RaggedArrayView(build_ragged_array(chunks, entry.dtype), entry.dtype)
-
-            case _:
-                raise NotImplementedError
+        elif isinstance(schema_entry, RaggedArraySetEntry):
+            ak_arr = ak.Array(raw)
+            sliced = ak_arr[offset] if (offset is not None and offset != ()) else ak_arr
+            return _read_ragged(sliced, schema_entry, offset)
+        else:
+            raise TypeError(
+                f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
+            )
 
     def to_record_batch(self) -> pa.RecordBatch:
         columns, names = self._build_columns(self._schema, prefix=())
         return pa.RecordBatch.from_arrays(columns, names)
 
-    def _build_columns(self, schema: Schema, prefix: KeyPath = ()) -> Tuple[List[pa.Array], List[str]]:
+    def _infer_len_from_val(
+        self,
+        val: Any,
+        entry: Entry,
+        parent_is_set: bool,
+    ) -> Optional[int]:
+        """Derive batch length from a staged array or sequence."""
+        if isinstance(val, np.ndarray):
+            int_dims = tuple(d for d in getattr(entry, "shape", ()) if d is not None)
+            if len(val.shape) > len(int_dims):
+                return int(np.prod(val.shape[: len(val.shape) - len(int_dims)]))
+            return len(val)
+        elif isinstance(val, (list, tuple)):
+            if parent_is_set and len(val) > 0 and isinstance(val[0], (list, tuple)):
+                return sum(len(m) for m in val)
+            return len(val)
+        return None
+
+    def _infer_level_length(
+        self,
+        schema: Schema,
+        prefix: KeyPath,
+        parent_is_set: bool,
+        expected_len: Optional[int],
+    ) -> int:
+        """Infer active batch length from explicit expected length, direct fields, or leaf fields."""
+        if expected_len is not None:
+            return expected_len
+
+        # 1. Check direct fields at this schema level
+        for name, entry in schema.fields.items():
+            p = (*prefix, name)
+            if p in self._staging:
+                length = self._infer_len_from_val(self._staging[p], entry, parent_is_set)
+                if length is not None and length > 0:
+                    return length
+
+        # 2. Fall back to leaf entries in nested subschemas
+        for leaf_path, leaf_entry in schema.tree_iter(root=prefix):
+            if leaf_path in self._staging:
+                val = self._staging[leaf_path]
+                if isinstance(val, np.ndarray):
+                    return val.shape[0] if len(val.shape) > 0 else 0
+                elif isinstance(val, (list, tuple)):
+                    return len(val)
+
+        return self.capacity or 0
+
+    def _build_nested_column(
+        self,
+        entry: Union[SchemaSetEntry, SchemaEntry],
+        path: KeyPath,
+        level_len: int,
+    ) -> pa.Array:
+        """Build a StructArray or ListArray for nested Struct or Set schemas."""
+        assert entry.children is not None
+        is_nested_set = isinstance(entry, SchemaSetEntry)
+        if is_nested_set:
+            child_expected = (level_len * entry.capacity) if entry.capacity is not None else None
+            sub_cols, sub_names = self._build_columns(
+                entry.children, prefix=path, parent_is_set=True, expected_len=child_expected
+            )
+        else:
+            sub_cols, sub_names = self._build_columns(
+                entry.children, prefix=path, parent_is_set=False, expected_len=level_len
+            )
+
+        sub_struct = pa.StructArray.from_arrays(sub_cols, names=sub_names)
+
+        if not is_nested_set:
+            return sub_struct
+
+        if entry.capacity is not None:
+            return pa.FixedSizeListArray.from_arrays(sub_struct, entry.capacity)
+
+        # Dynamic nested set with variable child lengths
+        child_lengths: Optional[List[int]] = None
+        for child_name in entry.children.fields:
+            child_path = (*path, child_name)
+            if child_path in self._staging:
+                child_val = self._staging[child_path]
+                if (
+                    isinstance(child_val, (list, tuple))
+                    and len(child_val) > 0
+                    and isinstance(child_val[0], (list, tuple))
+                ):
+                    child_lengths = [len(m) for m in child_val]
+                    break
+
+        if child_lengths is not None:
+            offsets = [0]
+            for child_len in child_lengths:
+                offsets.append(offsets[-1] + child_len)
+            while len(offsets) < level_len + 1:
+                offsets.append(offsets[-1])
+        else:
+            item_count = len(sub_struct)
+            parent_count = level_len if level_len > 0 else 1
+            items_per_parent = item_count // parent_count if parent_count > 0 else 0
+            offsets = [i * items_per_parent for i in range(parent_count + 1)]
+
+        return pa.ListArray.from_arrays(pa.array(offsets, type=pa.int32()), sub_struct)
+
+    def _build_static_column(
+        self,
+        entry: Union[ArraySetEntry, ArrayEntry],
+        path: KeyPath,
+        level_len: int,
+        parent_is_set: bool,
+    ) -> pa.ExtensionArray:
+        """Compile static multidimensional tensor into an Arrow FixedShapeTensorArray."""
+        raw = self._staging.get(path)
+        int_dims = tuple(d for d in entry.shape if d is not None)
+        if raw is None:
+            np_data = np.zeros((level_len, *int_dims), dtype=entry.dtype)
+        else:
+            np_data = ak.to_numpy(ak.Array(raw))
+            if parent_is_set and np_data.ndim > len(int_dims):
+                np_data = np_data.reshape(-1, *int_dims)
+        return build_tensor_array(np_data, shape=int_dims, dtype=entry.dtype)
+
+    def _build_ragged_column(
+        self,
+        entry: RaggedArraySetEntry,
+        path: KeyPath,
+        level_len: int,
+        parent_is_set: bool,
+    ) -> Union[pa.ListArray, pa.LargeListArray]:
+        """Compile variable-length 1D or nD ragged array into an Arrow ListArray."""
+        raw = self._staging.get(path)
+        if raw is None:
+            return build_ragged_array([None] * level_len, entry.dtype)
+
+        if (
+            parent_is_set
+            and isinstance(raw, (list, tuple))
+            and len(raw) > 0
+            and isinstance(raw[0], (list, tuple))
+        ):
+            raw_to_build = [item for sub in raw for item in sub]
+        else:
+            raw_to_build = list(raw)
+
+        if len(raw_to_build) < level_len:
+            raw_to_build = raw_to_build + [None] * (level_len - len(raw_to_build))
+
+        ak_candidate = ak.Array(raw_to_build)
+        if ak_candidate.ndim > 2:
+            pa_arr = ak.to_arrow(ak_candidate, extensionarray=False)
+            if isinstance(pa_arr, pa.ChunkedArray):
+                pa_arr = pa_arr.combine_chunks()
+            return pa_arr
+        else:
+            return build_ragged_array(raw_to_build, entry.dtype)
+
+    def _build_columns(
+        self,
+        schema: Schema,
+        prefix: KeyPath = (),
+        parent_is_set: bool = False,
+        expected_len: Optional[int] = None,
+    ) -> Tuple[List[pa.Array], List[str]]:
+        """Recursively compile staged arrays and nested subschemas into Arrow arrays."""
         columns: List[pa.Array] = []
         names: List[str] = []
+        level_len = self._infer_level_length(schema, prefix, parent_is_set, expected_len)
 
-        raise NotImplementedError
+        for name, entry in schema.fields.items():
+            path = (*prefix, name)
+            names.append(name)
 
-    def __contains__(self, key: KeyPath) -> bool:
-        resolved = self._resolve_key(key)
-        return resolved in self._static_staging or resolved in self._ragged_staging
+            match entry:
+                case SchemaSetEntry() | SchemaEntry():
+                    columns.append(self._build_nested_column(entry, path, level_len))
+                case ArraySetEntry() | ArrayEntry():
+                    columns.append(self._build_static_column(entry, path, level_len, parent_is_set))
+                case RaggedArraySetEntry():
+                    columns.append(self._build_ragged_column(entry, path, level_len, parent_is_set))
+                case _:
+                    raise TypeError(f"Unsupported schema entry type '{type(entry).__name__}'.")
+
+        return columns, names
+
+
+def _unwrap_extension_array(a: pa.Array) -> pa.Array:
+    """Recursively strip Arrow extension types (e.g. FixedShapeTensor) to underlying storage arrays for Awkward."""
+    if isinstance(a, pa.ExtensionArray):
+        return _unwrap_extension_array(a.storage)
+    if isinstance(a, pa.StructArray):
+        fields = [_unwrap_extension_array(a.field(i)) for i in range(a.type.num_fields)]
+        names = [a.type.field(i).name for i in range(a.type.num_fields)]
+        return pa.StructArray.from_arrays(fields, names=names)
+    if isinstance(a, pa.FixedSizeListArray):
+        unwrapped_values = _unwrap_extension_array(a.values)
+        return pa.FixedSizeListArray.from_arrays(unwrapped_values, a.type.list_size)
+    if isinstance(a, (pa.ListArray, pa.LargeListArray)):
+        unwrapped_values = _unwrap_extension_array(a.values)
+        return type(a).from_arrays(a.offsets, unwrapped_values)
+    return a
 
 
 class _ArrowEngine(_StorageEngine):
@@ -483,6 +739,9 @@ class _ArrowEngine(_StorageEngine):
     def __init__(self, schema: Schema, batch: pa.RecordBatch) -> None:
         self._schema = schema
         self._batch = batch
+        unwrapped_columns = [_unwrap_extension_array(c) for c in batch.columns]
+        unwrapped_batch = pa.RecordBatch.from_arrays(unwrapped_columns, names=batch.schema.names)
+        self._ak_batch = ak.from_arrow(unwrapped_batch)
 
     @property
     def capacity(self) -> Optional[int]:
@@ -507,14 +766,33 @@ class _ArrowEngine(_StorageEngine):
         entry: Entry,
         offset: Offset = None,
     ) -> Any:
-        raise NotImplementedError
+        resolved = self._resolve_key(key)
+        col = self._ak_batch
+        for seg in resolved:
+            col = col[seg]
+
+        if offset is not None and offset != ():
+            sliced = col[offset]
+        else:
+            sliced = col
+
+        if isinstance(entry, (ArrayEntry, ArraySetEntry)):
+            res = ak.to_numpy(sliced)
+            int_dims = tuple(d for d in entry.shape if d is not None)
+            if int_dims and res.shape[-len(int_dims):] != int_dims:
+                res = res.reshape((*res.shape[:-1], *int_dims))
+            return res
+        elif isinstance(entry, RaggedArraySetEntry):
+            return _read_ragged(sliced, entry, offset)
+        return sliced
 
     def to_record_batch(self) -> pa.RecordBatch:
         return self._batch
 
     def __contains__(self, key: KeyPath) -> bool:
+        resolved = self._resolve_key(key)
         try:
-            _get_nested_col(self._batch, key)
+            _get_nested_col(self._batch, resolved)
             return True
         except (KeyError, IndexError):
             return False
@@ -563,9 +841,6 @@ class ArrayStorage(_BaseStorage):
 
 class ArrayStorageView(_BaseStorage):
     """Sub-view into a parent storage with qualified path prefix and offset propagation."""
-
-    def qualify_key(self, key: Any) -> Any:
-        return self.qualify_path(key)
 
     def to_record_batch(self) -> pa.RecordBatch:
         assert self.parent is not None
