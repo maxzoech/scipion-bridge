@@ -30,6 +30,19 @@ IndexType: TypeAlias = Union[slice, int]
 Offset: TypeAlias = Optional[Tuple[IndexType, ...]]
 
 
+def _is_unbounded_slice_or_empty(offset: Offset) -> bool:
+    """Return True if offset represents a full unindexed or unbounded slice write."""
+    if not offset:
+        return True
+    return all(
+        isinstance(idx, slice)
+        and idx.start is None
+        and idx.stop is None
+        and idx.step is None
+        for idx in offset
+    )
+
+
 def _lookup_entry(schema: Schema, path: KeyPath) -> Optional[ArrayEntryBase]:
     """Look up a leaf ArrayEntryBase in a schema by KeyPath tuple."""
     match path:
@@ -246,11 +259,7 @@ class _StagingEngine(_StorageEngine):
     def capacity(self) -> Optional[int]:
         if self._capacity is not None:
             return self._capacity
-        for val in self._staging.values():
-            try:
-                return len(val)
-            except TypeError:
-                continue
+
         return None
 
     @property
@@ -268,12 +277,14 @@ class _StagingEngine(_StorageEngine):
                 raise TypeError(
                     f"Cannot cast data of dtype '{data.dtype}' to field '{key}' dtype '{target_dtype}'."
                 )
+            
         elif isinstance(data, (int, float, complex, bool, str)):
             scalar_arr = np.asanyarray(data)
             if not np.can_cast(scalar_arr.dtype, target_dtype, casting="same_kind"):
                 raise TypeError(
                     f"Cannot cast data of dtype '{scalar_arr.dtype}' to field '{key}' dtype '{target_dtype}'."
                 )
+            
         elif isinstance(data, (list, tuple)):
             if len(data) > 0:
                 self._validate_dtype(data[0], target_dtype, key)
@@ -292,6 +303,7 @@ class _StagingEngine(_StorageEngine):
                     f"Shape mismatch for key '{key}': expected at least {entry_ndim} dimensions, "
                     f"got data shape {arr.shape}."
                 )
+            
             for dim_idx, (expected_dim, actual_dim) in enumerate(
                 zip(entry.shape, arr.shape[-entry_ndim:])
             ):
@@ -300,12 +312,14 @@ class _StagingEngine(_StorageEngine):
                         f"Shape mismatch for key '{key}': expected dimension {dim_idx} to be {expected_dim}, "
                         f"got {actual_dim}."
                     )
+                
         elif isinstance(entry, ArrayEntry):
             if arr.ndim != len(entry.shape):
                 raise ValueError(
                     f"Dimension count mismatch for key '{key}': expected {len(entry.shape)} dimensions, "
                     f"got {arr.ndim} (shape {arr.shape})."
                 )
+            
             for dim_idx, (expected_dim, actual_dim) in enumerate(
                 zip(entry.shape, arr.shape)
             ):
@@ -319,9 +333,106 @@ class _StagingEngine(_StorageEngine):
         """Recursively prepare ragged input into contiguous arrays of expected dtype."""
         if isinstance(data, RaggedArrayView):
             data = list(data)
+
         if isinstance(data, (list, tuple)):
             return [self._prepare_ragged_data(item, dtype) for item in data]
         return np.ascontiguousarray(data, dtype=dtype)
+
+    def _ensure_static_buffer(
+        self,
+        key: KeyPath,
+        entry: Union[ArrayEntry, ArraySetEntry],
+        arr: np.ndarray,
+        offset: Offset,
+    ) -> None:
+        """Ensure static buffer in self._staging is allocated and sized for the write target."""
+        int_dims = tuple(d for d in entry.shape if d is not None)
+        assert len(int_dims) == len(entry.shape)
+
+        if _is_unbounded_slice_or_empty(offset):
+            # Full column or unindexed struct write
+            if key not in self._staging or self._staging[key].shape != arr.shape:
+                self._staging[key] = np.empty_like(arr)
+            return
+
+        # Bounded slice or index write
+        idx_req = 1
+        if isinstance(offset[0], int):
+            idx_req = offset[0] + 1
+        elif isinstance(offset[0], slice) and offset[0].stop is not None:
+            idx_req = offset[0].stop
+
+        if key not in self._staging:
+            if isinstance(entry, ArraySetEntry):
+                cap = max(entry.capacity or self.capacity or idx_req, idx_req)
+                self._staging[key] = np.zeros((cap, *int_dims), dtype=entry.dtype)
+            else:
+                self._staging[key] = np.zeros(int_dims, dtype=entry.dtype)
+        elif isinstance(entry, ArraySetEntry):
+            current_buf = self._staging[key]
+            if idx_req > len(current_buf):
+                new_cap = max(idx_req, len(current_buf) * 2)
+                new_buf = np.zeros((new_cap, *int_dims), dtype=entry.dtype)
+                new_buf[: len(current_buf)] = current_buf
+                self._staging[key] = new_buf
+
+    def _write_static(
+        self,
+        key: KeyPath,
+        entry: Union[ArrayEntry, ArraySetEntry],
+        data: Any,
+        offset: Offset,
+    ) -> None:
+        """Unified write for static tensors using in-place slice/index assignment."""
+        arr = np.asanyarray(data).astype(entry.dtype, copy=False)
+        self._validate_shape(key, entry, arr)
+        self._ensure_static_buffer(key, entry, arr, offset)
+        target_offset = offset if offset is not None else ()
+        self._staging[key][target_offset] = arr
+
+    def _ensure_ragged_slots(
+        self,
+        key: KeyPath,
+        entry: RaggedArraySetEntry,
+        prepared: Any,
+        offset: Offset,
+    ) -> None:
+        """Ensure ragged slot list in self._staging exists and is sized for write."""
+        if _is_unbounded_slice_or_empty(offset):
+            needed = len(prepared) if isinstance(prepared, (list, tuple)) else 0
+            self._staging[key] = [None] * needed
+            return
+
+        cap = entry.capacity or self.capacity or 0
+        if offset and isinstance(offset[0], int):
+            cap = max(cap, offset[0] + 1)
+        elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
+            cap = max(cap, offset[0].stop)
+        elif not cap and isinstance(prepared, (list, tuple)):
+            cap = len(prepared)
+
+        if key not in self._staging:
+            self._staging[key] = [None] * cap
+        else:
+            needed = 0
+            if offset and isinstance(offset[0], int):
+                needed = offset[0] + 1
+            elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
+                needed = offset[0].stop
+            if needed > len(self._staging[key]):
+                self._staging[key].extend([None] * (needed - len(self._staging[key])))
+
+    def _write_ragged(
+        self,
+        key: KeyPath,
+        entry: RaggedArraySetEntry,
+        data: Any,
+        offset: Offset,
+    ) -> None:
+        """Unified write for ragged entries delegating to _assign_ragged."""
+        prepared = self._prepare_ragged_data(data, entry.dtype)
+        self._ensure_ragged_slots(key, entry, prepared, offset)
+        self._assign_ragged(self._staging[key], offset or (), prepared)
 
     def write(
         self,
@@ -340,157 +451,38 @@ class _StagingEngine(_StorageEngine):
 
         self._validate_dtype(data, schema_entry.dtype, key)
 
-        is_sub_offset = (
-            offset is not None
-            and offset != ()
-            and any(
-                isinstance(idx, int)
-                or (
-                    isinstance(idx, slice)
-                    and (
-                        idx.start is not None
-                        or idx.stop is not None
-                        or idx.step is not None
-                    )
+        match schema_entry:
+            case ArraySetEntry() | ArrayEntry():
+                self._write_static(key, schema_entry, data, offset)
+            case RaggedArraySetEntry():
+                self._write_ragged(key, schema_entry, data, offset)
+            case _:
+                raise TypeError(
+                    f"Unsupported schema entry type '{type(schema_entry).__name__}' for write."
                 )
-                for idx in offset
-            )
-        )
-
-        if not is_sub_offset:
-            self._write_full(key, schema_entry, data)
-        else:
-            assert offset is not None
-            self._write_sub_offset(key, schema_entry, data, offset)
-
-    def _write_full(
-        self,
-        key: KeyPath,
-        entry: ArrayEntryBase,
-        data: Any,
-    ) -> None:
-        if isinstance(entry, (ArrayEntry, ArraySetEntry)):
-            arr = np.asanyarray(data)
-            arr = arr.astype(entry.dtype, copy=False)
-            self._validate_shape(key, entry, arr)
-            self._staging[key] = arr
-        elif isinstance(entry, RaggedArraySetEntry):
-            prepared = self._prepare_ragged_data(data, entry.dtype)
-            self._staging[key] = prepared
-
-    def _write_sub_offset(
-        self,
-        key: KeyPath,
-        entry: ArrayEntryBase,
-        data: Any,
-        offset: Tuple[IndexType, ...],
-    ) -> None:
-        if isinstance(entry, (ArrayEntry, ArraySetEntry)):
-            self._write_sub_offset_static(key, entry, data, offset)
-        elif isinstance(entry, RaggedArraySetEntry):
-            self._write_sub_offset_ragged(key, entry, data, offset)
-
-    def _write_sub_offset_static(
-        self,
-        key: KeyPath,
-        entry: Union[ArrayEntry, ArraySetEntry],
-        data: Any,
-        offset: Tuple[IndexType, ...],
-    ) -> None:
-        arr = np.asanyarray(data).astype(entry.dtype, copy=False)
-        int_dims = tuple(d for d in entry.shape if d is not None)
-
-        idx_req = 1
-        if offset and isinstance(offset[0], int):
-            idx_req = offset[0] + 1
-        elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
-            idx_req = offset[0].stop
-
-        if key not in self._staging:
-            if isinstance(entry, ArraySetEntry):
-                cap = entry.capacity or self.capacity or idx_req
-                cap = max(cap, idx_req)
-                self._staging[key] = np.zeros((cap, *int_dims), dtype=entry.dtype)
-            else:
-                self._staging[key] = np.zeros(int_dims, dtype=entry.dtype)
-        else:
-            if isinstance(entry, ArraySetEntry):
-                current_buf = self._staging[key]
-                if idx_req > len(current_buf):
-                    new_cap = max(idx_req, len(current_buf) * 2)
-                    new_buf = np.zeros((new_cap, *int_dims), dtype=entry.dtype)
-                    new_buf[: len(current_buf)] = current_buf
-                    self._staging[key] = new_buf
-
-        self._staging[key][offset] = arr
-
-    def _write_sub_offset_ragged(
-        self,
-        key: KeyPath,
-        entry: RaggedArraySetEntry,
-        data: Any,
-        offset: Tuple[IndexType, ...],
-    ) -> None:
-        cap = entry.capacity or self.capacity or 0
-        if offset and isinstance(offset[0], int):
-            cap = max(cap, offset[0] + 1)
-        elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
-            cap = max(cap, offset[0].stop)
-        elif not cap and isinstance(data, (list, tuple, RaggedArrayView)):
-            cap = max(cap, len(data))
-
-        if key not in self._staging:
-            self._staging[key] = [None] * cap
-
-        prepared = self._prepare_ragged_data(data, entry.dtype)
-        self._assign_ragged(self._staging[key], offset, prepared, entry.dtype)
 
     def _assign_ragged(
         self,
         slots: list,
         offset: Tuple[IndexType, ...],
         data: Any,
-        dtype: np.dtype,
     ) -> None:
+        """Recursively assign prepared ragged data into target list slots."""
         match offset:
-            case (int(idx),):
-                if len(slots) <= idx:
-                    slots.extend([None] * (idx + 1 - len(slots)))
-                slots[idx] = data
-
+            case (head,):
+                slots[head] = data
             case (int(idx), *tail):
-                if len(slots) <= idx:
-                    slots.extend([None] * (idx + 1 - len(slots)))
                 if slots[idx] is None:
                     slots[idx] = []
-                self._assign_ragged(slots[idx], tuple(tail), data, dtype)
-
-            case (slice() as sl,):
-                needed = len(data) if hasattr(data, "__len__") else 0
-                stop = sl.stop if sl.stop is not None else max(len(slots), needed)
-                if len(slots) < stop:
-                    slots.extend([None] * (stop - len(slots)))
-                indices = range(*sl.indices(len(slots)))
-                for i, item in zip(indices, data):
-                    slots[i] = item
-
+                self._assign_ragged(slots[idx], tuple(tail), data)
             case (slice() as sl, *tail):
-                needed = len(data) if hasattr(data, "__len__") else 0
-                stop = sl.stop if sl.stop is not None else max(len(slots), needed)
-                if len(slots) < stop:
-                    slots.extend([None] * (stop - len(slots)))
                 indices = range(*sl.indices(len(slots)))
-                for i, item in zip(indices, data):
-                    if slots[i] is None:
-                        slots[i] = []
-                    self._assign_ragged(slots[i], tuple(tail), item, dtype)
-
-            case None | ():
-                if isinstance(data, (list, tuple)):
-                    for i, item in enumerate(data):
-                        self._assign_ragged(slots, (i,), item, dtype)
-                else:
-                    slots.append(data)
+                for idx, item in zip(indices, data):
+                    if slots[idx] is None:
+                        slots[idx] = []
+                    self._assign_ragged(slots[idx], tuple(tail), item)
+            case _:
+                slots[:] = list(data)
 
     def read(
         self,
@@ -511,7 +503,9 @@ class _StagingEngine(_StorageEngine):
                 )
             raise AttributeError(f"Field '{key}' has not been initialized.")
 
-        schema_entry = _lookup_entry(self._schema, key) or entry
+        schema_entry = _lookup_entry(self._schema, key)
+        assert schema_entry is not None
+
         raw = self._staging[key]
 
         if isinstance(schema_entry, (ArrayEntry, ArraySetEntry)):
