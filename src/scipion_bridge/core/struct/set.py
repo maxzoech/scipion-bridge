@@ -184,11 +184,11 @@ class Set(Marker[T], SchemaConvertible):
     def __len__(self) -> int:
         if self.capacity is not None:
             return self.capacity
-        for key, entry in self.schema().tree_iter():
-            if key in self._storage:
-                val = self._storage.read(key, entry)
-                return len(val)
-        return 0
+
+        raise TypeError(f"Set with dynamic capacity has no defined length.")
+
+    def __bool__(self) -> bool:
+        return True
 
     @classmethod
     def concat(cls, *sets: "Set[T]") -> "Set[T]":
@@ -330,7 +330,14 @@ class Set(Marker[T], SchemaConvertible):
             case int(idx):
                 assert (isinstance(self.dtype, type) and issubclass(self.dtype, Struct))
 
-                new_offset = self._storage.compute_index_offset(idx)
+                if self.capacity is None:
+                    raise IndexError("Cannot index into a Set with dynamic capacity without a prior bound or slice.")
+
+                norm_idx = self.capacity + idx if idx < 0 else idx
+                if norm_idx < 0 or norm_idx >= self.capacity:
+                    raise IndexError(f"Index {idx} out of range for Set with capacity {self.capacity}.")
+
+                new_offset = self._storage.compute_index_offset(norm_idx)
                 subview = ArrayStorageView(
                     self.dtype.schema(),
                     parent=self._storage.parent or self._storage,

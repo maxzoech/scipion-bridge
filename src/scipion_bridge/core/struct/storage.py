@@ -346,15 +346,29 @@ class _StagingEngine(_StorageEngine):
         offset: Offset,
     ) -> None:
         """Ensure static buffer in self._staging is allocated and sized for the write target."""
-        int_dims = tuple(d for d in entry.shape if d is not None)
-        assert len(int_dims) == len(entry.shape)
+        entry_cap = getattr(entry, "capacity", None)
 
         if _is_unbounded_slice_or_empty(offset):
             # Full column or unindexed struct write
+            if self.capacity is not None and len(arr) > self.capacity:
+                raise ValueError(
+                    f"Provided data of length {len(arr)} exceeds capacity {self.capacity} for field '{key}'."
+                )
+            if len(key) > 1 and entry_cap is not None:
+                if arr.ndim >= 2 and arr.shape[1] > entry_cap:
+                    raise ValueError(
+                        f"Provided nested dimension {arr.shape[1]} exceeds capacity {entry_cap} for field '{key}'."
+                    )
+            elif len(key) == 1 and entry_cap is not None and len(arr) > entry_cap:
+                raise ValueError(
+                    f"Provided data of length {len(arr)} exceeds capacity {entry_cap} for field '{key}'."
+                )
+
             if key not in self._staging or self._staging[key].shape != arr.shape:
                 self._staging[key] = np.empty_like(arr)
             return
 
+        shape = cast(Tuple[int, ...], entry.shape)
         # Bounded slice or index write
         idx_req = 1
         if isinstance(offset[0], int):
@@ -362,19 +376,28 @@ class _StagingEngine(_StorageEngine):
         elif isinstance(offset[0], slice) and offset[0].stop is not None:
             idx_req = offset[0].stop
 
-        if key not in self._staging:
-            if isinstance(entry, ArraySetEntry):
-                cap = max(entry.capacity or self.capacity or idx_req, idx_req)
-                self._staging[key] = np.zeros((cap, *int_dims), dtype=entry.dtype)
-            else:
-                self._staging[key] = np.zeros(int_dims, dtype=entry.dtype)
-        elif isinstance(entry, ArraySetEntry):
-            current_buf = self._staging[key]
-            if idx_req > len(current_buf):
-                new_cap = max(idx_req, len(current_buf) * 2)
-                new_buf = np.zeros((new_cap, *int_dims), dtype=entry.dtype)
-                new_buf[: len(current_buf)] = current_buf
-                self._staging[key] = new_buf
+        cap = self.capacity if len(key) > 1 else (entry_cap or self.capacity)
+        if cap is not None:
+            if idx_req > cap:
+                raise ValueError(
+                    f"Write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
+                )
+            if key not in self._staging:
+                if isinstance(entry, ArraySetEntry):
+                    self._staging[key] = np.zeros((cap, *shape), dtype=entry.dtype)
+                else:
+                    self._staging[key] = np.zeros(shape, dtype=entry.dtype)
+            elif idx_req > len(self._staging[key]):
+                raise ValueError(
+                    f"Write target index/stop {idx_req} exceeds buffer length {len(self._staging[key])} for field '{key}'."
+                )
+        else:
+            if isinstance(entry, ArraySetEntry) and key not in self._staging:
+                raise IndexError(
+                    f"Cannot perform indexed write on a Set with dynamic capacity without a prior bound or slice."
+                )
+            if key not in self._staging:
+                self._staging[key] = np.zeros(shape, dtype=entry.dtype)
 
     def _write_static(
         self,
@@ -398,29 +421,40 @@ class _StagingEngine(_StorageEngine):
         offset: Offset,
     ) -> None:
         """Ensure ragged slot list in self._staging exists and is sized for write."""
+        entry_cap = getattr(entry, "capacity", None)
+        cap = self.capacity if len(key) > 1 else (entry_cap or self.capacity)
+
         if _is_unbounded_slice_or_empty(offset):
             needed = len(prepared) if isinstance(prepared, (list, tuple)) else 0
+            if cap is not None and needed > cap:
+                raise ValueError(
+                    f"Ragged data length {needed} exceeds capacity {cap} for field '{key}'."
+                )
             self._staging[key] = [None] * needed
             return
 
-        cap = entry.capacity or self.capacity or 0
+        idx_req = 1
         if offset and isinstance(offset[0], int):
-            cap = max(cap, offset[0] + 1)
+            idx_req = offset[0] + 1
         elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
-            cap = max(cap, offset[0].stop)
-        elif not cap and isinstance(prepared, (list, tuple)):
-            cap = len(prepared)
+            idx_req = offset[0].stop
 
-        if key not in self._staging:
-            self._staging[key] = [None] * cap
+        if cap is not None:
+            if idx_req > cap:
+                raise ValueError(
+                    f"Ragged write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
+                )
+            if key not in self._staging:
+                self._staging[key] = [None] * cap
+            elif idx_req > len(self._staging[key]):
+                raise ValueError(
+                    f"Ragged write target index/stop {idx_req} exceeds slot length {len(self._staging[key])} for field '{key}'."
+                )
         else:
-            needed = 0
-            if offset and isinstance(offset[0], int):
-                needed = offset[0] + 1
-            elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
-                needed = offset[0].stop
-            if needed > len(self._staging[key]):
-                self._staging[key].extend([None] * (needed - len(self._staging[key])))
+            if key not in self._staging:
+                raise IndexError(
+                    f"Cannot perform indexed write on a ragged Set with dynamic capacity without a prior bound or slice."
+                )
 
     def _write_ragged(
         self,
@@ -523,56 +557,10 @@ class _StagingEngine(_StorageEngine):
             )
 
     def to_record_batch(self) -> pa.RecordBatch:
-        columns, names = self._build_columns(self._schema, prefix=())
+        columns, names = self._build_columns(
+            self._schema, prefix=(), parent_is_set=True, expected_len=self.capacity
+        )
         return pa.RecordBatch.from_arrays(columns, names)
-
-    def _infer_len_from_val(
-        self,
-        val: Any,
-        entry: Entry,
-        parent_is_set: bool,
-    ) -> Optional[int]:
-        """Derive batch length from a staged array or sequence."""
-        if isinstance(val, np.ndarray):
-            int_dims = tuple(d for d in getattr(entry, "shape", ()) if d is not None)
-            if len(val.shape) > len(int_dims):
-                return int(np.prod(val.shape[: len(val.shape) - len(int_dims)]))
-            return len(val)
-        elif isinstance(val, (list, tuple)):
-            if parent_is_set and len(val) > 0 and isinstance(val[0], (list, tuple)):
-                return sum(len(m) for m in val)
-            return len(val)
-        return None
-
-    def _infer_level_length(
-        self,
-        schema: Schema,
-        prefix: KeyPath,
-        parent_is_set: bool,
-        expected_len: Optional[int],
-    ) -> int:
-        """Infer active batch length from explicit expected length, direct fields, or leaf fields."""
-        if expected_len is not None:
-            return expected_len
-
-        # 1. Check direct fields at this schema level
-        for name, entry in schema.fields.items():
-            p = (*prefix, name)
-            if p in self._staging:
-                length = self._infer_len_from_val(self._staging[p], entry, parent_is_set)
-                if length is not None and length > 0:
-                    return length
-
-        # 2. Fall back to leaf entries in nested subschemas
-        for leaf_path, leaf_entry in schema.tree_iter(root=prefix):
-            if leaf_path in self._staging:
-                val = self._staging[leaf_path]
-                if isinstance(val, np.ndarray):
-                    return val.shape[0] if len(val.shape) > 0 else 0
-                elif isinstance(val, (list, tuple)):
-                    return len(val)
-
-        return self.capacity or 0
 
     def _build_nested_column(
         self,
@@ -638,14 +626,14 @@ class _StagingEngine(_StorageEngine):
     ) -> pa.ExtensionArray:
         """Compile static multidimensional tensor into an Arrow FixedShapeTensorArray."""
         raw = self._staging.get(path)
-        int_dims = tuple(d for d in entry.shape if d is not None)
+        shape = cast(Tuple[int, ...], entry.shape)
         if raw is None:
-            np_data = np.zeros((level_len, *int_dims), dtype=entry.dtype)
+            np_data = np.zeros((level_len, *shape), dtype=entry.dtype)
         else:
             np_data = ak.to_numpy(ak.Array(raw))
-            if parent_is_set and np_data.ndim > len(int_dims):
-                np_data = np_data.reshape(-1, *int_dims)
-        return build_tensor_array(np_data, shape=int_dims, dtype=entry.dtype)
+            if parent_is_set and np_data.ndim > len(shape):
+                np_data = np_data.reshape(-1, *shape)
+        return build_tensor_array(np_data, shape=shape, dtype=entry.dtype)
 
     def _build_ragged_column(
         self,
@@ -691,7 +679,50 @@ class _StagingEngine(_StorageEngine):
         """Recursively compile staged arrays and nested subschemas into Arrow arrays."""
         columns: List[pa.Array] = []
         names: List[str] = []
-        level_len = self._infer_level_length(schema, prefix, parent_is_set, expected_len)
+        if expected_len is not None:
+            level_len = expected_len
+        elif parent_is_set and prefix != ():
+            child_len = None
+            for child_path, _ in schema.tree_iter(root=prefix):
+                if child_path in self._staging:
+                    val = self._staging[child_path]
+                    if (
+                        isinstance(val, (list, tuple))
+                        and len(val) > 0
+                        and isinstance(val[0], (list, tuple))
+                    ):
+                        child_len = sum(len(m) for m in val)
+                        break
+                    elif isinstance(val, (list, tuple, np.ndarray)):
+                        child_len = len(val)
+                        break
+            level_len = child_len if child_len is not None else 0
+        elif self.capacity is not None:
+            staged_lens = []
+            for name in schema.fields:
+                p = (*prefix, name)
+                if p in self._staging:
+                    val = self._staging[p]
+                    if isinstance(val, (np.ndarray, list, tuple)):
+                        staged_lens.append(len(val))
+            if staged_lens and all(l == staged_lens[0] for l in staged_lens) and staged_lens[0] <= self.capacity:
+                level_len = staged_lens[0]
+            else:
+                level_len = self.capacity
+        else:
+            staged_lens = []
+            for name in schema.fields:
+                p = (*prefix, name)
+                if p in self._staging:
+                    val = self._staging[p]
+                    if isinstance(val, (np.ndarray, list, tuple)):
+                        staged_lens.append(len(val))
+            if staged_lens and all(l == staged_lens[0] for l in staged_lens):
+                level_len = staged_lens[0]
+            else:
+                raise ValueError(
+                    "Cannot compile dynamic Set to Arrow RecordBatch: capacity is undefined in schema and no consistent column lengths were found."
+                )
 
         for name, entry in schema.fields.items():
             path = (*prefix, name)
@@ -772,9 +803,10 @@ class _ArrowEngine(_StorageEngine):
 
         if isinstance(entry, (ArrayEntry, ArraySetEntry)):
             res = ak.to_numpy(sliced)
-            int_dims = tuple(d for d in entry.shape if d is not None)
-            if int_dims and res.shape[-len(int_dims):] != int_dims:
-                res = res.reshape((*res.shape[:-1], *int_dims))
+            if entry.is_static:
+                shape = cast(Tuple[int, ...], entry.shape)
+                if shape and res.shape[-len(shape):] != shape:
+                    res = res.reshape((*res.shape[:-1], *shape))
             return res
         elif isinstance(entry, RaggedArraySetEntry):
             return _read_ragged(sliced, entry, offset)

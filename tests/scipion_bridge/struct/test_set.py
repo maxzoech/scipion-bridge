@@ -562,7 +562,6 @@ def test_set_storage_shape_mismatch_raises():
         data["pixels"] = np.random.uniform(size=[5, 64, 64])
 
 
-@pytest.mark.skip(reason="Triage verification for now")
 def test_set_storage_capacity_exceeded_raises():
     class Data(B.Struct):
         pixels = B.Array[float](shape=(128, 128))
@@ -587,7 +586,7 @@ def test_ragged_set_operations_supported(as_engine):
         pixels = B.Array[float](shape=(dim, dim))
 
     # Set of dynamic items has is_static == False
-    ragged_set = B.Set[DynamicItem](capacity=10)
+    ragged_set = B.Set[DynamicItem](capacity=5)
     assert not ragged_set.schema().is_static
 
     # 2. Writing ragged column succeeds
@@ -602,6 +601,23 @@ def test_ragged_set_operations_supported(as_engine):
     # 4. Indexing element from ragged set succeeds
     elem = ragged_set[0]
     assert isinstance(elem, DynamicItem)
+
+
+def test_dynamic_set_len_and_indexing():
+    class Item(B.Struct):
+        val: float
+
+    dyn_set = B.Set[Item]()
+    assert dyn_set.capacity is None
+    assert bool(dyn_set) is True
+
+    # Calling len() on dynamic set raises TypeError
+    with pytest.raises(TypeError, match="dynamic capacity has no defined length"):
+        len(dyn_set)
+
+    # Indexing into dynamic set without a prior bound/slice raises IndexError
+    with pytest.raises(IndexError, match="Cannot index into a Set with dynamic capacity"):
+        _ = dyn_set[0]
 
 
 def test_basic_ragged_set_assign(as_engine):
