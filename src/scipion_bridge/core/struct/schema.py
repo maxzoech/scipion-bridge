@@ -57,6 +57,11 @@ class Entry(metaclass=abc.ABCMeta):
         """Return the nested schema if this entry contains children, else None."""
         return None
 
+    @property
+    def capacity(self) -> Optional[int]:
+        """Return the capacity along the indexing dimension if this entry is a Set or Set field."""
+        return None
+
     @abc.abstractmethod
     def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
         """Transform this entry into its Set-vectorized entry representation."""

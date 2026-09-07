@@ -277,14 +277,14 @@ class _StagingEngine(_StorageEngine):
                 raise TypeError(
                     f"Cannot cast data of dtype '{data.dtype}' to field '{key}' dtype '{target_dtype}'."
                 )
-            
+
         elif isinstance(data, (int, float, complex, bool, str)):
             scalar_arr = np.asanyarray(data)
             if not np.can_cast(scalar_arr.dtype, target_dtype, casting="same_kind"):
                 raise TypeError(
                     f"Cannot cast data of dtype '{scalar_arr.dtype}' to field '{key}' dtype '{target_dtype}'."
                 )
-            
+
         elif isinstance(data, (list, tuple)):
             if len(data) > 0:
                 self._validate_dtype(data[0], target_dtype, key)
@@ -303,7 +303,7 @@ class _StagingEngine(_StorageEngine):
                     f"Shape mismatch for key '{key}': expected at least {entry_ndim} dimensions, "
                     f"got data shape {arr.shape}."
                 )
-            
+
             for dim_idx, (expected_dim, actual_dim) in enumerate(
                 zip(entry.shape, arr.shape[-entry_ndim:])
             ):
@@ -312,14 +312,14 @@ class _StagingEngine(_StorageEngine):
                         f"Shape mismatch for key '{key}': expected dimension {dim_idx} to be {expected_dim}, "
                         f"got {actual_dim}."
                     )
-                
+
         elif isinstance(entry, ArrayEntry):
             if arr.ndim != len(entry.shape):
                 raise ValueError(
                     f"Dimension count mismatch for key '{key}': expected {len(entry.shape)} dimensions, "
                     f"got {arr.ndim} (shape {arr.shape})."
                 )
-            
+
             for dim_idx, (expected_dim, actual_dim) in enumerate(
                 zip(entry.shape, arr.shape)
             ):
@@ -338,65 +338,83 @@ class _StagingEngine(_StorageEngine):
             return [self._prepare_ragged_data(item, dtype) for item in data]
         return np.ascontiguousarray(data, dtype=dtype)
 
+    def _get_target_capacity(self, key: KeyPath, entry: Entry) -> Optional[int]:
+        """Resolve the effective container capacity along the indexing dimension for key."""
+        if len(key) > 1:
+            return self.capacity
+
+        return entry.capacity or self.capacity
+
+    def _get_required_length(self, offset: Offset) -> int:
+        """Extract the required 1-based index/stop bound along the primary indexing axis."""
+        match offset:
+            case (int(idx), *_):
+                return idx + 1
+            case (slice(stop=int(stop)), *_):
+                return stop
+            case _:
+                return 1
+
     def _ensure_static_buffer(
         self,
         key: KeyPath,
         entry: Union[ArrayEntry, ArraySetEntry],
-        arr: np.ndarray,
+        data: np.ndarray,
         offset: Offset,
     ) -> None:
         """Ensure static buffer in self._staging is allocated and sized for the write target."""
-        entry_cap = getattr(entry, "capacity", None)
-
         if _is_unbounded_slice_or_empty(offset):
             # Full column or unindexed struct write
-            if self.capacity is not None and len(arr) > self.capacity:
+            if self.capacity is not None and len(data) > self.capacity:
                 raise ValueError(
-                    f"Provided data of length {len(arr)} exceeds capacity {self.capacity} for field '{key}'."
-                )
-            if len(key) > 1 and entry_cap is not None:
-                if arr.ndim >= 2 and arr.shape[1] > entry_cap:
-                    raise ValueError(
-                        f"Provided nested dimension {arr.shape[1]} exceeds capacity {entry_cap} for field '{key}'."
-                    )
-            elif len(key) == 1 and entry_cap is not None and len(arr) > entry_cap:
-                raise ValueError(
-                    f"Provided data of length {len(arr)} exceeds capacity {entry_cap} for field '{key}'."
+                    f"Provided data of length {len(data)} exceeds capacity {self.capacity} for field '{key}'."
                 )
 
-            if key not in self._staging or self._staging[key].shape != arr.shape:
-                self._staging[key] = np.empty_like(arr)
+            if len(key) > 1:
+                if (
+                    entry.capacity is not None
+                    and data.ndim >= 2
+                    and data.shape[1] > entry.capacity
+                ):
+                    raise ValueError(
+                        f"Provided nested dimension {data.shape[1]} exceeds capacity {entry.capacity} for field '{key}'."
+                    )
+            elif entry.capacity is not None and len(data) > entry.capacity:
+                raise ValueError(
+                    f"Provided data of length {len(data)} exceeds capacity {entry.capacity} for field '{key}'."
+                )
+
+            if key not in self._staging or self._staging[key].shape != data.shape:
+                self._staging[key] = np.empty_like(data)
+
             return
 
-        shape = cast(Tuple[int, ...], entry.shape)
-        # Bounded slice or index write
-        idx_req = 1
-        if isinstance(offset[0], int):
-            idx_req = offset[0] + 1
-        elif isinstance(offset[0], slice) and offset[0].stop is not None:
-            idx_req = offset[0].stop
+        shape = tuple([e for e in entry.shape if e is not None])
+        assert len(shape) == len(entry.shape)
 
-        cap = self.capacity if len(key) > 1 else (entry_cap or self.capacity)
-        if cap is not None:
-            if idx_req > cap:
-                raise ValueError(
-                    f"Write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
-                )
-            if key not in self._staging:
-                if isinstance(entry, ArraySetEntry):
-                    self._staging[key] = np.zeros((cap, *shape), dtype=entry.dtype)
-                else:
-                    self._staging[key] = np.zeros(shape, dtype=entry.dtype)
-            elif idx_req > len(self._staging[key]):
+        idx_req = self._get_required_length(offset)
+        cap = self._get_target_capacity(key, entry)
+
+        if cap is not None and idx_req > cap:
+            raise ValueError(
+                f"Write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
+            )
+
+        if key in self._staging:
+            if idx_req > len(self._staging[key]):
                 raise ValueError(
                     f"Write target index/stop {idx_req} exceeds buffer length {len(self._staging[key])} for field '{key}'."
                 )
-        else:
-            if isinstance(entry, ArraySetEntry) and key not in self._staging:
+            return
+
+        match (cap, entry):
+            case (None, ArraySetEntry()):
                 raise IndexError(
-                    f"Cannot perform indexed write on a Set with dynamic capacity without a prior bound or slice."
+                    "Cannot perform indexed write on a Set with dynamic capacity without a prior bound or slice."
                 )
-            if key not in self._staging:
+            case (int(limit), ArraySetEntry()):
+                self._staging[key] = np.zeros((limit, *shape), dtype=entry.dtype)
+            case (_, ArrayEntry()):
                 self._staging[key] = np.zeros(shape, dtype=entry.dtype)
 
     def _write_static(
@@ -408,8 +426,10 @@ class _StagingEngine(_StorageEngine):
     ) -> None:
         """Unified write for static tensors using in-place slice/index assignment."""
         arr = np.asanyarray(data).astype(entry.dtype, copy=False)
+
         self._validate_shape(key, entry, arr)
         self._ensure_static_buffer(key, entry, arr, offset)
+
         target_offset = offset if offset is not None else ()
         self._staging[key][target_offset] = arr
 
@@ -421,8 +441,7 @@ class _StagingEngine(_StorageEngine):
         offset: Offset,
     ) -> None:
         """Ensure ragged slot list in self._staging exists and is sized for write."""
-        entry_cap = getattr(entry, "capacity", None)
-        cap = self.capacity if len(key) > 1 else (entry_cap or self.capacity)
+        cap = self._get_target_capacity(key, entry)
 
         if _is_unbounded_slice_or_empty(offset):
             needed = len(prepared) if isinstance(prepared, (list, tuple)) else 0
@@ -433,28 +452,27 @@ class _StagingEngine(_StorageEngine):
             self._staging[key] = [None] * needed
             return
 
-        idx_req = 1
-        if offset and isinstance(offset[0], int):
-            idx_req = offset[0] + 1
-        elif offset and isinstance(offset[0], slice) and offset[0].stop is not None:
-            idx_req = offset[0].stop
+        idx_req = self._get_required_length(offset)
 
-        if cap is not None:
-            if idx_req > cap:
-                raise ValueError(
-                    f"Ragged write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
-                )
-            if key not in self._staging:
-                self._staging[key] = [None] * cap
-            elif idx_req > len(self._staging[key]):
+        if cap is not None and idx_req > cap:
+            raise ValueError(
+                f"Ragged write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
+            )
+
+        if key in self._staging:
+            if idx_req > len(self._staging[key]):
                 raise ValueError(
                     f"Ragged write target index/stop {idx_req} exceeds slot length {len(self._staging[key])} for field '{key}'."
                 )
-        else:
-            if key not in self._staging:
+            return
+
+        match cap:
+            case None:
                 raise IndexError(
-                    f"Cannot perform indexed write on a ragged Set with dynamic capacity without a prior bound or slice."
+                    "Cannot perform indexed write on a ragged Set with dynamic capacity without a prior bound or slice."
                 )
+            case int(limit):
+                self._staging[key] = [None] * limit
 
     def _write_ragged(
         self,
@@ -466,6 +484,7 @@ class _StagingEngine(_StorageEngine):
         """Unified write for ragged entries delegating to _assign_ragged."""
         prepared = self._prepare_ragged_data(data, entry.dtype)
         self._ensure_ragged_slots(key, entry, prepared, offset)
+
         self._assign_ragged(self._staging[key], offset or (), prepared)
 
     def write(
@@ -508,6 +527,7 @@ class _StagingEngine(_StorageEngine):
             case (int(idx), *tail):
                 if slots[idx] is None:
                     slots[idx] = []
+
                 self._assign_ragged(slots[idx], tuple(tail), data)
             case (slice() as sl, *tail):
                 indices = range(*sl.indices(len(slots)))
@@ -526,15 +546,6 @@ class _StagingEngine(_StorageEngine):
     ) -> Any:
         key = self._resolve_key(key)
         if key not in self._staging:
-            schema_entry = _lookup_entry(self._schema, key)
-            if (
-                schema_entry is not None
-                and not schema_entry.is_static
-                and isinstance(schema_entry, ArrayEntry)
-            ):
-                raise AttributeError(
-                    f"Field '{key}' is dynamic and has not been initialized."
-                )
             raise AttributeError(f"Field '{key}' has not been initialized.")
 
         schema_entry = _lookup_entry(self._schema, key)
@@ -542,23 +553,28 @@ class _StagingEngine(_StorageEngine):
 
         raw = self._staging[key]
 
-        if isinstance(schema_entry, (ArrayEntry, ArraySetEntry)):
-            if offset is None or offset == ():
-                return raw
-            return raw[offset]
+        match schema_entry:
+            case ArrayEntry() | ArraySetEntry():
+                if not offset:
+                    return raw
 
-        elif isinstance(schema_entry, RaggedArraySetEntry):
-            ak_arr = ak.Array(raw)
-            sliced = ak_arr[offset] if (offset is not None and offset != ()) else ak_arr
-            return _read_ragged(sliced, schema_entry, offset)
-        else:
-            raise TypeError(
-                f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
-            )
+                return raw[offset]
+            case RaggedArraySetEntry():
+                ragged_array = ak.Array(raw)
+                sliced = ragged_array[offset] if offset else ragged_array
+
+                return _read_ragged(sliced, schema_entry, offset)
+            case _:
+                raise TypeError(
+                    f"Unsupported schema entry '{type(entry).__name__}' for read of key '{key}'."
+                )
 
     def to_record_batch(self) -> pa.RecordBatch:
         columns, names = self._build_columns(
-            self._schema, prefix=(), parent_is_set=True, expected_len=self.capacity
+            self._schema,
+            prefix=(),
+            parent_is_set=True,
+            expected_len=self.capacity,
         )
         return pa.RecordBatch.from_arrays(columns, names)
 
@@ -572,9 +588,14 @@ class _StagingEngine(_StorageEngine):
         assert entry.children is not None
         is_nested_set = isinstance(entry, SchemaSetEntry)
         if is_nested_set:
-            child_expected = (level_len * entry.capacity) if entry.capacity is not None else None
+            child_expected = (
+                (level_len * entry.capacity) if entry.capacity is not None else None
+            )
             sub_cols, sub_names = self._build_columns(
-                entry.children, prefix=path, parent_is_set=True, expected_len=child_expected
+                entry.children,
+                prefix=path,
+                parent_is_set=True,
+                expected_len=child_expected,
             )
         else:
             sub_cols, sub_names = self._build_columns(
@@ -705,7 +726,11 @@ class _StagingEngine(_StorageEngine):
                     val = self._staging[p]
                     if isinstance(val, (np.ndarray, list, tuple)):
                         staged_lens.append(len(val))
-            if staged_lens and all(l == staged_lens[0] for l in staged_lens) and staged_lens[0] <= self.capacity:
+            if (
+                staged_lens
+                and all(l == staged_lens[0] for l in staged_lens)
+                and staged_lens[0] <= self.capacity
+            ):
                 level_len = staged_lens[0]
             else:
                 level_len = self.capacity
@@ -732,11 +757,17 @@ class _StagingEngine(_StorageEngine):
                 case SchemaSetEntry() | SchemaEntry():
                     columns.append(self._build_nested_column(entry, path, level_len))
                 case ArraySetEntry() | ArrayEntry():
-                    columns.append(self._build_static_column(entry, path, level_len, parent_is_set))
+                    columns.append(
+                        self._build_static_column(entry, path, level_len, parent_is_set)
+                    )
                 case RaggedArraySetEntry():
-                    columns.append(self._build_ragged_column(entry, path, level_len, parent_is_set))
+                    columns.append(
+                        self._build_ragged_column(entry, path, level_len, parent_is_set)
+                    )
                 case _:
-                    raise TypeError(f"Unsupported schema entry type '{type(entry).__name__}'.")
+                    raise TypeError(
+                        f"Unsupported schema entry type '{type(entry).__name__}'."
+                    )
 
         return columns, names
 
@@ -765,7 +796,9 @@ class _ArrowEngine(_StorageEngine):
         self._schema = schema
         self._batch = batch
         unwrapped_columns = [_unwrap_extension_array(c) for c in batch.columns]
-        unwrapped_batch = pa.RecordBatch.from_arrays(unwrapped_columns, names=batch.schema.names)
+        unwrapped_batch = pa.RecordBatch.from_arrays(
+            unwrapped_columns, names=batch.schema.names
+        )
         self._ak_batch = ak.from_arrow(unwrapped_batch)
 
     @property
@@ -805,7 +838,7 @@ class _ArrowEngine(_StorageEngine):
             res = ak.to_numpy(sliced)
             if entry.is_static:
                 shape = cast(Tuple[int, ...], entry.shape)
-                if shape and res.shape[-len(shape):] != shape:
+                if shape and res.shape[-len(shape) :] != shape:
                     res = res.reshape((*res.shape[:-1], *shape))
             return res
         elif isinstance(entry, RaggedArraySetEntry):

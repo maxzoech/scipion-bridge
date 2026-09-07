@@ -729,7 +729,7 @@ def test_array_descriptor_error_handling():
     inst = Record()
 
     # 1. Reading uninitialized dynamic array raises AttributeError
-    with pytest.raises(AttributeError, match="is dynamic and has not been initialized"):
+    with pytest.raises(AttributeError, match="has not been initialized"):
         _ = inst.pixels
 
     # 2. Writing valid dynamic array succeeds and is readable
