@@ -331,12 +331,16 @@ class _StagingEngine(_StorageEngine):
 
     def _prepare_ragged_data(self, data: Any, dtype: np.dtype) -> Any:
         """Recursively prepare ragged input into contiguous arrays of expected dtype."""
+        if data is None:
+            return None
+
         if isinstance(data, RaggedArrayView):
             data = list(data)
 
         if isinstance(data, (list, tuple)):
             return [self._prepare_ragged_data(item, dtype) for item in data]
         return np.ascontiguousarray(data, dtype=dtype)
+
 
     def _get_target_capacity(self, key: KeyPath, entry: Entry) -> Optional[int]:
         """Resolve the effective container capacity along the indexing dimension for key."""
@@ -578,44 +582,80 @@ class _StagingEngine(_StorageEngine):
         )
         return pa.RecordBatch.from_arrays(columns, names)
 
-    def _build_nested_column(
+    def _get_staged_field_lengths(self, schema: Schema, prefix: KeyPath) -> List[int]:
+        """Return lengths of all staged buffers under immediate fields of schema."""
+        length = []
+        for name in schema.fields:
+            val = self._staging.get((*prefix, name))
+            if isinstance(val, (np.ndarray, list, tuple)):
+                length.append(len(val))
+
+        return length
+
+    def _resolve_dynamic_child_len(self, schema: Schema, prefix: KeyPath) -> int:
+        """Resolve total child count across dynamic nested set instances from staged buffers."""
+        for child_path, _ in schema.tree_iter(root=prefix):
+            if child_path in self._staging:
+                val = self._staging[child_path]
+                if (
+                    isinstance(val, (list, tuple))
+                    and len(val) > 0
+                    and isinstance(val[0], (list, tuple))
+                ):
+                    return sum(len(m) for m in val)
+                elif isinstance(val, (list, tuple, np.ndarray)):
+                    return len(val)
+                
+        return 0
+
+    def _resolve_level_len(
         self,
-        entry: Union[SchemaSetEntry, SchemaEntry],
+        schema: Schema,
+        prefix: KeyPath,
+        parent_is_set: bool,
+        expected_len: Optional[int],
+    ) -> int:
+        """Determine row count: uses schema/parent expected length first, falls back to staging for dynamic sets."""
+        if expected_len is not None and prefix != ():
+            return expected_len
+
+        if parent_is_set and prefix != ():
+            return self._resolve_dynamic_child_len(schema, prefix)
+
+        staged_lens = self._get_staged_field_lengths(schema, prefix)
+        all_fields_staged = len(staged_lens) == len(schema.fields)
+        has_uniform_lens = staged_lens and all(l == staged_lens[0] for l in staged_lens)
+
+        if self.capacity is not None:
+            if all_fields_staged and has_uniform_lens and staged_lens[0] <= self.capacity:
+                return staged_lens[0]
+            return self.capacity
+
+        if has_uniform_lens:
+            return staged_lens[0]
+
+        raise ValueError(
+            "Cannot compile dynamic Set to Arrow RecordBatch: capacity is undefined in schema "
+            "and no consistent column lengths were found."
+        )
+
+    def _build_dynamic_list_array(
+        self,
+        entry: SchemaSetEntry,
         path: KeyPath,
         level_len: int,
-    ) -> pa.Array:
-        """Build a StructArray or ListArray for nested Struct or Set schemas."""
+        sub_struct: pa.StructArray,
+    ) -> pa.ListArray:
+        """Construct a variable-length ListArray for a dynamic nested Set."""
         assert entry.children is not None
-        is_nested_set = isinstance(entry, SchemaSetEntry)
-        if is_nested_set:
-            child_expected = (
-                (level_len * entry.capacity) if entry.capacity is not None else None
-            )
-            sub_cols, sub_names = self._build_columns(
-                entry.children,
-                prefix=path,
-                parent_is_set=True,
-                expected_len=child_expected,
-            )
-        else:
-            sub_cols, sub_names = self._build_columns(
-                entry.children, prefix=path, parent_is_set=False, expected_len=level_len
-            )
-
-        sub_struct = pa.StructArray.from_arrays(sub_cols, names=sub_names)
-
-        if not is_nested_set:
-            return sub_struct
-
-        if entry.capacity is not None:
-            return pa.FixedSizeListArray.from_arrays(sub_struct, entry.capacity)
-
-        # Dynamic nested set with variable child lengths
         child_lengths: Optional[List[int]] = None
+
         for child_name in entry.children.fields:
             child_path = (*path, child_name)
+
             if child_path in self._staging:
                 child_val = self._staging[child_path]
+
                 if (
                     isinstance(child_val, (list, tuple))
                     and len(child_val) > 0
@@ -628,6 +668,7 @@ class _StagingEngine(_StorageEngine):
             offsets = [0]
             for child_len in child_lengths:
                 offsets.append(offsets[-1] + child_len)
+
             while len(offsets) < level_len + 1:
                 offsets.append(offsets[-1])
         else:
@@ -638,6 +679,45 @@ class _StagingEngine(_StorageEngine):
 
         return pa.ListArray.from_arrays(pa.array(offsets, type=pa.int32()), sub_struct)
 
+    def _build_nested_column(
+        self,
+        entry: Union[SchemaSetEntry, SchemaEntry],
+        path: KeyPath,
+        level_len: int,
+    ) -> pa.Array:
+        """Build a StructArray or ListArray for nested Struct or Set schemas."""
+        assert entry.children is not None
+        match entry:
+            case SchemaSetEntry(capacity=int(cap)):
+                child_expected = level_len * cap
+                sub_cols, sub_names = self._build_columns(
+                    entry.children,
+                    prefix=path,
+                    parent_is_set=True,
+                    expected_len=child_expected,
+                )
+                sub_struct = pa.StructArray.from_arrays(sub_cols, names=sub_names)
+                return pa.FixedSizeListArray.from_arrays(sub_struct, cap)
+
+            case SchemaSetEntry(capacity=None):
+                sub_cols, sub_names = self._build_columns(
+                    entry.children,
+                    prefix=path,
+                    parent_is_set=True,
+                    expected_len=None,
+                )
+                sub_struct = pa.StructArray.from_arrays(sub_cols, names=sub_names)
+                return self._build_dynamic_list_array(entry, path, level_len, sub_struct)
+
+            case SchemaEntry():
+                sub_cols, sub_names = self._build_columns(
+                    entry.children,
+                    prefix=path,
+                    parent_is_set=False,
+                    expected_len=level_len,
+                )
+                return pa.StructArray.from_arrays(sub_cols, names=sub_names)
+
     def _build_static_column(
         self,
         entry: Union[ArraySetEntry, ArrayEntry],
@@ -645,16 +725,25 @@ class _StagingEngine(_StorageEngine):
         level_len: int,
         parent_is_set: bool,
     ) -> pa.ExtensionArray:
-        """Compile static multidimensional tensor into an Arrow FixedShapeTensorArray."""
+        """Compile static multidimensional tensor into an Arrow FixedShapeTensorArray with null bitmask."""
         raw = self._staging.get(path)
         shape = cast(Tuple[int, ...], entry.shape)
         if raw is None:
             np_data = np.zeros((level_len, *shape), dtype=entry.dtype)
+            mask = [True] * level_len
         else:
             np_data = ak.to_numpy(ak.Array(raw))
             if parent_is_set and np_data.ndim > len(shape):
                 np_data = np_data.reshape(-1, *shape)
-        return build_tensor_array(np_data, shape=shape, dtype=entry.dtype)
+            actual_len = len(np_data)
+            if actual_len < level_len:
+                padded = np.zeros((level_len, *shape), dtype=entry.dtype)
+                padded[:actual_len] = np_data
+                np_data = padded
+                mask = [False] * actual_len + [True] * (level_len - actual_len)
+            else:
+                mask = None
+        return build_tensor_array(np_data, shape=shape, dtype=entry.dtype, mask=mask)
 
     def _build_ragged_column(
         self,
@@ -663,7 +752,7 @@ class _StagingEngine(_StorageEngine):
         level_len: int,
         parent_is_set: bool,
     ) -> Union[pa.ListArray, pa.LargeListArray]:
-        """Compile variable-length 1D or nD ragged array into an Arrow ListArray."""
+        """Compile variable-length 1D or nD ragged array into an Arrow ListArray with null bitmask."""
         raw = self._staging.get(path)
         if raw is None:
             return build_ragged_array([None] * level_len, entry.dtype)
@@ -698,56 +787,9 @@ class _StagingEngine(_StorageEngine):
         expected_len: Optional[int] = None,
     ) -> Tuple[List[pa.Array], List[str]]:
         """Recursively compile staged arrays and nested subschemas into Arrow arrays."""
+        level_len = self._resolve_level_len(schema, prefix, parent_is_set, expected_len)
         columns: List[pa.Array] = []
         names: List[str] = []
-        if expected_len is not None:
-            level_len = expected_len
-        elif parent_is_set and prefix != ():
-            child_len = None
-            for child_path, _ in schema.tree_iter(root=prefix):
-                if child_path in self._staging:
-                    val = self._staging[child_path]
-                    if (
-                        isinstance(val, (list, tuple))
-                        and len(val) > 0
-                        and isinstance(val[0], (list, tuple))
-                    ):
-                        child_len = sum(len(m) for m in val)
-                        break
-                    elif isinstance(val, (list, tuple, np.ndarray)):
-                        child_len = len(val)
-                        break
-            level_len = child_len if child_len is not None else 0
-        elif self.capacity is not None:
-            staged_lens = []
-            for name in schema.fields:
-                p = (*prefix, name)
-                if p in self._staging:
-                    val = self._staging[p]
-                    if isinstance(val, (np.ndarray, list, tuple)):
-                        staged_lens.append(len(val))
-            if (
-                staged_lens
-                and all(l == staged_lens[0] for l in staged_lens)
-                and staged_lens[0] <= self.capacity
-            ):
-                level_len = staged_lens[0]
-            else:
-                level_len = self.capacity
-        else:
-            staged_lens = []
-            for name in schema.fields:
-                p = (*prefix, name)
-                if p in self._staging:
-                    val = self._staging[p]
-                    if isinstance(val, (np.ndarray, list, tuple)):
-                        staged_lens.append(len(val))
-            if staged_lens and all(l == staged_lens[0] for l in staged_lens):
-                level_len = staged_lens[0]
-            else:
-                raise ValueError(
-                    "Cannot compile dynamic Set to Arrow RecordBatch: capacity is undefined in schema and no consistent column lengths were found."
-                )
 
         for name, entry in schema.fields.items():
             path = (*prefix, name)
@@ -755,37 +797,39 @@ class _StagingEngine(_StorageEngine):
 
             match entry:
                 case SchemaSetEntry() | SchemaEntry():
-                    columns.append(self._build_nested_column(entry, path, level_len))
+                    col = self._build_nested_column(entry, path, level_len)
                 case ArraySetEntry() | ArrayEntry():
-                    columns.append(
-                        self._build_static_column(entry, path, level_len, parent_is_set)
-                    )
+                    col = self._build_static_column(entry, path, level_len, parent_is_set)
                 case RaggedArraySetEntry():
-                    columns.append(
-                        self._build_ragged_column(entry, path, level_len, parent_is_set)
-                    )
+                    col = self._build_ragged_column(entry, path, level_len, parent_is_set)
                 case _:
                     raise TypeError(
                         f"Unsupported schema entry type '{type(entry).__name__}'."
                     )
+            columns.append(col)
 
         return columns, names
+
 
 
 def _unwrap_extension_array(a: pa.Array) -> pa.Array:
     """Recursively strip Arrow extension types (e.g. FixedShapeTensor) to underlying storage arrays for Awkward."""
     if isinstance(a, pa.ExtensionArray):
         return _unwrap_extension_array(a.storage)
+    
     if isinstance(a, pa.StructArray):
         fields = [_unwrap_extension_array(a.field(i)) for i in range(a.type.num_fields)]
         names = [a.type.field(i).name for i in range(a.type.num_fields)]
         return pa.StructArray.from_arrays(fields, names=names)
+    
     if isinstance(a, pa.FixedSizeListArray):
         unwrapped_values = _unwrap_extension_array(a.values)
         return pa.FixedSizeListArray.from_arrays(unwrapped_values, a.type.list_size)
+    
     if isinstance(a, (pa.ListArray, pa.LargeListArray)):
         unwrapped_values = _unwrap_extension_array(a.values)
         return type(a).from_arrays(a.offsets, unwrapped_values)
+    
     return a
 
 

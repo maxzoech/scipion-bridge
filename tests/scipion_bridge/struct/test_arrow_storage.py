@@ -357,3 +357,44 @@ def test_set_indexing_three_primitives():
     with pytest.raises(TypeError, match="Invalid Set key type"):
         s["sub", "val"] = np.ones((5, 1))
 
+
+def test_arrow_missing_values_bitmask():
+    """Verify that uninitialized and partially written fields generate Arrow validity bitmasks."""
+    class Sample(B.Struct):
+        pixels = B.Array[float](shape=(4, 4))
+        tag: int
+        ragged = B.Array[float](shape=(None,))
+
+    s = B.Set[Sample](capacity=4)
+    # Partially write pixels: only 2 rows populated
+    s["pixels"] = np.ones((2, 4, 4), dtype=np.float64)
+    # Do not write tag at all (completely uninitialized)
+    # Ragged with explicit None in middle
+    s["ragged"] = [np.array([1.0, 2.0]), None, np.array([3.0])]
+
+    batch = s.to_arrow()
+    assert isinstance(batch, pa.RecordBatch)
+    assert batch.num_rows == 4
+
+    # 1. Completely uninitialized field (tag): all 4 rows are null
+    tag_col = batch.column("tag")
+    assert tag_col.null_count == 4
+    for i in range(4):
+        assert not tag_col[i].is_valid
+
+    # 2. Partially populated field (pixels): first 2 valid, last 2 null
+    pixels_col = batch.column("pixels")
+    assert pixels_col.null_count == 2
+    assert pixels_col[0].is_valid
+    assert pixels_col[1].is_valid
+    assert not pixels_col[2].is_valid
+    assert not pixels_col[3].is_valid
+
+    # 3. Ragged field: index 1 is None, index 3 is padded None -> 2 nulls
+    ragged_col = batch.column("ragged")
+    assert ragged_col.null_count == 2
+    assert ragged_col[0].is_valid
+    assert not ragged_col[1].is_valid
+    assert ragged_col[2].is_valid
+    assert not ragged_col[3].is_valid
+

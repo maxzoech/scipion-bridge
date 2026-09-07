@@ -88,24 +88,33 @@ def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
     return pa.schema(fields)
 
 
-def build_tensor_array(data: np.ndarray, shape: Tuple[int, ...], dtype: np.dtype) -> pa.ExtensionArray:
-    """Compile a contiguous multidimensional NumPy array into an Arrow FixedShapeTensorArray."""
+def build_tensor_array(
+    data: np.ndarray,
+    shape: Tuple[int, ...],
+    dtype: np.dtype,
+    mask: Optional[Sequence[bool] | NDArray] = None,
+) -> pa.ExtensionArray:
+    """Compile a contiguous multidimensional NumPy array into an Arrow FixedShapeTensorArray with optional validity bitmask."""
     cell_size = int(np.prod(shape))
     pa_dtype = pa.from_numpy_dtype(dtype)
     flat_data = np.ascontiguousarray(data, dtype=dtype).ravel()
     flat_pa = pa.array(flat_data, type=pa_dtype)
-    storage = pa.FixedSizeListArray.from_arrays(flat_pa, cell_size)
+    pa_mask = pa.array(mask, type=pa.bool_()) if mask is not None else None
+    storage = pa.FixedSizeListArray.from_arrays(flat_pa, cell_size, mask=pa_mask)
     tensor_type = pa.fixed_shape_tensor(pa_dtype, shape)
     return pa.ExtensionArray.from_storage(tensor_type, storage)
 
 
 def build_ragged_array(chunks: Sequence[Optional[np.ndarray]], dtype: np.dtype) -> pa.ListArray:
-    """Compile a list of variable-length NumPy arrays into an Arrow ListArray using offsets."""
+    """Compile a list of variable-length NumPy arrays into an Arrow ListArray using offsets and validity bitmask."""
     offsets = [0]
     valid_chunks: List[np.ndarray] = []
+    mask: List[bool] = []
 
     for c in chunks:
-        if c is not None:
+        is_missing = c is None
+        mask.append(is_missing)
+        if not is_missing:
             arr = np.ascontiguousarray(c, dtype=dtype)
         else:
             arr = np.empty(0, dtype=dtype)
@@ -115,4 +124,6 @@ def build_ragged_array(chunks: Sequence[Optional[np.ndarray]], dtype: np.dtype) 
     flat = np.concatenate(valid_chunks) if valid_chunks else np.empty(0, dtype=dtype)
     pa_offsets = pa.array(offsets, type=pa.int32())
     pa_values = pa.array(flat, type=pa.from_numpy_dtype(dtype))
-    return pa.ListArray.from_arrays(pa_offsets, pa_values)
+    pa_mask = pa.array(mask, type=pa.bool_()) if any(mask) else None
+    return pa.ListArray.from_arrays(pa_offsets, pa_values, mask=pa_mask)
+
