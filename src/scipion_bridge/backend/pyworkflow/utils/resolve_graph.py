@@ -100,7 +100,7 @@ def find_pointer_class(target_type: Type) -> Optional[str]:
     # 2. Item-level Predecessor Check (if target_type is a Set container)
     if isinstance(target_type, type) and issubclass(target_type, struct.Set):
         item_type = target_type.item_type()
-        if item_type in graph:
+        if item_type is not None and item_type in graph:
             for u in graph.predecessors(item_type):
                 types = _extract_scipion_container_types(u, modules, base_set, base_obj)
                 candidates.update(types)
@@ -130,7 +130,7 @@ def find_output_pointer_class(
     # 2. Item-level Successor Check (if target_type is a Set container)
     if isinstance(target_type, type) and issubclass(target_type, struct.Set) and include_itemwise:
         item_type = target_type.item_type()
-        if item_type in graph:
+        if item_type is not None and item_type in graph:
             for v in graph.successors(item_type):
                 types = _extract_scipion_container_types(v, modules, base_set, base_obj)
                 candidates.update(types)

@@ -1,4 +1,4 @@
-# from .particle import Particle, FlexParticle
+from .particle import Particle, FlexParticle
 from .proxies import ParticleStackProxy
 
 from ..core.typed.resolve import lift_resolvers

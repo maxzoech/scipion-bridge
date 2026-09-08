@@ -5,6 +5,8 @@ import scipion_bridge as sb
 import scipion_bridge.core.typed.resolve as resolve
 from scipion_bridge.core.typed.resolve import ScopedPathfindingContainer as Container
 
+from typing import Optional
+
 import pytest
 
 
@@ -313,7 +315,7 @@ class DummyContext:
 def test_resolver_with_metadata_option():
     @sb.resolver
     def resolve_meta_source_to_target(
-        value: MetaSource, metadata: DummyContext = None
+        value: MetaSource, metadata: Optional[DummyContext] = None
     ) -> MetaTarget:
         if metadata is not None:
             res_str = f"{metadata.prefix}:{value.data * metadata.factor}"
@@ -347,7 +349,7 @@ def test_resolver_with_metadata_multistep():
 
     # StepA -> StepB uses metadata
     @sb.resolver
-    def resolve_step_a_to_b(value: StepA, metadata: dict = None) -> StepB:
+    def resolve_step_a_to_b(value: StepA, metadata: Optional[dict] = None) -> StepB:
         tag = metadata.get("tag", "default") if metadata else "none"
         return StepB(val=value.val * 2, meta_info=tag)
 

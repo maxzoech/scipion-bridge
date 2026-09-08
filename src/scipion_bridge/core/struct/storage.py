@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TypeAlias, cast
 import awkward as ak
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as _pc
+pc: Any = _pc
 
 from .schema import (
     Schema,
@@ -97,6 +99,7 @@ class _BaseStorage(abc.ABC):
         self.parent = parent
         self.offset = offset
         self.path: KeyPath = tuple(path)
+        self._field_capacities: Dict[str, Optional[int]] = {}
 
     @property
     def is_view(self) -> bool:
@@ -196,7 +199,7 @@ def _read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Offset) -> Any
     if is_element_index:
         try:
             return ak.to_numpy(sliced)
-        except (ValueError, TypeError, pa.lib.ArrowInvalid):
+        except (ValueError, TypeError, pa.ArrowInvalid):
             return sliced
 
     if sliced.ndim == 2 and (
@@ -208,7 +211,7 @@ def _read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Offset) -> Any
                 pa_arr = pa_arr.combine_chunks()
             if isinstance(pa_arr, (pa.ListArray, pa.LargeListArray)):
                 return RaggedArrayView(pa_arr, entry.dtype)
-        except (ValueError, TypeError, pa.lib.ArrowInvalid):
+        except (ValueError, TypeError, pa.ArrowInvalid):
             pass
 
     return sliced
@@ -375,13 +378,17 @@ class _StagingEngine(_StorageEngine):
                 )
 
             if len(key) > 1:
+                target_nested_len = (
+                    data.shape[1] if self.capacity is not None else len(data)
+                )
+                min_dims = 2 if self.capacity is not None else 1
                 if (
                     entry.capacity is not None
-                    and data.ndim >= 2
-                    and data.shape[1] > entry.capacity
+                    and data.ndim >= min_dims
+                    and target_nested_len > entry.capacity
                 ):
                     raise ValueError(
-                        f"Provided nested dimension {data.shape[1]} exceeds capacity {entry.capacity} for field '{key}'."
+                        f"Provided nested dimension {target_nested_len} exceeds capacity {entry.capacity} for field '{key}'."
                     )
             elif entry.capacity is not None and len(data) > entry.capacity:
                 raise ValueError(
@@ -600,9 +607,9 @@ class _StagingEngine(_StorageEngine):
                 if (
                     isinstance(val, (list, tuple))
                     and len(val) > 0
-                    and isinstance(val[0], (list, tuple))
+                    and (isinstance(val[0], (list, tuple, np.ndarray)) or hasattr(val[0], "__len__"))
                 ):
-                    return sum(len(m) for m in val)
+                    return sum(len(m) if m is not None else 0 for m in val)
                 elif isinstance(val, (list, tuple, np.ndarray)):
                     return len(val)
                 
@@ -659,9 +666,9 @@ class _StagingEngine(_StorageEngine):
                 if (
                     isinstance(child_val, (list, tuple))
                     and len(child_val) > 0
-                    and isinstance(child_val[0], (list, tuple))
+                    and (isinstance(child_val[0], (list, tuple, np.ndarray)) or hasattr(child_val[0], "__len__"))
                 ):
-                    child_lengths = [len(m) for m in child_val]
+                    child_lengths = [len(m) if m is not None else 0 for m in child_val]
                     break
 
         if child_lengths is not None:
@@ -751,6 +758,7 @@ class _StagingEngine(_StorageEngine):
         path: KeyPath,
         level_len: int,
         parent_is_set: bool,
+        prefix: KeyPath = (),
     ) -> Union[pa.ListArray, pa.LargeListArray]:
         """Compile variable-length 1D or nD ragged array into an Arrow ListArray with null bitmask."""
         raw = self._staging.get(path)
@@ -759,11 +767,12 @@ class _StagingEngine(_StorageEngine):
 
         if (
             parent_is_set
+            and prefix != ()
             and isinstance(raw, (list, tuple))
             and len(raw) > 0
-            and isinstance(raw[0], (list, tuple))
+            and (isinstance(raw[0], (list, tuple, np.ndarray)) or hasattr(raw[0], "__len__"))
         ):
-            raw_to_build = [item for sub in raw for item in sub]
+            raw_to_build = [item for sub in raw if sub is not None for item in sub]
         else:
             raw_to_build = list(raw)
 
@@ -801,7 +810,9 @@ class _StagingEngine(_StorageEngine):
                 case ArraySetEntry() | ArrayEntry():
                     col = self._build_static_column(entry, path, level_len, parent_is_set)
                 case RaggedArraySetEntry():
-                    col = self._build_ragged_column(entry, path, level_len, parent_is_set)
+                    col = self._build_ragged_column(
+                        entry, path, level_len, parent_is_set, prefix
+                    )
                 case _:
                     raise TypeError(
                         f"Unsupported schema entry type '{type(entry).__name__}'."
@@ -812,38 +823,134 @@ class _StagingEngine(_StorageEngine):
 
 
 
-def _unwrap_extension_array(a: pa.Array) -> pa.Array:
-    """Recursively strip Arrow extension types (e.g. FixedShapeTensor) to underlying storage arrays for Awkward."""
-    if isinstance(a, pa.ExtensionArray):
-        return _unwrap_extension_array(a.storage)
-    
-    if isinstance(a, pa.StructArray):
-        fields = [_unwrap_extension_array(a.field(i)) for i in range(a.type.num_fields)]
-        names = [a.type.field(i).name for i in range(a.type.num_fields)]
-        return pa.StructArray.from_arrays(fields, names=names)
-    
-    if isinstance(a, pa.FixedSizeListArray):
-        unwrapped_values = _unwrap_extension_array(a.values)
-        return pa.FixedSizeListArray.from_arrays(unwrapped_values, a.type.list_size)
-    
-    if isinstance(a, (pa.ListArray, pa.LargeListArray)):
-        unwrapped_values = _unwrap_extension_array(a.values)
-        return type(a).from_arrays(a.offsets, unwrapped_values)
-    
-    return a
+def _extract_field_from_arrow(col: pa.Array, field_name: str) -> pa.Array:
+    """Recursively traverse StructArray or ListArray layers to extract a named child field."""
+    mask = col.is_null() if col.null_count > 0 else None
+    match col:
+        case pa.StructArray():
+            return col.field(field_name)
+        case pa.ListArray() | pa.LargeListArray():
+            inner = _extract_field_from_arrow(col.values, field_name)
+            return type(col).from_arrays(col.offsets, inner, mask=mask)
+        case pa.FixedSizeListArray():
+            inner = _extract_field_from_arrow(col.values, field_name)
+            base = pa.FixedSizeListArray.from_arrays(inner, col.type.list_size, mask=mask)
+            return base.slice(col.offset, len(col))
+        case _:
+            raise TypeError(f"Cannot extract field '{field_name}' from {type(col).__name__}.")
+
+
+def _get_nested_arrow_field(col: pa.Array, path: KeyPath) -> pa.Array:
+    """Traverse nested StructArray / ListArray layers along a KeyPath to resolve the leaf field array."""
+    for seg in path:
+        col = _extract_field_from_arrow(col, seg)
+    return col
+
+
+def _unwrap_extension_for_compute(arr: pa.Array) -> Tuple[pa.Array, Optional[pa.DataType]]:
+    """Unwrap leaf FixedShapeTensorArray to storage array for PyArrow compute kernels."""
+    match arr:
+        case pa.ListArray() | pa.LargeListArray() | pa.FixedSizeListArray():
+            inner, ext_type = _unwrap_extension_for_compute(arr.values)
+            if ext_type is not None:
+                mask = arr.is_null() if arr.null_count > 0 else None
+                if isinstance(arr, pa.FixedSizeListArray):
+                    base = pa.FixedSizeListArray.from_arrays(inner, arr.type.list_size, mask=mask)
+                    return base.slice(arr.offset, len(arr)), ext_type
+                else:
+                    return type(arr).from_arrays(arr.offsets, inner, mask=mask), ext_type
+            return arr, None
+        case pa.ExtensionArray():
+            return arr.storage, arr.type
+        case _:
+            return arr, None
+
+
+def _rewrap_extension_after_compute(arr: pa.Array, ext_type: Optional[pa.DataType]) -> pa.Array:
+    """Re-wrap storage array back into FixedShapeTensorArray after compute operations."""
+    if ext_type is None:
+        return arr
+    if isinstance(arr, pa.FixedSizeListArray) and arr.type.list_size == ext_type.storage_type.list_size:
+        return pa.ExtensionArray.from_storage(ext_type, arr)
+    if isinstance(arr, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
+        mask = arr.is_null() if arr.null_count > 0 else None
+        wrapped_values = _rewrap_extension_after_compute(arr.values, ext_type)
+        if isinstance(arr, pa.FixedSizeListArray):
+            base = pa.FixedSizeListArray.from_arrays(wrapped_values, arr.type.list_size, mask=mask)
+            return base.slice(arr.offset, len(arr))
+        else:
+            return type(arr).from_arrays(arr.offsets, wrapped_values, mask=mask)
+    return arr
+
+
+def _slice_arrow_array(arr: pa.Array, offset: Offset) -> pa.Array:
+    """Apply multi-dimensional offset tuple using PyArrow slicing and pc.list_slice."""
+    if not offset:
+        return arr
+
+    first, *inner_offsets = offset
+
+    # 1. Dimension 0 (Batch / Row level)
+    match first:
+        case int(idx):
+            norm_idx = idx + len(arr) if idx < 0 else idx
+            if norm_idx < 0 or norm_idx >= len(arr):
+                raise IndexError(f"Index {idx} out of range for array of length {len(arr)}.")
+            
+            arr = arr.slice(norm_idx, 1)
+        case slice() as sl:
+            start, stop, _ = sl.indices(len(arr))
+            arr = arr.slice(start, max(0, stop - start))
+
+    # 2. Dimensions 1+ (Nested List / Set levels)
+    if inner_offsets:
+        unwrapped, ext_type = _unwrap_extension_for_compute(arr)
+        for inner in inner_offsets:
+            match inner:
+                case int(idx):
+                    unwrapped = pc.list_element(unwrapped, idx)
+                case slice() as sl:
+                    start = sl.start or 0
+                    stop = sl.stop
+                    unwrapped = pc.list_slice(unwrapped, start=start, stop=stop)
+        arr = _rewrap_extension_after_compute(unwrapped, ext_type)
+
+    return arr
+
+
+def _arrow_to_numpy(col: pa.Array, shape: Tuple[Optional[int], ...]) -> np.ndarray:
+    """Convert an Arrow array (ExtensionArray, ListArray, or primitive) to an N-D NumPy array."""
+    if isinstance(col, pa.ExtensionArray):
+        return col.to_numpy_ndarray()
+
+    if isinstance(col, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
+        outer_dims = [len(col)]
+        curr = col
+
+        while isinstance(curr, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
+            total_items = len(curr.values)
+            parent_len = outer_dims[-1] if outer_dims[-1] > 0 else 1
+            outer_dims.append(total_items // parent_len)
+            curr = curr.values
+
+        if isinstance(curr, pa.ExtensionArray):
+            leaf_np = curr.to_numpy_ndarray()
+        else:
+            leaf_np = curr.to_numpy(zero_copy_only=False)
+
+        int_shape = tuple(d for d in shape if d is not None)
+        full_shape = (*outer_dims, *int_shape)
+        return leaf_np.reshape(full_shape)
+
+    return col.to_numpy(zero_copy_only=False)
 
 
 class _ArrowEngine(_StorageEngine):
-    """Immutable zero-copy storage engine wrapping an Apache Arrow RecordBatch."""
+    """Immutable zero-copy storage engine backed 100% by Apache Arrow."""
 
     def __init__(self, schema: Schema, batch: pa.RecordBatch) -> None:
         self._schema = schema
         self._batch = batch
-        unwrapped_columns = [_unwrap_extension_array(c) for c in batch.columns]
-        unwrapped_batch = pa.RecordBatch.from_arrays(
-            unwrapped_columns, names=batch.schema.names
-        )
-        self._ak_batch = ak.from_arrow(unwrapped_batch)
 
     @property
     def capacity(self) -> Optional[int]:
@@ -869,25 +976,31 @@ class _ArrowEngine(_StorageEngine):
         offset: Offset = None,
     ) -> Any:
         resolved = self._resolve_key(key)
-        col = self._ak_batch
-        for seg in resolved:
-            col = col[seg]
+        root_field, *sub_path = resolved
 
-        if offset is not None and offset != ():
-            sliced = col[offset]
-        else:
-            sliced = col
+        col = self._batch.column(root_field)
+        if sub_path:
+            col = _get_nested_arrow_field(col, tuple(sub_path))
 
-        if isinstance(entry, (ArrayEntry, ArraySetEntry)):
-            res = ak.to_numpy(sliced)
-            if entry.is_static:
+        sliced_col = _slice_arrow_array(col, offset)
+
+        res: Any
+        match entry:
+            case ArrayEntryBase() if not entry.is_static:
+                res = RaggedArrayView(sliced_col, entry.dtype)
+
+            case ArraySetEntry() | ArrayEntry():
                 shape = cast(Tuple[int, ...], entry.shape)
-                if shape and res.shape[-len(shape) :] != shape:
-                    res = res.reshape((*res.shape[:-1], *shape))
-            return res
-        elif isinstance(entry, RaggedArraySetEntry):
-            return _read_ragged(sliced, entry, offset)
-        return sliced
+                res = _arrow_to_numpy(sliced_col, shape)
+
+            case _:
+                res = sliced_col
+
+        is_single_item = bool(
+            (offset and isinstance(offset[0], int))
+            or (isinstance(entry, ArrayEntry) and not isinstance(entry, ArraySetEntry) and len(self._batch) == 1)
+        )
+        return res[0] if is_single_item else res
 
     def to_record_batch(self) -> pa.RecordBatch:
         return self._batch
@@ -895,9 +1008,12 @@ class _ArrowEngine(_StorageEngine):
     def __contains__(self, key: KeyPath) -> bool:
         resolved = self._resolve_key(key)
         try:
-            _get_nested_col(self._batch, resolved)
+            root_field, *sub_path = resolved
+            col = self._batch.column(root_field)
+            if sub_path:
+                _get_nested_arrow_field(col, tuple(sub_path))
             return True
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, TypeError):
             return False
 
 

@@ -28,7 +28,7 @@ def deserialize_set(header, frames):
 def register_dask_serialization() -> bool:
     """Register custom zero-copy Arrow IPC serialization for Set with Dask Distributed."""
     try:
-        import dask.distributed.protocol as dask_protocol
+        import dask.distributed.protocol as dask_protocol  # type: ignore[import-not-found]  # pyright: ignore[reportMissingImports]
     except ImportError:
         return False
 

@@ -160,8 +160,51 @@ class Set(Marker[T], SchemaConvertible):
             )
 
             elem_cls: Any = _schema.dtype
-            return Set[elem_cls](capacity=self.capacity, _storage_view=subview)
+            assigned_cap = instance._storage._field_capacities.get(
+                self.name, self.capacity
+            )
+            return cast(Any, Set)[elem_cls](capacity=assigned_cap, _storage_view=subview)
         return self
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        if not isinstance(instance, Struct):
+            raise TypeError(f"Expected Struct instance, got '{type(instance).__name__}'.")
+        if self.name is None:
+            raise AttributeError("Set descriptor name is not set.")
+
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Set)):
+            elem_cls = self.dtype
+            if elem_cls is None:
+                raise TypeError(
+                    f"Cannot initialize Set field '{self.name}' with a sequence without a defined element type."
+                )
+            value = cast(Any, Set)[elem_cls](value)
+
+        if not isinstance(value, Set):
+            raise TypeError(
+                f"Expected Set or Sequence of Structs for field '{self.name}', got '{type(value).__name__}'."
+            )
+
+        if self.dtype is not None and value.dtype is not None:
+            if not (isinstance(value.dtype, type) and issubclass(value.dtype, self.dtype)):
+                raise TypeError(
+                    f"Cannot assign Set of '{value.dtype.__name__}' to field '{self.name}' "
+                    f"expecting elements of type '{self.dtype.__name__}'."
+                )
+
+        if self.capacity is not None and value.capacity is not None:
+            if value.capacity > self.capacity:
+                raise ValueError(
+                    f"Assigned Set length {value.capacity} exceeds field '{self.name}' capacity {self.capacity}."
+                )
+
+        if hasattr(instance, "_storage"):
+            instance._storage._field_capacities[self.name] = value.capacity
+
+        for key, entry in value.schema().tree_iter():
+            target_entry = _lookup_entry(instance.schema(), (self.name, *key)) or entry
+            data = value._storage.read(key, entry)
+            instance._storage.write((self.name, *key), entry=target_entry, data=data)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -176,6 +219,11 @@ class Set(Marker[T], SchemaConvertible):
             raise TypeError(f"Element of a set has to be a Struct, got '{cls._dtype}'")
 
         cls._bridge_schema = cls._dtype._bridge_schema.to_set_schema()
+
+    @classmethod
+    def item_type(cls) -> Optional[Type[Any]]:
+        """Return the element Struct type of this Set class."""
+        return cls._dtype
 
     @classmethod
     def schema(cls) -> Schema:
@@ -212,6 +260,11 @@ class Set(Marker[T], SchemaConvertible):
             return self._storage.to_record_batch()
         raise NotImplementedError("Storage does not support to_record_batch.")
 
+    def freeze(self) -> Self:
+        """Freeze underlying storage into immutable Arrow columnar format and return self."""
+        self.to_arrow()
+        return self
+
     @classmethod
     def from_arrow(
         cls,
@@ -219,19 +272,23 @@ class Set(Marker[T], SchemaConvertible):
         batch: Optional[pa.RecordBatch] = None,
     ) -> "Set[T]":
         """Construct a Set[T] wrapping an Arrow RecordBatch."""
+        actual_batch: pa.RecordBatch
         if batch is None:
             if not isinstance(element_cls_or_batch, pa.RecordBatch):
                 raise TypeError("Expected RecordBatch as argument.")
-            batch = element_cls_or_batch
+            actual_batch = element_cls_or_batch
             if cls._dtype is None:
                 raise TypeError("Cannot determine element type from unsubscripted Set class.")
             element_cls = cast(Type[T], cls._dtype)
         else:
+            if not isinstance(batch, pa.RecordBatch):
+                raise TypeError("Expected RecordBatch as second argument.")
+            actual_batch = batch
             element_cls = cast(Type[T], element_cls_or_batch)
 
-        set_schema = element_cls.schema().to_set_schema(capacity=len(batch))
-        storage = ArrayStorage.from_record_batch(batch, schema=set_schema)
-        return cast(Any, cls)[element_cls](capacity=len(batch), _storage_view=storage)
+        set_schema = element_cls.schema().to_set_schema(capacity=len(actual_batch))
+        storage = ArrayStorage.from_record_batch(actual_batch, schema=set_schema)
+        return cast(Any, cls)[element_cls](capacity=len(actual_batch), _storage_view=storage)
 
     @property
     def capacity(self) -> Optional[int]:

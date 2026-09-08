@@ -398,3 +398,74 @@ def test_arrow_missing_values_bitmask():
     assert ragged_col[2].is_valid
     assert not ragged_col[3].is_valid
 
+
+def test_arrow_pure_engine_multiaxis_ragged_view():
+    """Verify pure ArrowEngine holds no Awkward batch, and RaggedArrayView supports match..case multi-axis indexing."""
+    from scipion_bridge.core.struct.storage import _ArrowEngine
+
+    # 1. Verify RaggedArrayView 2D multi-axis indexing
+    # 2 movies, 2 frames each
+    inner = pa.ListArray.from_arrays(
+        pa.array([0, 2, 5, 7]),
+        pa.array([10, 11, 20, 21, 22, 30, 31], type=pa.int32()),
+    )
+    outer = pa.ListArray.from_arrays(
+        pa.array([0, 2, 3]),
+        inner,
+    )
+
+    view = RaggedArrayView(outer, np.int32)
+    assert len(view) == 2
+
+    # Chained and tuple indexing equivalence
+    assert np.array_equal(view[0][0], np.array([10, 11]))
+    assert np.array_equal(view[0, 0], np.array([10, 11]))
+    assert np.array_equal(view[0, 1], np.array([20, 21, 22]))
+    assert np.array_equal(view[1, 0], np.array([30, 31]))
+
+    # Negative indexing
+    assert np.array_equal(view[-1, 0], np.array([30, 31]))
+
+    # Empty tuple returns self
+    assert view[()] is view
+
+    # Slice indexing returns sub-view
+    sliced_view = view[0:1]
+    assert isinstance(sliced_view, RaggedArrayView)
+    assert len(sliced_view) == 1
+    assert np.array_equal(sliced_view[0, 0], np.array([10, 11]))
+
+    # to_list returns list
+    as_list = view.to_list()
+    assert isinstance(as_list, list)
+    assert len(as_list) == 2
+
+    # Equality check
+    assert view == view
+    assert view == as_list
+
+    # Repr check
+    assert "RaggedArrayView" in repr(view)
+
+    # 2. Verify _ArrowEngine is pure Apache Arrow (no _ak_batch attribute)
+    class Item(B.Struct):
+        pixels = B.Array[float](shape=(4, 4))
+        tag: int
+
+    s = B.Set[Item](capacity=3)
+    s["pixels"] = np.ones((3, 4, 4), dtype=np.float32)
+    s["tag"] = np.array([1, 2, 3])[..., None]
+    batch = s.to_arrow()
+
+    engine = _ArrowEngine(s.schema(), batch)
+    assert not hasattr(engine, "_ak_batch")
+    assert hasattr(engine, "_batch")
+    assert engine.capacity == 3
+    assert engine.is_frozen
+
+    # Direct read via pure ArrowEngine
+    item_pixels = engine.read(("pixels",), s.schema().fields["pixels"], offset=(1,))
+    assert item_pixels.shape == (4, 4)
+    assert np.allclose(item_pixels, 1.0)
+
+

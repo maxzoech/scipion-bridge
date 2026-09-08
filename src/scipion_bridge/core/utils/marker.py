@@ -40,7 +40,7 @@ class Marker(Generic[T]):
         if not annotations:
             return
 
-        args = getattr(annotations, "__args__", tuple())
+        args: Tuple[Any, ...] = getattr(annotations, "__args__", tuple())
 
         if args and not isinstance(args[0], TypeVar):
             self._dtype = args[0]

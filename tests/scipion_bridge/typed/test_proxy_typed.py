@@ -480,7 +480,7 @@ def test_proxify_with_proxy_group():
     ):
         assert stack_input == "/path/to/input_particles.star"
         # The output path will be a temp file base path without extension
-        assert "temp_file" in stack_output
+        assert "temp_file" in str(stack_output)
 
         print(f"Input: {stack_input}, Output: {stack_output}")
 

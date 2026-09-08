@@ -75,14 +75,15 @@ def convert_protocol_to_scipion3_protocol(
 
             if not pointer_class:
                 item_type = dtype.item_type()
+                item_name = item_type.__qualname__ if item_type is not None else str(dtype)
                 field_str = f"'{key}' " if key else ""
                 raise TypeError(
                     f"Cannot bind field {field_str}with container type '{dtype}' for the Scipion 3 backend.\n"
                     f"No resolver is registered in the type registry converting a Scipion/PyWorkflow object "
-                    f"(e.g., pwem.objects.Particle or SetOfParticles) to '{item_type.__qualname__}'.\n\n"
+                    f"(e.g., pwem.objects.Particle or SetOfParticles) to '{item_name}'.\n\n"
                     f"To fix this, define and register a resolver using `@scipion_bridge.resolver`:\n\n"
                     f"    @scipion_bridge.resolver\n"
-                    f"    def resolve_scipion_particle(value: pwem.objects.Particle) -> {item_type.__qualname__}:\n"
+                    f"    def resolve_scipion_particle(value: pwem.objects.Particle) -> {item_name}:\n"
                     f"        ...\n"
                 )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence, Tuple, Union, overload
+import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
 import pyarrow as pa
@@ -10,58 +11,77 @@ import pyarrow as pa
 from ..schema import Schema, ArrayEntryBase
 
 
-class RaggedArrayView(Sequence[NDArray]):
-    """A zero-copy sequence view over an Apache Arrow ListArray returning 1D NumPy slices."""
+class RaggedArrayView(Sequence[Any]):
+    """A zero-copy multi-axis sequence view over single- or multi-level Apache Arrow ListArrays."""
 
-    def __init__(self, list_array: pa.ListArray, dtype: np.dtype) -> None:
+    def __init__(
+        self,
+        list_array: Union[pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray],
+        dtype: np.dtype,
+    ) -> None:
         self._list_array = list_array
         self.dtype = np.dtype(dtype)
 
     def __len__(self) -> int:
         return len(self._list_array)
 
-    @overload
-    def __getitem__(self, item: int) -> NDArray: ...
+    def __getitem__(self, item: Union[int, slice, Tuple[Union[int, slice], ...]]) -> Any:
+        match item:
+            case ():
+                return self
 
-    @overload
-    def __getitem__(self, item: slice) -> "RaggedArrayView": ...
+            case (first, *rest):
+                sub = self[first]
+                return sub[tuple(rest)] if rest else sub
 
-    def __getitem__(self, item: Union[int, slice]) -> Union[NDArray, "RaggedArrayView"]:
-        if isinstance(item, slice):
-            sliced = self._list_array[item]
-            return RaggedArrayView(sliced, self.dtype)
-        if isinstance(item, int):
-            if item < 0:
-                item += len(self)
-            if item < 0 or item >= len(self):
-                raise IndexError(
-                    f"Index {item} out of range for RaggedArrayView of length {len(self)}."
-                )
-            scalar = self._list_array[item]
-            if not scalar.is_valid:
-                return np.empty(0, dtype=self.dtype)
-            return scalar.values.to_numpy(zero_copy_only=False)
-        raise TypeError(f"Invalid RaggedArrayView index type '{type(item).__name__}'.")
+            case slice():
+                return RaggedArrayView(self._list_array[item], self.dtype)
+
+            case int(idx):
+                norm_idx = idx + len(self) if idx < 0 else idx
+                if norm_idx < 0 or norm_idx >= len(self):
+                    raise IndexError(
+                        f"Index {idx} out of range for RaggedArrayView of length {len(self)}."
+                    )
+
+                scalar = self._list_array[norm_idx]
+                if not scalar.is_valid:
+                    raise ValueError(f"Cannot read unpopulated or null value at index {norm_idx}.")
+
+                match scalar.values:
+                    case pa.ListArray() | pa.LargeListArray() | pa.FixedSizeListArray():
+                        try:
+                            return ak.to_numpy(ak.from_arrow(scalar.values))
+                        except (ValueError, TypeError):
+                            return RaggedArrayView(scalar.values, self.dtype)
+                    case _:
+                        return scalar.values.to_numpy(zero_copy_only=False)
+
+            case _:
+                raise TypeError(f"Invalid RaggedArrayView index type '{type(item).__name__}'.")
 
     def __iter__(self):
         for i in range(len(self)):
             yield self[i]
 
-    def to_list(self) -> List[NDArray]:
+    def to_list(self) -> List[Any]:
         return list(self)
 
     def __eq__(self, other: Any) -> bool:
         if isinstance(other, (RaggedArrayView, list, tuple)):
             if len(self) != len(other):
                 return False
-            return all(np.array_equal(a, b) for a, b in zip(self, other))
+            return all(
+                np.array_equal(a, b) if isinstance(a, np.ndarray) and isinstance(b, np.ndarray) else a == b
+                for a, b in zip(self, other)
+            )
         return False
 
     def __repr__(self) -> str:
         if len(self) <= 3:
-            shapes = [tuple(arr.shape) for arr in self]
+            shapes = [tuple(arr.shape) if isinstance(arr, np.ndarray) else f"len={len(arr)}" for arr in self]
             return f"RaggedArrayView(len={len(self)}, shapes={shapes}, dtype={self.dtype})"
-        shapes = [tuple(self[i].shape) for i in range(3)]
+        shapes = [tuple(self[i].shape) if isinstance(self[i], np.ndarray) else f"len={len(self[i])}" for i in range(3)]
         return f"RaggedArrayView(len={len(self)}, shapes={shapes}..., dtype={self.dtype})"
 
 
