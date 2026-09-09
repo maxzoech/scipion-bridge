@@ -147,3 +147,53 @@ def build_ragged_array(chunks: Sequence[Optional[np.ndarray]], dtype: np.dtype) 
     pa_mask = pa.array(mask, type=pa.bool_()) if any(mask) else None
     return pa.ListArray.from_arrays(pa_offsets, pa_values, mask=pa_mask)
 
+
+def build_multidim_ragged_array(
+    chunks: Sequence[Optional[np.ndarray]], dtype: np.dtype
+) -> Union[pa.ListArray, pa.LargeListArray]:
+    """Compile a sequence of 2D NumPy arrays into a nested Arrow ListArray[ListArray].
+
+    Optimization:
+    Constructing the Arrow ListArray hierarchy directly via contiguous NumPy buffers
+    and offsets avoids Awkward Array's C++ `fromiter` traversal, which inspects
+    every float scalar individually (~6 µs per scalar).
+    """
+    offsets_0 = [0]
+    offsets_1 = [0]
+    valid_flats = []
+    mask_0 = []
+
+    for c in chunks:
+        if c is None:
+            mask_0.append(True)
+            offsets_0.append(offsets_0[-1])
+        else:
+            mask_0.append(False)
+            arr = np.ascontiguousarray(c, dtype=dtype)
+            if arr.ndim == 2:
+                H, W = arr.shape
+                offsets_0.append(offsets_0[-1] + H)
+                row_offsets = np.arange(1, H + 1, dtype=np.int32) * W + offsets_1[-1]
+                offsets_1.extend(row_offsets)
+                valid_flats.append(arr.ravel())
+            elif arr.ndim == 1:
+                offsets_0.append(offsets_0[-1] + len(arr))
+                valid_flats.append(arr)
+            else:
+                # Fallback to Awkward Array for 3D+ structures
+                ak_candidate = ak.Array(chunks)
+                pa_arr = ak.to_arrow(ak_candidate, extensionarray=False)
+                if isinstance(pa_arr, pa.ChunkedArray):
+                    pa_arr = pa_arr.combine_chunks()
+                return pa_arr
+
+    flat = np.concatenate(valid_flats) if valid_flats else np.empty(0, dtype=dtype)
+    pa_flat = pa.array(flat, type=pa.from_numpy_dtype(dtype))
+    if len(offsets_1) > 1:
+        pa_inner = pa.ListArray.from_arrays(pa.array(offsets_1, type=pa.int32()), pa_flat)
+        pa_mask = pa.array(mask_0, type=pa.bool_()) if any(mask_0) else None
+        return pa.ListArray.from_arrays(pa.array(offsets_0, type=pa.int32()), pa_inner, mask=pa_mask)
+    else:
+        pa_mask = pa.array(mask_0, type=pa.bool_()) if any(mask_0) else None
+        return pa.ListArray.from_arrays(pa.array(offsets_0, type=pa.int32()), pa_flat, mask=pa_mask)
+

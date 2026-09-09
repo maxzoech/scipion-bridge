@@ -44,8 +44,6 @@ def test_set_of_classes_2d_struct():
 
     classes_set = classes_set.freeze()  # Freeze the storage to the arrow engine
 
-    print(classes_set._storage.root_storage._engine)
-
     # Verify element 0
     assert isinstance(classes_set[0].average, np.ndarray)
     assert np.allclose(classes_set[0].average, cls_1.average)

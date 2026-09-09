@@ -26,6 +26,7 @@ from .utils.arrow_utils import (
     RaggedArrayView,
     build_tensor_array,
     build_ragged_array,
+    build_multidim_ragged_array,
 )
 
 IndexType: TypeAlias = Union[slice, int]
@@ -571,6 +572,66 @@ class _StagingEngine(_StorageEngine):
 
                 return raw[offset]
             case RaggedArraySetEntry():
+                # Optimization:
+                # Avoid converting the raw Python list of NumPy arrays to an Awkward Array via
+                # `ak.Array(raw)` unless arbitrary or complex non-integer slicing is requested.
+                # Awkward's `fromiter` inspects every nested scalar in C++ (~6 µs per float),
+                # which causes severe performance bottlenecks for large image tensors.
+
+                # Fast-path 1: Full / unbounded read (e.g. during internal data copy or field access)
+                if _is_unbounded_slice_or_empty(offset):
+                    if isinstance(raw, list) and len(raw) > 0:
+                        first = next((x for x in raw if x is not None), None)
+                        if first is not None and isinstance(first, np.ndarray) and first.ndim == 1:
+                            # 1D ragged array: construct RaggedArrayView directly via contiguous PyArrow buffer
+                            return RaggedArrayView(build_ragged_array(raw, schema_entry.dtype), schema_entry.dtype)
+                    return raw
+
+                # Fast-path 2: Single-element integer indexing (e.g. (idx,))
+                if len(offset) == 1 and isinstance(offset[0], int):
+                    idx = offset[0]
+                    norm_idx = idx + len(raw) if idx < 0 else idx
+                    if norm_idx < 0 or norm_idx >= len(raw):
+                        raise IndexError(f"Index {idx} out of range for field '{key}'.")
+                    item = raw[norm_idx]
+                    if item is None:
+                        raise ValueError(f"Cannot read unpopulated or null value at index {idx}.")
+                    if isinstance(item, np.ndarray):
+                        return item
+                    if isinstance(item, list):
+                        first = next((x for x in item if x is not None), None)
+                        if first is not None and isinstance(first, np.ndarray) and first.ndim == 1:
+                            return RaggedArrayView(build_ragged_array(item, schema_entry.dtype), schema_entry.dtype)
+                        return item
+
+                # Fast-path 3: All integer multi-index (e.g. (idx1, idx2, ...))
+                if all(isinstance(idx, int) for idx in offset):
+                    curr = raw
+                    for idx in offset:
+                        norm_idx = idx + len(curr) if idx < 0 else idx
+                        if norm_idx < 0 or norm_idx >= len(curr):
+                            raise IndexError(f"Index {idx} out of range.")
+                        curr = curr[norm_idx]
+                        if curr is None:
+                            raise ValueError("Cannot read unpopulated or null value.")
+                    if isinstance(curr, np.ndarray):
+                        return curr
+                    return curr
+
+                # Fast-path 4: Leading int followed by unbounded slice (e.g. (idx, slice(None)))
+                if isinstance(offset[0], int) and _is_unbounded_slice_or_empty(offset[1:]):
+                    idx = offset[0]
+                    norm_idx = idx + len(raw) if idx < 0 else idx
+                    if norm_idx < 0 or norm_idx >= len(raw):
+                        raise IndexError(f"Index {idx} out of range for field '{key}'.")
+                    item = raw[norm_idx]
+                    if isinstance(item, list):
+                        first = next((x for x in item if x is not None), None)
+                        if first is not None and isinstance(first, np.ndarray) and first.ndim == 1:
+                            return RaggedArrayView(build_ragged_array(item, schema_entry.dtype), schema_entry.dtype)
+                    return item
+
+                # Fallback to Awkward Array for complex arbitrary slices (strided, step != 1, etc.)
                 ragged_array = ak.Array(raw)
                 sliced = ragged_array[offset] if offset else ragged_array
 
@@ -779,14 +840,22 @@ class _StagingEngine(_StorageEngine):
         if len(raw_to_build) < level_len:
             raw_to_build = raw_to_build + [None] * (level_len - len(raw_to_build))
 
-        ak_candidate = ak.Array(raw_to_build)
-        if ak_candidate.ndim > 2:
+        # Optimization:
+        # Avoid running `ak.Array(raw_to_build)` just to check dimensionality.
+        # Awkward's `fromiter` inspects every nested float scalar in C++ (~6 µs per float),
+        # causing major compilation bottlenecks for multi-dimensional images.
+        first_valid = next((x for x in raw_to_build if x is not None), None)
+        if first_valid is None or getattr(first_valid, "ndim", 1) <= 1:
+            return build_ragged_array(raw_to_build, entry.dtype)
+        elif getattr(first_valid, "ndim", 1) == 2:
+            return build_multidim_ragged_array(raw_to_build, entry.dtype)
+        else:
+            # Fallback for 3D+ structures
+            ak_candidate = ak.Array(raw_to_build)
             pa_arr = ak.to_arrow(ak_candidate, extensionarray=False)
             if isinstance(pa_arr, pa.ChunkedArray):
                 pa_arr = pa_arr.combine_chunks()
             return pa_arr
-        else:
-            return build_ragged_array(raw_to_build, entry.dtype)
 
     def _build_columns(
         self,
