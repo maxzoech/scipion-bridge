@@ -140,15 +140,15 @@ def convert_protocol_to_scipion3_protocol(
                 )
 
             form.addSection(label="Parameters")
-            for key, element in protocol.configuration.parameters.items():
+            for key, param_element in protocol.configuration.parameters.items():
                 dtype = get_args(protocol._configuration.parameters[key])[0]
-                param, args = _get_param_type_and_kwargs(element, dtype, key=key)
+                param, args = _get_param_type_and_kwargs(param_element, dtype, key=key)
 
                 form.addParam(
                     key,
                     param,
-                    label=element.label if element.label is not None else key,
-                    help=element.help,
+                    label=param_element.label if param_element.label is not None else key,
+                    help=param_element.help,
                     **args,
                 )
 

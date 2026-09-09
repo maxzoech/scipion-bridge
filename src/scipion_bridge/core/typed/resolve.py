@@ -224,7 +224,7 @@ class Registry:
     def add_resolver(
         self,
         origin: Type[Origin],
-        target: Type[Origin],
+        target: Type[Target],
         resolver: Callable,
         namespace: Optional[str] = None,
         requires_metadata: bool = False,
@@ -629,7 +629,7 @@ def resolve_params(f: Callable):
         keyword = list(func_params.items())[n_positional:]
 
         positional = [_resolve_arg(a) for a in positional]
-        args = [v for _, v in positional]
+        args = tuple(v for _, v in positional)
 
         keyword = [_resolve_arg(a) for a in keyword]
         kwargs = {k.name: v for k, v in keyword}

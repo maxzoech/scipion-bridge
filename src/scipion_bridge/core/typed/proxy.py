@@ -85,7 +85,7 @@ class ProxyMetaclass(ABCMeta):
 
         current_registry().add_resolver(
             Path,
-            x,
+            cast(Type[Any], x),
             resolver=resolve_path_proxy,
             namespace=default_resolver_namespace,
         )
