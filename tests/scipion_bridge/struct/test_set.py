@@ -11,6 +11,7 @@ from scipion_bridge.core.struct.schema import (
     SchemaEntry,
     ArrayEntryBase,
 )
+from scipion_bridge.core.struct.offset import Offset
 
 
 class Data(B.Struct):
@@ -462,6 +463,95 @@ def test_multidimensional_nested_set_slicing_and_indexing(as_engine):
     assert np.allclose(sliced_movies[2].frames[4].pixels, noise_frames[12, 4])
 
 
+def test_nested_set_indexed_write_on_uninitialized_buffer():
+    """Verify that writing to an uninitialized nested Set via element indexing allocates
+
+    the full multi-level batch dimensions (20, 10, 64, 64).
+    """
+    dataset = B.Set[Movie](capacity=20)
+    frame_pixels = np.ones((64, 64))
+
+    dataset[0].frames[0].pixels = frame_pixels
+    assert np.allclose(dataset[0].frames[0].pixels, frame_pixels)
+    staged = dataset._storage._engine._static_staging[("frames", "pixels")]
+    assert staged.shape == (20, 10, 64, 64)
+
+
+def test_nested_set_3d_indexed_write(as_engine):
+    class Chunk(B.Struct):
+        pixels = B.Array[float](shape=(16, 16))
+
+    class Frame3D(B.Struct):
+        chunks: B.Set[Chunk] = B.Set[Chunk](capacity=3)
+
+    class Movie3D(B.Struct):
+        frames: B.Set[Frame3D] = B.Set[Frame3D](capacity=4)
+
+    dataset = B.Set[Movie3D](capacity=5)
+
+    data = np.ones((16, 16), dtype=np.float64) * 42.0
+    dataset[2].frames[1].chunks[0].pixels = data
+
+    staged = dataset._storage._engine._static_staging[("frames", "chunks", "pixels")]
+    assert staged.shape == (5, 4, 3, 16, 16)
+    assert np.allclose(dataset[2].frames[1].chunks[0].pixels, data)
+    assert np.allclose(dataset[0].frames[0].chunks[0].pixels, np.zeros((16, 16)))
+
+    # Verify Arrow compilation and engine conversion
+    compiled = as_engine(dataset)
+    assert np.allclose(compiled[2].frames[1].chunks[0].pixels, data)
+    assert np.allclose(compiled[0].frames[0].chunks[0].pixels, np.zeros((16, 16)))
+
+
+def test_struct_containing_set_indexed_write():
+    class FrameLocal(B.Struct):
+        frame_id: int
+        pixels = B.Array[float](shape=(64, 64))
+
+    class MovieLocal(B.Struct):
+        movie_id: int
+        frames = B.Set[FrameLocal](capacity=10)
+
+    movie = MovieLocal()
+    pixels_val = np.ones((64, 64)) * 99.0
+    movie.frames[0].pixels = pixels_val
+
+    staged = movie._storage._engine._static_staging[("frames", "pixels")]
+    assert staged.shape == (10, 64, 64)
+    assert np.allclose(movie.frames[0].pixels, pixels_val)
+
+
+def test_nested_set_out_of_bounds_validation():
+    dataset = B.Set[Movie](capacity=20)
+    # Exceed inner Set capacity (10) via Set indexing
+    with pytest.raises(IndexError, match="Index 10 out of range for Set with capacity 10"):
+        _ = dataset[0].frames[10]
+
+    # Exceed inner Set capacity (10) via direct storage access
+    entry = dataset.schema().fields["frames"].children.fields["pixels"]
+    with pytest.raises(ValueError, match="exceeds capacity 10 for dimension 1"):
+        dataset._storage._engine.write(("frames", "pixels"), entry, np.ones((64, 64)), offset=Offset((0, 10)))
+
+    # Exceed outer Set capacity (20) via direct storage access
+    with pytest.raises(ValueError, match="exceeds capacity 20 for dimension 0"):
+        dataset._storage._engine.write(("frames", "pixels"), entry, np.ones((64, 64)), offset=Offset((20, 0)))
+
+
+def test_nested_set_slice_write_on_uninitialized_buffer():
+    dataset = B.Set[Movie](capacity=20)
+    slice_data = np.random.randn(3, 4, 64, 64)
+    sub_frames = dataset[2:5]["frames"][1:5]
+    sub_frames["pixels"] = slice_data
+    assert dataset._storage._engine._static_staging[("frames", "pixels")].shape == (20, 10, 64, 64)
+    assert np.allclose(sub_frames["pixels"], slice_data)
+
+
+def test_nested_set_unbounded_write_dimension_overflow():
+    dataset = B.Set[Movie](capacity=20)
+    with pytest.raises(ValueError, match="dimension 1 length 15 exceeds capacity 10"):
+        dataset["frames"]["pixels"] = np.ones((20, 15, 64, 64))
+
+
 def test_multidimensional_2d_slice_both_axes(as_engine):
     # 20 movies, each with 10 frames -> total tensor (20, 10, 64, 64)
     dataset = B.Set[Movie](capacity=20)
@@ -619,3 +709,127 @@ def test_basic_ragged_set_assign(as_engine):
     assert np.allclose(latent_view[1], sample_2.latent)
     assert len(latent_view[0]) == 128
     assert len(latent_view[1]) == 256
+
+
+def test_nested_ragged_set_indexed_write():
+    class RaggedFrame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(None,))
+        frame_id: int
+
+    class RaggedMovie(B.Struct):
+        frames: B.Set[RaggedFrame] = B.Set[RaggedFrame](capacity=10)
+        movie_id: int
+
+    dataset = B.Set[RaggedMovie](capacity=20)
+
+    # Indexed write into nested ragged array leaf
+    arr_0 = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    arr_3 = np.array([4.0, 5.0], dtype=np.float64)
+    dataset[0].frames[0].pixels = arr_0
+    dataset[0].frames[3].pixels = arr_3
+
+    # Verify populated slots read correctly
+    assert np.allclose(dataset[0].frames[0].pixels, arr_0)
+    assert np.allclose(dataset[0].frames[3].pixels, arr_3)
+
+    # Verify unassigned slot raises AttributeError
+    with pytest.raises(AttributeError, match="has not been initialized"):
+        _ = dataset[0].frames[1].pixels
+
+    # Verify unassigned parent movie raises AttributeError
+    with pytest.raises(AttributeError, match="has not been initialized"):
+        _ = dataset[1].frames[0].pixels
+
+
+def test_nested_ragged_set_sparse_indexing_and_arrow(as_engine):
+    class RaggedFrame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(None,))
+
+    class RaggedMovie(B.Struct):
+        frames: B.Set[RaggedFrame] = B.Set[RaggedFrame](capacity=10)
+
+    dataset = B.Set[RaggedMovie](capacity=5)
+
+    # Write movie 0 frame 0 and movie 2 frame 3, leaving movie 1 unwritten
+    arr_0_0 = np.array([10.0, 20.0], dtype=np.float64)
+    arr_2_3 = np.array([30.0, 40.0, 50.0], dtype=np.float64)
+    dataset[0].frames[0].pixels = arr_0_0
+    dataset[2].frames[3].pixels = arr_2_3
+
+    dataset = as_engine(dataset)
+
+    # Read back populated values through engine
+    assert np.allclose(dataset[0].frames[0].pixels, arr_0_0)
+    assert np.allclose(dataset[2].frames[3].pixels, arr_2_3)
+
+    # Unwritten movie 1 access
+    with pytest.raises((AttributeError, ValueError)):
+        _ = dataset[1].frames[0].pixels
+
+
+def test_nested_ragged_set_3d_indexed_write():
+    class RaggedFrame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(None,))
+
+    class RaggedMovie(B.Struct):
+        frames: B.Set[RaggedFrame] = B.Set[RaggedFrame](capacity=10)
+
+    class Project(B.Struct):
+        movies: B.Set[RaggedMovie] = B.Set[RaggedMovie](capacity=5)
+
+    projects = B.Set[Project](capacity=3)
+
+    arr = np.arange(12, dtype=np.float64)
+    projects[1].movies[2].frames[0].pixels = arr
+
+    assert np.allclose(projects[1].movies[2].frames[0].pixels, arr)
+
+    with pytest.raises(AttributeError, match="has not been initialized"):
+        _ = projects[1].movies[2].frames[1].pixels
+
+    with pytest.raises(AttributeError, match="has not been initialized"):
+        _ = projects[0].movies[0].frames[0].pixels
+
+
+def test_nested_ragged_set_slice_write_length_mismatch_raises():
+    class RaggedFrame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(None,))
+
+    class RaggedMovie(B.Struct):
+        frames: B.Set[RaggedFrame] = B.Set[RaggedFrame](capacity=10)
+
+    dataset = B.Set[RaggedMovie](capacity=5)
+
+    # Slice write with mismatched length raises ValueError
+    with pytest.raises(ValueError, match="does not match slice size"):
+        dataset[:3]["frames"]["pixels"] = [
+            [np.array([1.0])] * 10,
+            [np.array([2.0])] * 10,
+        ]  # Only 2 elements provided for slice of size 3
+
+
+def test_nested_dynamic_ragged_set_cross_field_validation():
+    class Frame(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(None,))
+        labels: B.Array[int] = B.Array(shape=(None,))
+
+    class Movie(B.Struct):
+        frames: B.Set[Frame] = B.Set[Frame](capacity=None)
+
+    dataset = B.Set[Movie](capacity=2)
+
+    # Stage pixels with 3 frames for movie 0, 2 frames for movie 1
+    dataset[:2]["frames"]["pixels"] = [
+        [np.array([1.0, 2.0]), np.array([3.0]), np.array([4.0])],
+        [np.array([5.0]), np.array([6.0])],
+    ]
+
+    # Stage conflicting labels counts (2 frames for movie 0 instead of 3)
+    dataset[:2]["frames"]["labels"] = [
+        [np.array([1]), np.array([2])],  # Conflicting length: 2 != 3
+        [np.array([3]), np.array([4])],
+    ]
+
+    # Compiling to Arrow should detect cross-field inconsistency and raise ValueError
+    with pytest.raises(ValueError, match="Inconsistent child counts under dynamic Set"):
+        dataset.to_arrow()

@@ -467,7 +467,13 @@ class Struct(Trait, SchemaConvertible):
     def __init__(self, **kwargs: Any) -> None:
         storage = kwargs.pop("_storage_view", None)
         if storage is None:
-            storage = ArrayStorage(schema=self._bridge_schema, path=("root",), offset=())
+            root_entry = SchemaEntry(schema=self._bridge_schema)
+            storage = ArrayStorage(
+                schema=self._bridge_schema,
+                path=("root",),
+                offset=(),
+                root_entry=root_entry,
+            )
 
         if not isinstance(storage, _BaseStorage):
             raise TypeError(f"Expected _BaseStorage instance, got {type(storage).__name__}")

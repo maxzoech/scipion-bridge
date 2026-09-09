@@ -196,8 +196,8 @@ class SchemaSetEntry(SchemaEntry):
 
     def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
         return SchemaSetEntry(
-            schema=self.schema.to_set_schema(capacity=capacity),
-            capacity=capacity if capacity is not None else self.capacity,
+            schema=self.schema,
+            capacity=self.capacity,
         )
 
 

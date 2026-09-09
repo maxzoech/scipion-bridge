@@ -110,6 +110,7 @@ class Set(Marker[T], SchemaConvertible):
             self._capacity = Arg.new(capacity)  # type: ignore
             cap_val = self._capacity.value
 
+        root_entry = SchemaSetEntry(schema=self.schema(), capacity=cap_val)
         storage = kwargs.get(
             "_storage_view",
             ArrayStorage(
@@ -117,6 +118,7 @@ class Set(Marker[T], SchemaConvertible):
                 capacity=cap_val,
                 path=("root",),
                 offset=Offset.from_slice(None, None),
+                root_entry=root_entry,
             ),
         )
         if not isinstance(storage, _BaseStorage):
@@ -284,7 +286,9 @@ class Set(Marker[T], SchemaConvertible):
             element_cls = cast(Type[T], element_cls_or_batch)
 
         set_schema = element_cls.schema().to_set_schema(capacity=len(actual_batch))
-        storage = ArrayStorage.from_record_batch(actual_batch, schema=set_schema)
+        root_entry = SchemaSetEntry(schema=set_schema, capacity=len(actual_batch))
+        storage = ArrayStorage.from_record_batch(actual_batch, schema=set_schema, root_entry=root_entry)
+        
         return cast(Any, cls)[element_cls](capacity=len(actual_batch), _storage_view=storage)
 
     @property

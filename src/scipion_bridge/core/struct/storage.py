@@ -55,23 +55,6 @@ def _lookup_in_schema(schema: Schema, path: KeyPath) -> Optional[ArrayEntryBase]
             return None
 
 
-def _get_nested_col(
-    batch: Union[pa.RecordBatch, pa.StructArray], path: KeyPath
-) -> pa.Array:
-    """Navigate a KeyPath tuple in a nested Arrow RecordBatch or StructArray."""
-    curr: Any = batch
-    for segment in path:
-        if isinstance(curr, pa.RecordBatch):
-            curr = curr.column(segment)
-        elif isinstance(curr, pa.StructArray):
-            curr = curr.field(segment)
-        else:
-            raise KeyError(
-                f"Cannot resolve path segment '{segment}' in '{type(curr).__name__}'."
-            )
-    return curr
-
-
 class _BaseStorage(abc.ABC):
     """Abstract base storage class managing offset tracking, key qualification, and read/write."""
 
@@ -198,6 +181,10 @@ class _StorageEngine(abc.ABC):
 
     @property
     @abc.abstractmethod
+    def root_entry(self) -> SchemaEntry: ...
+
+    @property
+    @abc.abstractmethod
     def capacity(self) -> Optional[int]: ...
 
     @property
@@ -208,12 +195,32 @@ class _StorageEngine(abc.ABC):
 class _StagingEngine(_StorageEngine):
     """Unified mutable staging engine for Struct and Set data structures."""
 
-    def __init__(self, schema: Schema, capacity: Optional[int] = None) -> None:
-        self._schema = schema
-        self._capacity = capacity if capacity is not None else schema.capacity
+    def __init__(
+        self,
+        schema: Schema,
+        capacity: Optional[int] = None,
+        root_entry: Optional[SchemaEntry] = None,
+    ) -> None:
+        if root_entry is not None:
+            self._root_entry = root_entry
+        elif capacity is not None:
+            self._root_entry = SchemaSetEntry(schema=schema, capacity=capacity)
+        else:
+            self._root_entry = SchemaEntry(schema=schema)
+
+        self._schema = self._root_entry.schema
+        self._capacity = (
+            self._root_entry.capacity
+            if isinstance(self._root_entry, SchemaSetEntry)
+            else None
+        )
         # Separate, typed staging mappings:
         self._static_staging: Dict[KeyPath, np.ndarray] = {}
         self._ragged_staging: Dict[KeyPath, List[Any]] = {}
+
+    @property
+    def root_entry(self) -> SchemaEntry:
+        return self._root_entry
 
     @property
     def capacity(self) -> Optional[int]:
@@ -298,24 +305,55 @@ class _StagingEngine(_StorageEngine):
             return [self._prepare_ragged_data(item, dtype) for item in data]
         return np.ascontiguousarray(data, dtype=dtype)
 
-    def _get_target_capacity(self, key: KeyPath, entry: Entry) -> Optional[int]:
-        """Resolve the effective container capacity along the indexing dimension for key."""
-        if len(key) > 1:
-            return self.capacity
+    def _get_path_batch_capacities(self, key: KeyPath) -> List[Optional[int]]:
+        """Resolve sequence/batch capacities of all enclosing Set containers along key."""
+        batch_capacities: List[Optional[int]] = []
+        if isinstance(self._root_entry, SchemaSetEntry):
+            batch_capacities.append(self._root_entry.capacity)
 
-        return entry.capacity or self.capacity
+        curr_schema: Optional[Schema] = self._root_entry.children
+        for seg in key[:-1]:
+            if curr_schema is None:
+                break
+            entry = curr_schema.fields.get(seg)
+            match entry:
+                case SchemaSetEntry():
+                    batch_capacities.append(entry.capacity)
+                    curr_schema = entry.children
+                case SchemaEntry():
+                    curr_schema = entry.children
+                case _:
+                    curr_schema = None
 
-    def _get_required_length(self, offset: Offset) -> int:
-        """Extract the required 1-based index/stop bound along the primary indexing axis."""
-        if offset.is_empty:
-            return 1
-        match offset.first:
-            case int(idx):
-                return idx + 1
-            case slice(stop=int(stop)):
-                return stop
-            case _:
-                return 1
+        return batch_capacities
+
+    def _validate_offset_bounds(
+        self,
+        key: KeyPath,
+        offset: Offset,
+        batch_capacities: List[Optional[int]],
+    ) -> None:
+        """Validate offset index and slice bounds against dimension capacities."""
+        for dim_idx, idx_val in enumerate(offset.dims):
+            req_len: Optional[int] = None
+            match idx_val:
+                case int(idx):
+                    req_len = idx + 1
+                case slice(stop=int(stop)):
+                    req_len = stop
+                case _:
+                    pass
+
+            if dim_idx < len(batch_capacities):
+                dim_cap = batch_capacities[dim_idx]
+                if dim_cap is None and isinstance(idx_val, int):
+                    raise IndexError(
+                        "Cannot perform indexed write on a Set with dynamic capacity without a prior bound or slice."
+                    )
+                if dim_cap is not None and req_len is not None and req_len > dim_cap:
+                    raise ValueError(
+                        f"Write target index/stop {req_len} exceeds capacity {dim_cap} for dimension {dim_idx} of field '{key}'."
+                    )
 
     def _ensure_static_buffer(
         self,
@@ -325,30 +363,15 @@ class _StagingEngine(_StorageEngine):
         offset: Offset,
     ) -> None:
         """Ensure static buffer in self._static_staging is allocated and sized for the write target."""
+        batch_capacities = self._get_path_batch_capacities(key)
+
         if offset.is_unbounded:
             # Full column or unindexed struct write
-            if self.capacity is not None and len(data) > self.capacity:
-                raise ValueError(
-                    f"Provided data of length {len(data)} exceeds capacity {self.capacity} for field '{key}'."
-                )
-
-            if len(key) > 1:
-                target_nested_len = (
-                    data.shape[1] if self.capacity is not None else len(data)
-                )
-                min_dims = 2 if self.capacity is not None else 1
-                if (
-                    entry.capacity is not None
-                    and data.ndim >= min_dims
-                    and target_nested_len > entry.capacity
-                ):
+            for dim_idx, cap in enumerate(batch_capacities):
+                if cap is not None and data.ndim > dim_idx and data.shape[dim_idx] > cap:
                     raise ValueError(
-                        f"Provided nested dimension {target_nested_len} exceeds capacity {entry.capacity} for field '{key}'."
+                        f"Provided dimension {dim_idx} length {data.shape[dim_idx]} exceeds capacity {cap} for field '{key}'."
                     )
-            elif entry.capacity is not None and len(data) > entry.capacity:
-                raise ValueError(
-                    f"Provided data of length {len(data)} exceeds capacity {entry.capacity} for field '{key}'."
-                )
 
             if (
                 key not in self._static_staging
@@ -361,30 +384,32 @@ class _StagingEngine(_StorageEngine):
         shape = tuple([e for e in entry.shape if e is not None])
         assert len(shape) == len(entry.shape)
 
-        idx_req = self._get_required_length(offset)
-        cap = self._get_target_capacity(key, entry)
-
-        if cap is not None and idx_req > cap:
-            raise ValueError(
-                f"Write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
-            )
+        self._validate_offset_bounds(key, offset, batch_capacities)
 
         if key in self._static_staging:
-            if idx_req > len(self._static_staging[key]):
-                raise ValueError(
-                    f"Write target index/stop {idx_req} exceeds buffer length {len(self._static_staging[key])} for field '{key}'."
-                )
+            buf = self._static_staging[key]
+            for dim_idx, idx_val in enumerate(offset.dims):
+                req_len: Optional[int] = None
+                match idx_val:
+                    case int(idx):
+                        req_len = idx + 1
+                    case slice(stop=int(stop)):
+                        req_len = stop
+                    case _:
+                        pass
+                if req_len is not None and dim_idx < buf.ndim and req_len > buf.shape[dim_idx]:
+                    raise ValueError(
+                        f"Write target index/stop {req_len} exceeds buffer length {buf.shape[dim_idx]} for field '{key}'."
+                    )
             return
 
-        match (cap, entry):
-            case (None, ArraySetEntry()):
-                raise IndexError(
-                    "Cannot perform indexed write on a Set with dynamic capacity without a prior bound or slice."
-                )
-            case (int(limit), ArraySetEntry()):
-                self._static_staging[key] = np.zeros((limit, *shape), dtype=entry.dtype)
-            case (_, ArrayEntry()):
-                self._static_staging[key] = np.zeros(shape, dtype=entry.dtype)
+        if any(cap is None for cap in batch_capacities):
+            raise IndexError(
+                "Cannot perform indexed write on a Set with dynamic capacity without a prior bound or slice."
+            )
+
+        full_shape = (*[c for c in batch_capacities if c is not None], *shape)
+        self._static_staging[key] = np.zeros(full_shape, dtype=entry.dtype)
 
     def _write_static(
         self,
@@ -409,7 +434,8 @@ class _StagingEngine(_StorageEngine):
         offset: Offset,
     ) -> None:
         """Ensure ragged slot list in self._ragged_staging exists and is sized for write."""
-        cap = self._get_target_capacity(key, entry)
+        batch_capacities = self._get_path_batch_capacities(key)
+        cap = batch_capacities[0] if batch_capacities else None
 
         if offset.is_unbounded:
             needed = len(prepared) if isinstance(prepared, (list, tuple)) else 0
@@ -420,17 +446,22 @@ class _StagingEngine(_StorageEngine):
             self._ragged_staging[key] = [None] * needed
             return
 
-        idx_req = self._get_required_length(offset)
-
-        if cap is not None and idx_req > cap:
-            raise ValueError(
-                f"Ragged write target index/stop {idx_req} exceeds capacity {cap} for field '{key}'."
-            )
+        self._validate_offset_bounds(key, offset, batch_capacities)
 
         if key in self._ragged_staging:
-            if idx_req > len(self._ragged_staging[key]):
+            buf = self._ragged_staging[key]
+            req_0: Optional[int] = None
+            if len(offset.dims) > 0:
+                match offset.dims[0]:
+                    case int(idx):
+                        req_0 = idx + 1
+                    case slice(stop=int(stop)):
+                        req_0 = stop
+                    case _:
+                        pass
+            if req_0 is not None and req_0 > len(buf):
                 raise ValueError(
-                    f"Ragged write target index/stop {idx_req} exceeds slot length {len(self._ragged_staging[key])} for field '{key}'."
+                    f"Ragged write target index/stop {req_0} exceeds slot length {len(buf)} for field '{key}'."
                 )
             return
 
@@ -452,8 +483,13 @@ class _StagingEngine(_StorageEngine):
         """Unified write for ragged entries delegating to _assign_ragged."""
         prepared = self._prepare_ragged_data(data, entry.dtype)
         self._ensure_ragged_slots(key, entry, prepared, offset)
-
-        self._assign_ragged(self._ragged_staging[key], offset, prepared)
+        batch_capacities = self._get_path_batch_capacities(key)
+        self._assign_ragged(
+            self._ragged_staging[key],
+            offset,
+            prepared,
+            child_capacities=batch_capacities[1:] if len(batch_capacities) > 1 else (),
+        )
 
     def write(
         self,
@@ -488,22 +524,86 @@ class _StagingEngine(_StorageEngine):
         slots: list,
         offset: Offset,
         data: Any,
+        child_capacities: Sequence[Optional[int]] = (),
     ) -> None:
         """Recursively assign prepared ragged data into target list slots."""
         match offset.dims:
             case (head,):
-                slots[head] = data
-            case (int(idx), *tail):
-                if slots[idx] is None:
-                    slots[idx] = []
+                match head:
+                    case int(idx):
+                        if idx >= len(slots):
+                            slots.extend([None] * (idx + 1 - len(slots)))
+                        slots[idx] = data
+                    case slice() as sl:
+                        if not isinstance(data, (list, tuple)):
+                            raise TypeError(
+                                f"Expected Sequence for ragged slice assignment, got {type(data).__name__}."
+                            )
+                        if sl.start is None and sl.stop is None and (sl.step is None or sl.step == 1):
+                            if len(slots) == 0:
+                                slots[:] = list(data)
+                            else:
+                                if len(data) != len(slots):
+                                    raise ValueError(
+                                        f"Provided slice data length {len(data)} does not match slice size {len(slots)}."
+                                    )
+                                slots[:] = list(data)
+                        else:
+                            req_stop = sl.stop
+                            if isinstance(req_stop, int) and req_stop > len(slots):
+                                slots.extend([None] * (req_stop - len(slots)))
+                            indices = list(range(*sl.indices(len(slots))))
+                            if len(data) != len(indices):
+                                raise ValueError(
+                                    f"Provided slice data length {len(data)} does not match slice size {len(indices)}."
+                                )
+                            for i, d in zip(indices, data):
+                                slots[i] = d
+                    case _:
+                        slots[:] = list(data)
 
-                self._assign_ragged(slots[idx], Offset(tail), data)
-            case (slice() as sl, *tail):
-                indices = range(*sl.indices(len(slots)))
-                for idx, item in zip(indices, data):
-                    if slots[idx] is None:
+            case (int(idx), *tail):
+                if idx >= len(slots):
+                    slots.extend([None] * (idx + 1 - len(slots)))
+
+                if slots[idx] is None:
+                    next_cap = child_capacities[0] if child_capacities else None
+                    if next_cap is not None:
+                        slots[idx] = [None] * next_cap
+                    else:
                         slots[idx] = []
-                    self._assign_ragged(slots[idx], Offset(tail), item)
+
+                self._assign_ragged(
+                    slots[idx],
+                    Offset(tail),
+                    data,
+                    child_capacities[1:] if child_capacities else (),
+                )
+
+            case (slice() as sl, *tail):
+                if not isinstance(data, (list, tuple)):
+                    raise TypeError(
+                        f"Expected Sequence for ragged slice assignment, got {type(data).__name__}."
+                    )
+                req_stop = sl.stop
+                if isinstance(req_stop, int) and req_stop > len(slots):
+                    slots.extend([None] * (req_stop - len(slots)))
+                indices = list(range(*sl.indices(len(slots))))
+                if len(data) != len(indices):
+                    raise ValueError(
+                        f"Provided slice data length {len(data)} does not match slice size {len(indices)}."
+                    )
+                next_cap = child_capacities[0] if child_capacities else None
+                for i, item in zip(indices, data):
+                    if slots[i] is None:
+                        slots[i] = [None] * next_cap if next_cap is not None else []
+                    self._assign_ragged(
+                        slots[i],
+                        Offset(tail),
+                        item,
+                        child_capacities[1:] if child_capacities else (),
+                    )
+
             case _:
                 slots[:] = list(data)
 
@@ -564,8 +664,8 @@ class _StagingEngine(_StorageEngine):
                             )
                         item = raw[norm_idx]
                         if item is None:
-                            raise ValueError(
-                                f"Cannot read unpopulated or null value at index {idx}."
+                            raise AttributeError(
+                                f"Field '{key}' at index {offset_val.to_tuple()} has not been initialized."
                             )
                         if isinstance(item, np.ndarray):
                             return item
@@ -587,16 +687,22 @@ class _StagingEngine(_StorageEngine):
                         curr: Any = raw
                         int_indices = cast(Tuple[int, ...], offset_val.dims)
                         for int_idx in int_indices:
+                            if curr is None or not isinstance(curr, list):
+                                raise AttributeError(
+                                    f"Field '{key}' at index {offset_val.to_tuple()} has not been initialized."
+                                )
                             norm_idx = int_idx + len(curr) if int_idx < 0 else int_idx
                             if norm_idx < 0 or norm_idx >= len(curr):
                                 raise IndexError(f"Index {int_idx} out of range.")
                             curr = curr[norm_idx]
-                            if curr is None:
-                                raise ValueError(
-                                    "Cannot read unpopulated or null value."
-                                )
+                        if curr is None:
+                            raise AttributeError(
+                                f"Field '{key}' at index {offset_val.to_tuple()} has not been initialized."
+                            )
                         if isinstance(curr, np.ndarray):
                             return curr
+                        if isinstance(curr, (list, tuple)):
+                            return np.asanyarray(curr, dtype=schema_entry.dtype)
                         return curr
 
                     # Fast-path 4: Leading int followed by unbounded slice (e.g. (idx, slice(None)))
@@ -607,6 +713,10 @@ class _StagingEngine(_StorageEngine):
                                 f"Index {idx} out of range for field '{key}'."
                             )
                         item = raw[norm_idx]
+                        if item is None:
+                            raise AttributeError(
+                                f"Field '{key}' at index {offset_val.to_tuple()} has not been initialized."
+                            )
                         if isinstance(item, list):
                             first = next((x for x in item if x is not None), None)
                             if (
@@ -707,6 +817,7 @@ class _StagingEngine(_StorageEngine):
     ) -> Tuple[List[int], List[int]]:
         """Calculate per-parent child counts and Arrow ListArray offsets for a dynamic nested Set."""
         child_lengths: Optional[List[int]] = None
+        first_field: Optional[str] = None
 
         for child_name in schema.fields:
             child_path = (*path, child_name)
@@ -721,11 +832,22 @@ class _StagingEngine(_StorageEngine):
                         or hasattr(child_val[0], "__len__")
                     )
                 ):
-                    child_lengths = [len(m) if m is not None else 0 for m in child_val]
-                    break
+                    curr_lengths = [len(m) if m is not None else 0 for m in child_val]
                 elif isinstance(child_val, (list, tuple, np.ndarray)):
-                    child_lengths = [len(child_val)]
-                    break
+                    curr_lengths = [len(child_val)]
+                else:
+                    continue
+
+                if child_lengths is None:
+                    child_lengths = curr_lengths
+                    first_field = child_name
+                else:
+                    if curr_lengths != child_lengths:
+                        raise ValueError(
+                            f"Inconsistent child counts under dynamic Set '{path}': "
+                            f"field '{first_field}' has counts {child_lengths}, "
+                            f"but field '{child_name}' has counts {curr_lengths}."
+                        )
 
         if child_lengths is not None:
             offsets = [0]
@@ -838,6 +960,59 @@ class _StagingEngine(_StorageEngine):
                 mask = None
         return build_tensor_array(np_data, shape=shape, dtype=entry.dtype, mask=mask)
 
+    @staticmethod
+    def _flatten_ragged_hierarchy(
+        raw: Any,
+        depth: int,
+        child_caps: Sequence[Optional[int]],
+    ) -> List[Any]:
+        """Recursively flatten intermediate container list nesting to reach leaf ragged items.
+
+        If an intermediate container is None, pad with the expected product of child capacities
+        so that Arrow FixedSizeListArray strides remain strictly aligned.
+        """
+        if depth <= 0:
+            if isinstance(raw, list):
+                return raw
+            elif raw is None:
+                return []
+            return [raw]
+
+        if raw is None:
+            mult = 1
+            for c in child_caps[:depth]:
+                if c is None:
+                    mult = 0
+                    break
+                mult *= c
+            return [None] * mult
+
+        flat: List[Any] = []
+        for item in raw:
+            if item is None:
+                mult = 1
+                for c in child_caps[:depth]:
+                    if c is None:
+                        mult = 0
+                        break
+                    mult *= c
+                flat.extend([None] * mult)
+            elif depth == 1:
+                if isinstance(item, (list, tuple)):
+                    flat.extend(item)
+                else:
+                    flat.append(item)
+            else:
+                flat.extend(
+                    _StagingEngine._flatten_ragged_hierarchy(
+                        item,
+                        depth - 1,
+                        child_caps[1:] if len(child_caps) > 1 else (),
+                    )
+                )
+
+        return flat
+
     def _build_ragged_column(
         self,
         entry: RaggedArraySetEntry,
@@ -851,17 +1026,16 @@ class _StagingEngine(_StorageEngine):
         if raw is None:
             return build_ragged_array([None] * level_len, entry.dtype)
 
+        batch_capacities = self._get_path_batch_capacities(path)
         if (
             parent_is_set
             and prefix != ()
             and isinstance(raw, (list, tuple))
-            and len(raw) > 0
-            and (
-                isinstance(raw[0], (list, tuple, np.ndarray))
-                or hasattr(raw[0], "__len__")
-            )
+            and len(batch_capacities) > 1
         ):
-            raw_to_build = [item for sub in raw if sub is not None for item in sub]
+            depth = len(batch_capacities) - 1
+            child_caps = batch_capacities[1:]
+            raw_to_build = self._flatten_ragged_hierarchy(raw, depth, child_caps)
         else:
             raw_to_build = list(raw)
 
@@ -1074,9 +1248,22 @@ def _arrow_to_numpy(col: pa.Array, shape: Tuple[Optional[int], ...]) -> np.ndarr
 class _ArrowEngine(_StorageEngine):
     """Immutable zero-copy storage engine backed 100% by Apache Arrow."""
 
-    def __init__(self, schema: Schema, batch: pa.RecordBatch) -> None:
-        self._schema = schema
+    def __init__(
+        self,
+        schema: Schema,
+        batch: pa.RecordBatch,
+        root_entry: Optional[SchemaEntry] = None,
+    ) -> None:
+        if root_entry is not None:
+            self._root_entry = root_entry
+        else:
+            self._root_entry = SchemaSetEntry(schema=schema, capacity=len(batch))
+        self._schema = self._root_entry.schema
         self._batch = batch
+
+    @property
+    def root_entry(self) -> SchemaEntry:
+        return self._root_entry
 
     @property
     def capacity(self) -> Optional[int]:
@@ -1126,8 +1313,8 @@ class _ArrowEngine(_StorageEngine):
         is_single_item = bool(
             (len(offset_val) > 0 and isinstance(offset_val[0], int))
             or (
-                isinstance(entry, ArrayEntry)
-                and not isinstance(entry, ArraySetEntry)
+                isinstance(self._root_entry, SchemaEntry)
+                and not isinstance(self._root_entry, SchemaSetEntry)
                 and len(self._batch) == 1
             )
         )
@@ -1158,14 +1345,30 @@ class ArrayStorage(_BaseStorage):
         record_batch: Optional[pa.RecordBatch] = None,
         path: KeyPath = ("root",),
         offset: Union[Offset, Sequence[IndexType]] = (),
+        root_entry: Optional[SchemaEntry] = None,
     ) -> None:
         super().__init__(schema=schema, parent=None, path=path, offset=Offset(offset))
         self._schema = schema
 
-        if record_batch is not None:
-            self._engine: _StorageEngine = _ArrowEngine(schema, record_batch)
+        if root_entry is not None:
+            resolved_root_entry = root_entry
+        elif capacity is not None:
+            resolved_root_entry = SchemaSetEntry(schema=schema, capacity=capacity)
         else:
-            self._engine = _StagingEngine(schema, capacity=capacity)
+            resolved_root_entry = SchemaEntry(schema=schema)
+
+        if record_batch is not None:
+            self._engine: _StorageEngine = _ArrowEngine(
+                schema, record_batch, root_entry=resolved_root_entry
+            )
+        else:
+            self._engine = _StagingEngine(
+                schema, capacity=capacity, root_entry=resolved_root_entry
+            )
+
+    @property
+    def root_entry(self) -> SchemaEntry:
+        return self._engine.root_entry
 
     @property
     def capacity(self) -> Optional[int]:
@@ -1180,13 +1383,25 @@ class ArrayStorage(_BaseStorage):
         batch = self._engine.to_record_batch()
         if not self._engine.is_frozen:
             # Transition to immutable Arrow engine and drop staging buffers
-            self._engine = _ArrowEngine(self._schema, batch)
+            self._engine = _ArrowEngine(
+                self._schema, batch, root_entry=self._engine.root_entry
+            )
         return batch
 
     @classmethod
-    def from_record_batch(cls, batch: pa.RecordBatch, schema: Schema) -> "ArrayStorage":
+    def from_record_batch(
+        cls,
+        batch: pa.RecordBatch,
+        schema: Schema,
+        root_entry: Optional[SchemaEntry] = None,
+    ) -> "ArrayStorage":
         """Construct an ArrayStorage directly wrapping a frozen Arrow RecordBatch."""
-        return cls(schema=schema, capacity=len(batch), record_batch=batch)
+        return cls(
+            schema=schema,
+            capacity=len(batch),
+            record_batch=batch,
+            root_entry=root_entry,
+        )
 
 
 class ArrayStorageView(_BaseStorage):
