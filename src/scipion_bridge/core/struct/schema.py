@@ -207,6 +207,7 @@ class Schema:
 
     dtype: Optional[Type]
     fields: Dict[str, Entry]
+    capacity: Optional[int] = None
 
     def to_set_schema(self, capacity: Optional[int] = None) -> "Schema":
         """Transform this schema into its Set-vectorized representation."""
@@ -216,6 +217,7 @@ class Schema:
                 name: entry.to_set_entry(capacity=capacity)
                 for name, entry in self.fields.items()
             },
+            capacity=capacity,
         )
 
     @property
@@ -253,12 +255,3 @@ class Schema:
                     _print_node(entry.children, prefix + extension)
 
         _print_node(self)
-
-
-# Backward compatibility aliases
-_ArrayEntryBase = ArrayEntryBase
-_ArrayEntry = ArrayEntry
-_ArraySetEntry = ArraySetEntry
-_RaggedArraySetEntry = RaggedArraySetEntry
-_SchemaEntry = SchemaEntry
-_SchemaSetEntry = SchemaSetEntry

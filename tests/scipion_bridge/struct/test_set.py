@@ -4,13 +4,33 @@ import numpy as np
 import scipion_bridge as B
 from scipion_bridge.core.struct.schema import (
     Schema,
-    _ArrayEntry,
-    _ArraySetEntry,
-    _RaggedArraySetEntry,
-    _SchemaSetEntry,
-    _SchemaEntry,
-    _ArrayEntryBase
+    ArrayEntry,
+    ArraySetEntry,
+    RaggedArraySetEntry,
+    SchemaSetEntry,
+    SchemaEntry,
+    ArrayEntryBase,
 )
+
+
+class Data(B.Struct):
+    pixels = B.Array[float](shape=(128, 128))
+    foo: float
+
+
+class IndexedData(B.Struct):
+    pixels = B.Array[float](shape=(128, 128))
+    bar: int
+
+
+class Frame(B.Struct):
+    pixels: B.Array[float] = B.Array(shape=(64, 64))
+    frame_id: int
+
+
+class Movie(B.Struct):
+    frames: B.Set[Frame] = B.Set[Frame](capacity=10)
+    movie_id: int
 
 
 def test_basic_set():
@@ -29,16 +49,16 @@ def test_basic_set():
     assert set_schema.is_static is True
     assert set(set_schema.fields.keys()) == {"bar", "metadata"}
 
-    # bar field in Set context converts to _ArraySetEntry
+    # bar field in Set context converts to ArraySetEntry
     bar_entry = set_schema.fields["bar"]
-    assert isinstance(bar_entry, _ArraySetEntry)
+    assert isinstance(bar_entry, ArraySetEntry)
     assert bar_entry.dtype == np.dtype(int)
     assert bar_entry.shape == (1,)
     assert bar_entry.is_static is True
 
-    # metadata field in Set context converts to _SchemaEntry wrapping set schema
+    # metadata field in Set context converts to SchemaEntry wrapping set schema
     metadata_entry = set_schema.fields["metadata"]
-    assert isinstance(metadata_entry, _SchemaEntry)
+    assert isinstance(metadata_entry, SchemaEntry)
     assert metadata_entry.is_static is True
     
     meta_schema = metadata_entry.schema
@@ -47,19 +67,19 @@ def test_basic_set():
     assert set(meta_schema.fields.keys()) == {"val_float", "val_int", "val_complex"}
 
     val_float = meta_schema.fields["val_float"]
-    assert isinstance(val_float, _ArraySetEntry)
+    assert isinstance(val_float, ArraySetEntry)
     assert val_float.dtype == np.dtype(float)
     assert val_float.shape == (1,)
     assert val_float.is_static is True
 
     val_int = meta_schema.fields["val_int"]
-    assert isinstance(val_int, _ArraySetEntry)
+    assert isinstance(val_int, ArraySetEntry)
     assert val_int.dtype == np.dtype(int)
     assert val_int.shape == (1,)
     assert val_int.is_static is True
 
     val_complex = meta_schema.fields["val_complex"]
-    assert isinstance(val_complex, _ArraySetEntry)
+    assert isinstance(val_complex, ArraySetEntry)
     assert val_complex.dtype == np.dtype(np.complex128)
     assert val_complex.shape == (1,)
     assert val_complex.is_static is True
@@ -81,25 +101,25 @@ def test_nested_sets():
 
     # bar field is a standard scalar array field on Foo
     bar_entry = schema.fields["bar"]
-    assert isinstance(bar_entry, _ArrayEntry)
+    assert isinstance(bar_entry, ArrayEntry)
     assert bar_entry.dtype == np.dtype(int)
     assert bar_entry.shape == (1,)
     assert bar_entry.is_static is True
 
     # data field is a nested Set entry with capacity 10
     data_entry = schema.fields["data"]
-    assert isinstance(data_entry, _SchemaSetEntry)
+    assert isinstance(data_entry, SchemaSetEntry)
     assert data_entry.capacity == 10
     assert data_entry.is_static is True
 
-    # Element inner schema fields are converted to _ArraySetEntry
+    # Element inner schema fields are converted to ArraySetEntry
     elem_schema = data_entry.schema
     assert isinstance(elem_schema, Schema)
     assert elem_schema.is_static is True
     assert set(elem_schema.fields.keys()) == {"foo"}
 
     foo_entry = elem_schema.fields["foo"]
-    assert isinstance(foo_entry, _ArraySetEntry)
+    assert isinstance(foo_entry, ArraySetEntry)
     assert foo_entry.dtype == np.dtype(float)
     assert foo_entry.shape == (1,)
     assert foo_entry.is_static is True
@@ -129,9 +149,9 @@ def test_static_struct_set_schema():
     assert isinstance(schema, Schema)
     assert schema.is_static is True
 
-    # Check that all fields in CTF set schema are _ArraySetEntry
+    # Check that all fields in CTF set schema are ArraySetEntry
     for field_name, entry in schema.fields.items():
-        assert isinstance(entry, _ArraySetEntry), f"{field_name} should be _ArraySetEntry"
+        assert isinstance(entry, ArraySetEntry), f"{field_name} should be ArraySetEntry"
         assert entry.is_static is True
         assert entry.shape == (1,)
 
@@ -148,17 +168,17 @@ def test_ragged_struct_set_schema():
     assert isinstance(schema, Schema)
     assert schema.is_static is False
 
-    # pixels is dynamic B.Array -> _RaggedArraySetEntry
+    # pixels is dynamic B.Array -> RaggedArraySetEntry
     pixels_entry = schema.fields["pixels"]
-    assert isinstance(pixels_entry, _RaggedArraySetEntry)
+    assert isinstance(pixels_entry, RaggedArraySetEntry)
     assert pixels_entry.is_static is False
 
-    # ctf is nested CTF struct -> _SchemaEntry containing set-converted fields
+    # ctf is nested CTF struct -> SchemaEntry containing set-converted fields
     ctf_entry = schema.fields["ctf"]
-    assert isinstance(ctf_entry, _SchemaEntry)
+    assert isinstance(ctf_entry, SchemaEntry)
     assert ctf_entry.is_static is True
     for _, entry in ctf_entry.schema.fields.items():
-        assert isinstance(entry, _ArraySetEntry)
+        assert isinstance(entry, ArraySetEntry)
 
 
 def test_tiltseries_set_schema_integration():
@@ -172,7 +192,7 @@ def test_tiltseries_set_schema_integration():
     assert isinstance(schema, Schema)
     assert "tilts" in schema.fields
     tilts_entry = schema.fields["tilts"]
-    assert isinstance(tilts_entry, _SchemaSetEntry)
+    assert isinstance(tilts_entry, SchemaSetEntry)
     assert tilts_entry.is_static is False
 
 
@@ -187,7 +207,7 @@ def test_set_of_tiltseries():
     assert isinstance(schema, Schema)
     assert "tilts" in schema.fields
     tilts_entry = schema.fields["tilts"]
-    assert isinstance(tilts_entry, _SchemaSetEntry)
+    assert isinstance(tilts_entry, SchemaSetEntry)
     assert tilts_entry.is_static is False
 
 
@@ -206,20 +226,20 @@ def test_set_of_classes2d_schema():
 
     # average is static batch array (128, 128)
     avg_entry = set_schema.fields["average"]
-    assert isinstance(avg_entry, _ArraySetEntry)
+    assert isinstance(avg_entry, ArraySetEntry)
     assert avg_entry.is_static is True
     assert avg_entry.shape == (128, 128)
 
     # particles is nested collection
     particles_entry = set_schema.fields["particles"]
-    assert isinstance(particles_entry, _SchemaSetEntry)
+    assert isinstance(particles_entry, SchemaSetEntry)
     assert particles_entry.is_static is False
 
     # child schema of particles has pixels (ArraySet) and voltage_kv (ArraySet)
     p_schema = particles_entry.schema
-    assert isinstance(p_schema.fields["pixels"], _ArraySetEntry)
+    assert isinstance(p_schema.fields["pixels"], ArraySetEntry)
     assert p_schema.fields["pixels"].shape == (128, 128)
-    assert isinstance(p_schema.fields["voltage_kv"], _ArraySetEntry)
+    assert isinstance(p_schema.fields["voltage_kv"], ArraySetEntry)
     assert p_schema.fields["voltage_kv"].shape == (1,)
 
 
@@ -231,7 +251,7 @@ def test_set_of_specialized_struct():
     SpecParticle = DynamicParticle.static(H=64)
     spec_set_schema = B.Set[SpecParticle].schema()  # type: ignore[valid-type]
     assert spec_set_schema.is_static is True
-    assert isinstance(spec_set_schema.fields["pixels"], _ArraySetEntry)
+    assert isinstance(spec_set_schema.fields["pixels"], ArraySetEntry)
     assert spec_set_schema.fields["pixels"].shape == (64, 64)
 
 
@@ -240,12 +260,12 @@ def test_set_capacity_static_vs_dynamic():
         val: float
 
     dyn_entry = B.Set[Item]().convert_to_entry()
-    assert isinstance(dyn_entry, _SchemaSetEntry)
+    assert isinstance(dyn_entry, SchemaSetEntry)
     assert dyn_entry.capacity is None
     assert dyn_entry.is_static is False
 
     fixed_entry = B.Set[Item](capacity=10).convert_to_entry()
-    assert isinstance(fixed_entry, _SchemaSetEntry)
+    assert isinstance(fixed_entry, SchemaSetEntry)
     assert fixed_entry.capacity == 10
     assert fixed_entry.is_static is True
 
@@ -261,7 +281,7 @@ def test_set_capacity_with_fixed_arg():
     schema = Container.schema()
     assert schema.is_static is True
     items_entry = schema.fields["items"]
-    assert isinstance(items_entry, _SchemaSetEntry)
+    assert isinstance(items_entry, SchemaSetEntry)
     assert items_entry.capacity == 10
     assert items_entry.is_static is True
 
@@ -276,7 +296,7 @@ def test_set_capacity_specialization_with_dynamic_arg():
 
     # 1. Base struct has dynamic capacity (None)
     items_entry_base = Container.schema().fields["items"]
-    assert isinstance(items_entry_base, _SchemaSetEntry)
+    assert isinstance(items_entry_base, SchemaSetEntry)
     assert items_entry_base.capacity is None
     assert not items_entry_base.is_static
     assert not Container.schema().is_static
@@ -284,7 +304,7 @@ def test_set_capacity_specialization_with_dynamic_arg():
     # 2. Specializing N on Container via .static() propagates to Set capacity
     Container10 = Container.static(N=10)
     items_entry_10 = Container10.schema().fields["items"]
-    assert isinstance(items_entry_10, _SchemaSetEntry)
+    assert isinstance(items_entry_10, SchemaSetEntry)
     assert items_entry_10.capacity == 10
     assert items_entry_10.is_static is True
     assert Container10.schema().is_static is True
@@ -294,7 +314,7 @@ def test_set_capacity_specialization_with_dynamic_arg():
         pass
 
     items_entry_20 = Container20.schema().fields["items"]
-    assert isinstance(items_entry_20, _SchemaSetEntry)
+    assert isinstance(items_entry_20, SchemaSetEntry)
     assert items_entry_20.capacity == 20
     assert items_entry_20.is_static is True
     assert Container20.schema().is_static is True
@@ -303,11 +323,6 @@ def test_set_capacity_specialization_with_dynamic_arg():
 # Storage Tests
 
 def test_basic_set_storage(as_engine):
-
-    class Data(B.Struct):
-        pixels = B.Array[float](shape=(128, 128))
-        foo: float
-
     noise = np.random.uniform(size=[5, 128, 128])
     noise_foo = np.random.uniform(size=[5, 1])
 
@@ -323,11 +338,6 @@ def test_basic_set_storage(as_engine):
 
 
 def test_basic_set_slicing(as_engine):
-
-    class Data(B.Struct):
-        pixels = B.Array[float](shape=(128, 128))
-        foo: float
-
     data_pixels = np.random.uniform(size=[32, 128, 128])
     data_foo = np.random.uniform(size=[32, 1])
 
@@ -349,10 +359,6 @@ def test_basic_set_slicing(as_engine):
 
 
 def test_set_double_slicing(as_engine):
-
-    class Data(B.Struct):
-        pixels = B.Array[float](shape=(128, 128))
-
     data_pixels = np.random.uniform(size=[32, 128, 128])
 
     # Set up buffer
@@ -373,13 +379,8 @@ def test_set_double_slicing(as_engine):
 
 
 def test_set_index_reading(as_engine):
-
-    class Data(B.Struct):
-        pixels = B.Array[float](shape=(128, 128))
-        bar: int
-    
     data_pixels = np.random.uniform(size=[32, 128, 128])
-    buffer = B.Set[Data](capacity=32)
+    buffer = B.Set[IndexedData](capacity=32)
     buffer["pixels"] = data_pixels
     buffer["bar"] = np.arange(32)[..., None]
 
@@ -420,14 +421,6 @@ def test_nested_struct_set_slicing(as_engine):
 
 
 def test_multidimensional_nested_set_slicing_and_indexing(as_engine):
-    class Frame(B.Struct):
-        pixels: B.Array[float] = B.Array(shape=(64, 64))
-        frame_id: int
-
-    class Movie(B.Struct):
-        frames: B.Set[Frame] = B.Set[Frame](capacity=10)
-        movie_id: int
-
     # 20 movies, each with 10 frames -> total (20, 10, ...)
     dataset = B.Set[Movie](capacity=20)
     dataset["movie_id"] = np.arange(20)[..., None]
@@ -470,14 +463,6 @@ def test_multidimensional_nested_set_slicing_and_indexing(as_engine):
 
 
 def test_multidimensional_2d_slice_both_axes(as_engine):
-    class Frame(B.Struct):
-        pixels: B.Array[float] = B.Array(shape=(64, 64))
-        frame_id: int
-
-    class Movie(B.Struct):
-        frames: B.Set[Frame] = B.Set[Frame](capacity=10)
-        movie_id: int
-
     # 20 movies, each with 10 frames -> total tensor (20, 10, 64, 64)
     dataset = B.Set[Movie](capacity=20)
     dataset["movie_id"] = np.arange(20)[..., None]
@@ -520,8 +505,6 @@ def test_multidimensional_2d_slice_both_axes_ragged(as_engine):
 
     # 20 movies, each with 10 frames -> 2D grid of ragged arrays
     dataset = B.Set[Movie](capacity=20)
-    dataset.print_schema()
-
     dataset["movie_id"] = np.arange(20)[..., None]
 
     # Populate 2D grid of frames (20 movies x 10 frames with variable lengths)
@@ -554,27 +537,18 @@ def test_multidimensional_2d_slice_both_axes_ragged(as_engine):
 
 
 def test_set_storage_shape_mismatch_raises():
-    class Data(B.Struct):
-        pixels = B.Array[float](shape=(128, 128))
-
     data = B.Set[Data](capacity=64)
     with pytest.raises(ValueError, match="Shape mismatch"):
         data["pixels"] = np.random.uniform(size=[5, 64, 64])
 
 
 def test_set_storage_capacity_exceeded_raises():
-    class Data(B.Struct):
-        pixels = B.Array[float](shape=(128, 128))
-
     data = B.Set[Data](capacity=64)
     with pytest.raises(ValueError, match="exceeds capacity 64"):
         data["pixels"] = np.random.uniform(size=[100, 128, 128])
 
 
 def test_set_storage_incompatible_dtype_raises():
-    class Data(B.Struct):
-        foo: float
-
     data = B.Set[Data](capacity=64)
     with pytest.raises(TypeError, match="Cannot cast data of dtype"):
         data["foo"] = np.array([1.0 + 2.0j], dtype=np.complex128)
@@ -645,13 +619,3 @@ def test_basic_ragged_set_assign(as_engine):
     assert np.allclose(latent_view[1], sample_2.latent)
     assert len(latent_view[0]) == 128
     assert len(latent_view[1]) == 256
-
-
-if __name__ == "__main__":
-    from scipion_bridge.backend.standalone.container import configure_default_env
-    
-    # Wire the container for 'scipion_bridge'
-    container = configure_default_env()
-
-    
-    test_multidimensional_2d_slice_both_axes_ragged(as_engine=lambda x: x)

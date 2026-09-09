@@ -2,15 +2,15 @@ from typing import Optional, Tuple
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.struct.schema import Entry, Schema, _ArrayEntryBase
+from scipion_bridge.core.struct.schema import Entry, Schema, ArrayEntryBase
 
 def assert_array_entry(
     entry: Entry,
     expected_shape: Tuple[Optional[int], ...],
     is_static: Optional[bool] = None,
 ) -> None:
-    """Narrows Entry to _ArrayEntryBase and validates shape and static status."""
-    assert isinstance(entry, _ArrayEntryBase)
+    """Narrows Entry to ArrayEntryBase and validates shape and static status."""
+    assert isinstance(entry, ArrayEntryBase)
     assert entry.shape == expected_shape
     if is_static is not None:
         assert entry.is_static == is_static
@@ -690,7 +690,7 @@ def test_array_class_access_semantics():
     assert arr.shape == (64, 64)
     assert repr(arr) == "Array[float32](shape=(64, 64), owner=Particle)"
     entry = arr.convert_to_entry()
-    assert isinstance(entry, _ArrayEntryBase)
+    assert isinstance(entry, ArrayEntryBase)
     assert entry.shape == (64, 64)
 
     # Calling schema() on uninstantiated Array class raises NotImplementedError
@@ -716,7 +716,7 @@ def test_array_schema_convertible_methods():
         B.Array.schema()
 
     entry = arr.convert_to_entry()
-    assert isinstance(entry, _ArrayEntryBase)
+    assert isinstance(entry, ArrayEntryBase)
     assert entry.shape == (10, 10)
     assert repr(arr) == "Array[float64](shape=(10, 10))"
 

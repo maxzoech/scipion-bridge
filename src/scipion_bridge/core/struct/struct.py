@@ -24,9 +24,6 @@ from .schema import (
     Entry,
     Schema,
     SchemaEntry,
-    _ArrayEntryBase,
-    _SchemaEntry,
-    _ArrayEntry,
 )
 from ..utils.marker import Marker
 from .storage import _BaseStorage, ArrayStorage, ArrayStorageView
@@ -470,7 +467,6 @@ class Struct(Trait, SchemaConvertible):
     def __init__(self, **kwargs: Any) -> None:
         storage = kwargs.pop("_storage_view", None)
         if storage is None:
-            storage = ArrayStorage(schema=self._bridge_schema)
             storage = ArrayStorage(schema=self._bridge_schema, path=("root",), offset=())
 
         if not isinstance(storage, _BaseStorage):

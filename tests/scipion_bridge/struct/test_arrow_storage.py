@@ -13,6 +13,12 @@ from scipion_bridge.core.struct import (
     ArrayStorage,
     Schema,
 )
+from scipion_bridge.core.struct.schema import KeyPath
+from scipion_bridge.core.struct.storage import (
+    _StagingEngine,
+    _ArrowEngine,
+    ArrayStorageView,
+)
 from scipion_bridge.core.struct.utils.dask_serialization import serialize_set, deserialize_set
 
 
@@ -24,6 +30,20 @@ class Metadata(B.Struct):
 class Particle(B.Struct):
     pixels = B.Array[np.float32](shape=(32, 32))
     metadata: Metadata
+
+
+class SimpleData(B.Struct):
+    pixels = B.Array[np.float32](shape=(16, 16))
+    value: int
+
+
+class Item(B.Struct):
+    pixels = B.Array[float](shape=(16, 16))
+    tag: int
+
+
+class RaggedSample(B.Struct):
+    latent = B.Array[np.float32](shape=(None,))
 
 
 def test_arrow_sequence_constructor():
@@ -82,13 +102,10 @@ def test_arrow_record_batch_conversion_and_freeze():
 
 
 def test_arrow_ragged_array_view():
-    class Sample(B.Struct):
-        latent = B.Array[np.float32](shape=(None,))
-
-    samples = B.Set[Sample](capacity=3)
-    samples[0] = Sample(latent=np.array([1.0, 2.0], dtype=np.float32))
-    samples[1] = Sample(latent=np.array([3.0, 4.0, 5.0], dtype=np.float32))
-    samples[2] = Sample(latent=np.array([6.0], dtype=np.float32))
+    samples = B.Set[RaggedSample](capacity=3)
+    samples[0] = RaggedSample(latent=np.array([1.0, 2.0], dtype=np.float32))
+    samples[1] = RaggedSample(latent=np.array([3.0, 4.0, 5.0], dtype=np.float32))
+    samples[2] = RaggedSample(latent=np.array([6.0], dtype=np.float32))
 
     latent_view = samples["latent"]
     assert isinstance(latent_view, RaggedArrayView)
@@ -107,10 +124,6 @@ def test_arrow_ragged_array_view():
 
 
 def test_arrow_2d_slicing():
-    class SimpleData(B.Struct):
-        pixels = B.Array[np.float32](shape=(16, 16))
-        value: int
-
     data_set = B.Set[SimpleData](capacity=10)
     for i in range(10):
         data_set[i] = SimpleData(
@@ -214,16 +227,6 @@ def test_unified_storage_read_write_and_schema_dataclasses():
 
 
 def test_polymorphic_storage_engine_lifecycle_and_views():
-    from scipion_bridge.core.struct.storage import (
-        _StagingEngine,
-        _ArrowEngine,
-        ArrayStorageView,
-    )
-
-    class Item(B.Struct):
-        pixels = B.Array[float](shape=(16, 16))
-        tag: int
-
     set_schema = B.Set[Item].schema()
 
     # 1. Staging mode initially
@@ -268,16 +271,13 @@ def test_polymorphic_storage_engine_lifecycle_and_views():
 
 def test_keypath_schema_tree_iter_and_view_qualification():
     """Verify KeyPath tuples across schema tree iteration and storage view qualification."""
-    from scipion_bridge.core.struct.schema import KeyPath
-    from scipion_bridge.core.struct.storage import ArrayStorageView
-
-    class Metadata(B.Struct):
+    class FrameMetadata(B.Struct):
         tag: int
         rate: float
 
     class Frame(B.Struct):
         pixels: B.Array[float] = B.Array(shape=(32, 32))
-        metadata: Metadata
+        metadata: FrameMetadata
 
     frame_schema = Frame.schema()
 
@@ -292,7 +292,7 @@ def test_keypath_schema_tree_iter_and_view_qualification():
 
     # 2. Verify ArrayStorageView qualification with KeyPath tuples
     root_storage = ArrayStorage(schema=frame_schema)
-    meta_view = ArrayStorageView(schema=Metadata.schema(), parent=root_storage, path=("metadata",))
+    meta_view = ArrayStorageView(schema=FrameMetadata.schema(), parent=root_storage, path=("metadata",))
 
     assert meta_view.qualify_path(("tag",)) == ("metadata", "tag")
     assert meta_view.qualify_path("tag") == ("metadata", "tag")
@@ -304,11 +304,11 @@ def test_keypath_schema_tree_iter_and_view_qualification():
 
 def test_struct_storage_keypath_direct_read_write():
     """Verify Struct reading and writing using atomic KeyPath tuples and single strings."""
-    class Sample(B.Struct):
+    class ImageSample(B.Struct):
         pixels: B.Array[float] = B.Array(shape=(4, 4))
         label: int
 
-    schema = Sample.schema()
+    schema = ImageSample.schema()
     storage = ArrayStorage(schema=schema)
 
     # Write using KeyPath tuple
@@ -360,12 +360,12 @@ def test_set_indexing_three_primitives():
 
 def test_arrow_missing_values_bitmask():
     """Verify that uninitialized and partially written fields generate Arrow validity bitmasks."""
-    class Sample(B.Struct):
+    class BitmaskSample(B.Struct):
         pixels = B.Array[float](shape=(4, 4))
         tag: int
         ragged = B.Array[float](shape=(None,))
 
-    s = B.Set[Sample](capacity=4)
+    s = B.Set[BitmaskSample](capacity=4)
     # Partially write pixels: only 2 rows populated
     s["pixels"] = np.ones((2, 4, 4), dtype=np.float64)
     # Do not write tag at all (completely uninitialized)
@@ -401,8 +401,6 @@ def test_arrow_missing_values_bitmask():
 
 def test_arrow_pure_engine_multiaxis_ragged_view():
     """Verify pure ArrowEngine holds no Awkward batch, and RaggedArrayView supports match..case multi-axis indexing."""
-    from scipion_bridge.core.struct.storage import _ArrowEngine
-
     # 1. Verify RaggedArrayView 2D multi-axis indexing
     # 2 movies, 2 frames each
     inner = pa.ListArray.from_arrays(
@@ -448,12 +446,8 @@ def test_arrow_pure_engine_multiaxis_ragged_view():
     assert "RaggedArrayView" in repr(view)
 
     # 2. Verify _ArrowEngine is pure Apache Arrow (no _ak_batch attribute)
-    class Item(B.Struct):
-        pixels = B.Array[float](shape=(4, 4))
-        tag: int
-
     s = B.Set[Item](capacity=3)
-    s["pixels"] = np.ones((3, 4, 4), dtype=np.float32)
+    s["pixels"] = np.ones((3, 16, 16), dtype=np.float32)
     s["tag"] = np.array([1, 2, 3])[..., None]
     batch = s.to_arrow()
 
@@ -465,7 +459,39 @@ def test_arrow_pure_engine_multiaxis_ragged_view():
 
     # Direct read via pure ArrowEngine
     item_pixels = engine.read(("pixels",), s.schema().fields["pixels"], offset=(1,))
-    assert item_pixels.shape == (4, 4)
+    assert item_pixels.shape == (16, 16)
     assert np.allclose(item_pixels, 1.0)
+
+
+def test_read_ragged_predicate_control_flow():
+    """Verify _read_ragged uses deterministic predicate checks without exception-based control flow."""
+    import awkward as ak
+    from scipion_bridge.core.struct.storage import _read_ragged
+    from scipion_bridge.core.struct.offset import Offset
+
+    float_entry = RaggedArraySetEntry(dtype=np.dtype(np.float32), shape=(None,), capacity=10)
+    complex_entry = RaggedArraySetEntry(dtype=np.dtype(np.complex128), shape=(None,), capacity=10)
+
+    # 1. Element index with regular array -> converts to np.ndarray
+    reg_leaf = ak.Array([1.0, 2.0, 3.0])
+    res_reg = _read_ragged(reg_leaf, float_entry, Offset.from_index(0))
+    assert isinstance(res_reg, np.ndarray)
+    assert np.allclose(res_reg, [1.0, 2.0, 3.0])
+
+    # 2. Element index with jagged array -> returns awkward array directly
+    jag_leaf = ak.Array([[1.0, 2.0], [3.0]])
+    res_jag = _read_ragged(jag_leaf, float_entry, Offset.from_index(0))
+    assert isinstance(res_jag, ak.Array)
+
+    # 3. 1D slice with float array -> converts to RaggedArrayView
+    sliced_float = ak.Array([np.array([1.0, 2.0], dtype=np.float32), np.array([3.0], dtype=np.float32)])
+    res_view = _read_ragged(sliced_float, float_entry, Offset.from_slice(0, 2))
+    assert isinstance(res_view, RaggedArrayView)
+    assert len(res_view) == 2
+
+    # 4. 1D slice with complex array -> returns awkward array directly (no ArrowNotImplementedError)
+    sliced_complex = ak.Array([np.array([1.0 + 2.0j], dtype=np.complex128)])
+    res_complex = _read_ragged(sliced_complex, complex_entry, Offset.from_slice(0, 1))
+    assert isinstance(res_complex, ak.Array)
 
 

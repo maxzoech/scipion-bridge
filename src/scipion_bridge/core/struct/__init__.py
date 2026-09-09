@@ -13,11 +13,10 @@ from .schema import (
 )
 from .struct import Struct, Array, Arg, Dim
 from .set import Set
+from .offset import Offset
 from .storage import (
     ArrayStorage,
     ArrayStorageView,
-    ArrowStorage,
-    ArrowStorageView,
 )
 from .utils.arrow_utils import RaggedArrayView
 from .utils import dask_serialization
@@ -31,6 +30,7 @@ __all__ = [
     "Entry",
     "KeyPath",
     "Schema",
+    "Offset",
     "ArrayEntryBase",
     "ArrayEntry",
     "ArraySetEntry",
@@ -39,7 +39,5 @@ __all__ = [
     "SchemaSetEntry",
     "ArrayStorage",
     "ArrayStorageView",
-    "ArrowStorage",
-    "ArrowStorageView",
     "RaggedArrayView",
 ]

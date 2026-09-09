@@ -34,11 +34,8 @@ from .schema import (
     SchemaSetEntry,
     ArraySetEntry,
     RaggedArraySetEntry,
-    _SchemaSetEntry,
-    _ArraySetEntry,
-    _RaggedArraySetEntry,
-    _SchemaEntry,
 )
+from .offset import Offset
 from .storage import _BaseStorage, ArrayStorage, ArrayStorageView, _lookup_entry
 from .utils.arrow_utils import RaggedArrayView
 from ..utils.marker import Marker
@@ -119,7 +116,7 @@ class Set(Marker[T], SchemaConvertible):
                 schema=self.schema(),
                 capacity=cap_val,
                 path=("root",),
-                offset=(slice(None, None, None),),
+                offset=Offset.from_slice(None, None),
             ),
         )
         if not isinstance(storage, _BaseStorage):
@@ -151,7 +148,7 @@ class Set(Marker[T], SchemaConvertible):
             assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
 
             new_path = (*instance._storage.path, self.name)
-            new_offset = instance._storage.descend_set_offset()
+            new_offset = instance._storage.offset.descend()
             subview = ArrayStorageView(
                 self.schema(),
                 parent=instance._storage.parent or instance._storage,
@@ -394,7 +391,7 @@ class Set(Marker[T], SchemaConvertible):
                 if norm_idx < 0 or norm_idx >= self.capacity:
                     raise IndexError(f"Index {idx} out of range for Set with capacity {self.capacity}.")
 
-                new_offset = self._storage.compute_index_offset(norm_idx)
+                new_offset = self._storage.offset.push_index(norm_idx)
                 subview = ArrayStorageView(
                     self.dtype.schema(),
                     parent=self._storage.parent or self._storage,
@@ -410,7 +407,7 @@ class Set(Marker[T], SchemaConvertible):
                 start, stop = self._normalize_slice(sl)
                 new_size = stop - start
 
-                new_offset = self._storage.compute_slice_offset(start, stop)
+                new_offset = self._storage.offset.push_slice(start, stop)
                 subview = ArrayStorageView(
                     self.schema(),
                     parent=self._storage.parent or self._storage,
@@ -431,7 +428,7 @@ class Set(Marker[T], SchemaConvertible):
                     assert entry.schema.dtype is not None
                     
                     new_path = (*self._storage.path, field_name)
-                    new_offset = self._storage.descend_set_offset()
+                    new_offset = self._storage.offset.descend()
                     sliced_view = ArrayStorageView(
                         entry.schema,
                         parent=(self._storage.parent or self._storage),

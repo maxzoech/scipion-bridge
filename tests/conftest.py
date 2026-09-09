@@ -32,7 +32,6 @@ def as_engine(engine_mode):
             case "arrow_from_batch":
                 batch = set_instance.to_arrow()
                 return type(set_instance).from_arrow(batch)
-                return type(set_instance).from_arrow(set_instance.dtype, batch)
 
     return _transform
 
