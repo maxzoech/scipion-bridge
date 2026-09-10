@@ -89,7 +89,7 @@ class ArrayEntryBase(Entry):
 
     def format_entry(self, name: str) -> str:
         dtype_str = self.dtype.name if hasattr(self.dtype, "name") else str(self.dtype)
-        return f"{name}: {self.entry_name}[{dtype_str}], shape: {list(self.shape)})"
+        return f"{name}: {self.entry_name}[{dtype_str}], shape: {list(self.shape)}"
 
 
 @dataclass
@@ -233,6 +233,26 @@ class Schema:
                 yield from entry.children.tree_iter(root=path)
             elif isinstance(entry, ArrayEntryBase):
                 yield path, entry
+
+    def lookup(self, path: KeyPath) -> Optional[Entry]:
+        """Look up an Entry in the schema hierarchy by KeyPath tuple."""
+        match path:
+            case ("root", *tail):
+                return self.lookup(tuple(tail))
+            case (head,):
+                return self.fields.get(head)
+            case (head, *tail):
+                entry = self.fields.get(head)
+                if entry is not None and entry.children is not None:
+                    return entry.children.lookup(tuple(tail))
+                return None
+            case _:
+                return None
+
+    def lookup_array(self, path: KeyPath) -> Optional[ArrayEntryBase]:
+        """Look up a leaf ArrayEntryBase in the schema hierarchy by KeyPath tuple."""
+        entry = self.lookup(path)
+        return entry if isinstance(entry, ArrayEntryBase) else None
 
     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
         """Print the schema in a hierarchical tree format."""

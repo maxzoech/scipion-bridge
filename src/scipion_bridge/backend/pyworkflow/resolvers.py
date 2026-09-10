@@ -44,10 +44,10 @@ class PyWorkflowResolutionContext:
     unprocessed_ids: Optional[Sequence[int]] = None
 
 
-def register_pyworkflow_resolvers():
-    """Register all PyWorkflow object resolvers in the type resolution graph."""
-    if not HAS_PWEM:
-        return
+if HAS_PWEM:
+    from ...core.typed.resolve import resolver, lift_resolvers
+    from ...core import struct
+    from ... import single_particle as spa
 
     from ...core.typed.resolve import resolver, lift_resolvers
     from ...core import struct
@@ -209,5 +209,3 @@ def register_pyworkflow_resolvers():
 
     lift_resolvers(sys.modules[__name__], target=target_mod)
 
-
-register_pyworkflow_resolvers()

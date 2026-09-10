@@ -64,6 +64,18 @@ class Offset(Sequence[IndexType]):
         """True if all dimensions are integer indices (selecting a single leaf element)."""
         return len(self.dims) > 0 and all(isinstance(d, int) for d in self.dims)
 
+    def required_len(self, dim_idx: int) -> Optional[int]:
+        """Return the minimum required capacity (idx + 1 or slice stop) along dim_idx, or None."""
+        if dim_idx >= len(self.dims):
+            return None
+        match self.dims[dim_idx]:
+            case int(idx):
+                return idx + 1
+            case slice(stop=int(stop)):
+                return stop
+            case _:
+                return None
+
     @property
     def first(self) -> IndexType:
         """The outermost dimension index."""

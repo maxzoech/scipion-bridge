@@ -36,7 +36,7 @@ from .schema import (
     RaggedArraySetEntry,
 )
 from .offset import Offset
-from .storage import _BaseStorage, ArrayStorage, ArrayStorageView, _lookup_entry
+from .storage import _BaseStorage, ArrayStorage, ArrayStorageView
 from .utils.arrow_utils import RaggedArrayView
 from ..utils.marker import Marker
 
@@ -201,7 +201,7 @@ class Set(Marker[T], SchemaConvertible):
             instance._storage._field_capacities[self.name] = value.capacity
 
         for key, entry in value.schema().tree_iter():
-            target_entry = _lookup_entry(instance.schema(), (self.name, *key)) or entry
+            target_entry = instance.schema().lookup_array((self.name, *key)) or entry
             data = value._storage.read(key, entry)
             instance._storage.write((self.name, *key), entry=target_entry, data=data)
 
@@ -351,7 +351,7 @@ class Set(Marker[T], SchemaConvertible):
                 subview_struct = self[idx]
                 for field_path, entry in value.schema().tree_iter():
 
-                    target_entry = _lookup_entry(self.schema(), field_path)
+                    target_entry = self.schema().lookup_array(field_path)
                     assert target_entry is not None
 
                     field_data = value._storage.read(field_path, entry)
@@ -435,7 +435,7 @@ class Set(Marker[T], SchemaConvertible):
                     new_offset = self._storage.offset.descend()
                     sliced_view = ArrayStorageView(
                         entry.schema,
-                        parent=(self._storage.parent or self._storage),
+                        parent=self._storage.root_storage,
                         path=new_path,
                         offset=new_offset,
                     )
@@ -451,7 +451,7 @@ class Set(Marker[T], SchemaConvertible):
                     new_path = (*self._storage.path, field_name)
                     sliced_view = ArrayStorageView(
                         entry.schema,
-                        parent=(self._storage.parent or self._storage),
+                        parent=self._storage.root_storage,
                         path=new_path,
                         offset=self._storage.offset,
                     )

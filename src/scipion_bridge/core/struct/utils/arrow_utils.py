@@ -7,8 +7,11 @@ import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
 import pyarrow as pa
+import pyarrow.compute as pc
 
-from ..schema import Schema, ArrayEntryBase
+from ..schema import Schema, ArrayEntryBase, KeyPath, RaggedArraySetEntry
+from ..offset import Offset, IndexType
+from ..exceptions import UninitializedFieldError
 
 
 class RaggedArrayView(Sequence[Any]):
@@ -46,7 +49,7 @@ class RaggedArrayView(Sequence[Any]):
 
                 scalar = self._list_array[norm_idx]
                 if not scalar.is_valid:
-                    raise ValueError(f"Cannot read unpopulated or null value at index {norm_idx}.")
+                    raise UninitializedFieldError(f"Cannot read unpopulated or null value at index {norm_idx}.")
 
                 match scalar.values:
                     case pa.ListArray() | pa.LargeListArray() | pa.FixedSizeListArray():
@@ -196,4 +199,201 @@ def build_multidim_ragged_array(
     else:
         pa_mask = pa.array(mask_0, type=pa.bool_()) if any(mask_0) else None
         return pa.ListArray.from_arrays(pa.array(offsets_0, type=pa.int32()), pa_flat, mask=pa_mask)
+
+
+def is_regular_awkward(arr: ak.Array) -> bool:
+    """Check if an Awkward array has regular (non-jagged) dimensions at all depths."""
+    if arr.ndim <= 1:
+        return True
+    for axis in range(1, arr.ndim):
+        lengths = ak.num(arr, axis=axis)
+        while lengths.ndim > 1:
+            lengths = ak.flatten(lengths, axis=1)
+        if len(lengths) > 0 and not ak.all(lengths == lengths[0]):
+            return False
+    return True
+
+
+def read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Offset) -> Any:
+    """Resolve a read on a RaggedArraySetEntry from an Awkward array slice."""
+    if offset.is_element_index:
+        if isinstance(sliced, ak.Array) and is_regular_awkward(sliced):
+            return ak.to_numpy(sliced)
+        return sliced
+
+    if (
+        isinstance(sliced, ak.Array)
+        and sliced.ndim == 2
+        and not np.issubdtype(entry.dtype, np.complexfloating)
+        and (offset.is_empty or (len(offset) == 1 and isinstance(offset[0], slice)))
+    ):
+        pa_arr = ak.to_arrow(sliced, extensionarray=False)
+        if isinstance(pa_arr, pa.ChunkedArray):
+            pa_arr = pa_arr.combine_chunks()
+        if isinstance(pa_arr, (pa.ListArray, pa.LargeListArray)):
+            return RaggedArrayView(pa_arr, entry.dtype)
+
+    return sliced
+
+
+def extract_field_from_arrow(col: pa.Array, field_name: str) -> pa.Array:
+    """Recursively traverse StructArray or ListArray layers to extract a named child field."""
+    mask = col.is_null() if col.null_count > 0 else None
+    match col:
+        case pa.StructArray():
+            return col.field(field_name)
+        case pa.ListArray() | pa.LargeListArray():
+            inner = extract_field_from_arrow(col.values, field_name)
+            return type(col).from_arrays(col.offsets, inner, mask=mask)
+        case pa.FixedSizeListArray():
+            inner = extract_field_from_arrow(col.values, field_name)
+            base = pa.FixedSizeListArray.from_arrays(
+                inner, col.type.list_size, mask=mask
+            )
+            return base.slice(col.offset, len(col))
+        case _:
+            raise TypeError(
+                f"Cannot extract field '{field_name}' from {type(col).__name__}."
+            )
+
+
+def get_nested_arrow_field(col: pa.Array, path: KeyPath) -> pa.Array:
+    """Traverse nested StructArray / ListArray layers along a KeyPath to resolve the leaf field array."""
+    for seg in path:
+        col = extract_field_from_arrow(col, seg)
+    return col
+
+
+def unwrap_extension_for_compute(
+    arr: pa.Array,
+) -> Tuple[pa.Array, Optional[pa.DataType]]:
+    """Unwrap leaf FixedShapeTensorArray to storage array for PyArrow compute kernels."""
+    match arr:
+        case pa.ListArray() | pa.LargeListArray() | pa.FixedSizeListArray():
+            inner, ext_type = unwrap_extension_for_compute(arr.values)
+            if ext_type is not None:
+                mask = arr.is_null() if arr.null_count > 0 else None
+                if isinstance(arr, pa.FixedSizeListArray):
+                    base = pa.FixedSizeListArray.from_arrays(
+                        inner, arr.type.list_size, mask=mask
+                    )
+                    return base.slice(arr.offset, len(arr)), ext_type
+                else:
+                    return (
+                        type(arr).from_arrays(arr.offsets, inner, mask=mask),
+                        ext_type,
+                    )
+            return arr, None
+        case pa.ExtensionArray():
+            return arr.storage, arr.type
+        case _:
+            return arr, None
+
+
+def rewrap_extension_after_compute(
+    arr: pa.Array, ext_type: Optional[pa.DataType]
+) -> pa.Array:
+    """Re-wrap storage array back into FixedShapeTensorArray after compute operations."""
+    if ext_type is None:
+        return arr
+
+    if (
+        isinstance(arr, pa.FixedSizeListArray)
+        and arr.type.list_size == ext_type.storage_type.list_size
+    ):
+        return pa.ExtensionArray.from_storage(ext_type, arr)
+    if isinstance(arr, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
+        mask = arr.is_null() if arr.null_count > 0 else None
+        wrapped_values = rewrap_extension_after_compute(arr.values, ext_type)
+
+        if isinstance(arr, pa.FixedSizeListArray):
+            base = pa.FixedSizeListArray.from_arrays(
+                wrapped_values, arr.type.list_size, mask=mask
+            )
+            return base.slice(arr.offset, len(arr))
+        else:
+            return type(arr).from_arrays(arr.offsets, wrapped_values, mask=mask)
+
+    return arr
+
+
+def slice_arrow_array(
+    arr: pa.Array, offset: Union[Offset, Sequence[IndexType]]
+) -> pa.Array:
+    """Apply multi-dimensional offset tuple using PyArrow slicing and pc.list_slice."""
+    offset_val = Offset(offset)
+    if offset_val.is_empty:
+        return arr
+
+    first, *inner_offsets = offset_val.dims
+
+    # 1. Dimension 0 (Batch / Row level)
+    match first:
+        case int(idx):
+            norm_idx = idx + len(arr) if idx < 0 else idx
+            if norm_idx < 0 or norm_idx >= len(arr):
+                raise IndexError(
+                    f"Index {idx} out of range for array of length {len(arr)}."
+                )
+
+            arr = arr.slice(norm_idx, 1)
+        case slice() as sl:
+            start, stop, _ = sl.indices(len(arr))
+            arr = arr.slice(start, max(0, stop - start))
+
+    # 2. Dimensions 1+ (Nested List / Set levels)
+    if inner_offsets:
+        unwrapped, ext_type = unwrap_extension_for_compute(arr)
+        for inner in inner_offsets:
+            match inner:
+                case int(idx):
+                    unwrapped = pc.list_element(unwrapped, idx)
+                case slice() as sl:
+                    start = sl.start or 0
+                    stop = sl.stop
+                    unwrapped = pc.list_slice(unwrapped, start=start, stop=stop)
+        arr = rewrap_extension_after_compute(unwrapped, ext_type)
+
+    return arr
+
+
+def arrow_to_numpy(col: pa.Array, shape: Tuple[Optional[int], ...]) -> np.ndarray:
+    """Convert an Arrow array (ExtensionArray, ListArray, or primitive) to an N-D NumPy array."""
+    if isinstance(col, pa.ExtensionArray):
+        return col.to_numpy_ndarray()
+
+    if isinstance(col, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
+        outer_dims = [len(col)]
+        curr = col
+
+        while isinstance(
+            curr, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)
+        ):
+            total_items = len(curr.values)
+            parent_len = outer_dims[-1] if outer_dims[-1] > 0 else 1
+            outer_dims.append(total_items // parent_len)
+            curr = curr.values
+
+        if isinstance(curr, pa.ExtensionArray):
+            leaf_np = curr.to_numpy_ndarray()
+        else:
+            leaf_np = curr.to_numpy(zero_copy_only=False)
+
+        int_shape = tuple(d for d in shape if d is not None)
+        full_shape = (*outer_dims, *int_shape)
+        return leaf_np.reshape(full_shape)
+
+    return col.to_numpy(zero_copy_only=False)
+
+
+# Legacy aliases for backward compatibility
+_is_regular_awkward = is_regular_awkward
+_read_ragged = read_ragged
+_extract_field_from_arrow = extract_field_from_arrow
+_get_nested_arrow_field = get_nested_arrow_field
+_unwrap_extension_for_compute = unwrap_extension_for_compute
+_rewrap_extension_after_compute = rewrap_extension_after_compute
+_slice_arrow_array = slice_arrow_array
+_arrow_to_numpy = arrow_to_numpy
+
 

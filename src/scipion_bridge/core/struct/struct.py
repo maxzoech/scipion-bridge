@@ -491,12 +491,11 @@ class Struct(Trait, SchemaConvertible):
         if isinstance(instance, Struct):
             if self._name is None:
                 raise AttributeError("Struct descriptor name is not set.")
-            parent = instance._storage.parent or instance._storage
             new_path = (*instance._storage.path, self._name)
 
             subview = ArrayStorageView(
                 self.schema(),
-                parent=parent,
+                parent=instance._storage.root_storage,
                 path=new_path,
                 offset=instance._storage.offset,
             )

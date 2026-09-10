@@ -19,6 +19,7 @@ from .storage import (
     ArrayStorageView,
 )
 from .utils.arrow_utils import RaggedArrayView
+from .exceptions import UninitializedFieldError
 from .utils import dask_serialization
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "ArrayStorage",
     "ArrayStorageView",
     "RaggedArrayView",
+    "UninitializedFieldError",
 ]

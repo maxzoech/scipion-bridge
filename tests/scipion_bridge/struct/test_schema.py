@@ -2,296 +2,155 @@ import numpy as np
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge import struct
-
-# from scipion_bridge.core.struct.entries import (
-#     _ArrayEntry,
-#     _ArraySetEntry,
-#     _RaggedArraySetEntry,
-#     _ArrayLocation,
-#     _StructEntry,
-# )
-# from scipion_bridge.core.struct.schema import (
-#     Schema,
-#     create_schema,
-#     _supports_array_storage,
-# )
-
-
-# class SimpleStruct(B.Struct):
-#     val_int: int
-#     val_float: float
-#     val_bool: bool
-
-
-# class NestedChild(B.Struct):
-#     x: int
-#     y: np.float64
-
-
-# class NestedParent(B.Struct):
-#     name_id: int
-#     child: NestedChild
-
-
-# class DeepNested(B.Struct):
-#     parent: NestedParent
-#     tag: int
-
-
-
-
-def test_basic_schema():
-    pass
-
-
-# def test_schema_creation_nested():
-#     parent_schema = create_schema(NestedParent)
-#     assert isinstance(parent_schema, Schema)
-#     assert parent_schema.entries() == {"name_id", "child"}
-
-#     assert isinstance(parent_schema.fields["name_id"], _ArrayEntry)
-#     assert parent_schema.fields["name_id"].dtype == np.dtype(int)
-
-#     child_entry = parent_schema.fields["child"]
-#     assert isinstance(child_entry, _StructEntry)
-#     assert child_entry.struct_cls == NestedChild
-
-#     child_schema = child_entry.schema
-#     assert child_schema.entries() == {"x", "y"}
-#     assert isinstance(child_schema.fields["x"], _ArrayEntry)
-#     assert child_schema.fields["x"].dtype == np.dtype(int)
-#     assert isinstance(child_schema.fields["y"], _ArrayEntry)
-#     assert child_schema.fields["y"].dtype == np.dtype(np.float64)
-
-
-# def test_schema_creation_deep_nested():
-#     deep_schema = create_schema(DeepNested)
-#     assert isinstance(deep_schema, Schema)
-#     assert deep_schema.entries() == {"parent", "tag"}
-#     assert isinstance(deep_schema.fields["tag"], _ArrayEntry)
-
-#     parent_entry = deep_schema.fields["parent"]
-#     assert isinstance(parent_entry, _StructEntry)
-#     assert parent_entry.struct_cls == NestedParent
-#     assert parent_entry.schema.entries() == {"name_id", "child"}
-
-
-# def test_untyped_attribute_raises_type_error():
-#     with pytest.raises(TypeError) as exc_info:
-#         class UntypedStruct(B.Struct):
-#             x = 10
-#         create_schema(UntypedStruct)
-
-#     err_msg = str(exc_info.value)
-#     assert "declares attributes without type annotations." in err_msg
-#     assert "UntypedStruct" in err_msg
-
-
-# def test_incompatible_attribute_single_raises_type_error():
-#     with pytest.raises(TypeError) as exc_info:
-#         class SingleIncompatibleStruct(B.Struct):
-#             bad_attr: object
-#         create_schema(SingleIncompatibleStruct)
-
-#     err_msg = str(exc_info.value)
-#     assert "The attribute 'bad_attr' cannot be declared in struct" in err_msg
-#     assert "SingleIncompatibleStruct" in err_msg
-#     assert "because it does not support array serialization." in err_msg
-
-
-# def test_incompatible_attribute_multiple_raises_type_error():
-#     with pytest.raises(TypeError) as exc_info:
-#         class MultiIncompatibleStruct(B.Struct):
-#             bad1: object
-#             bad2: dict
-#         create_schema(MultiIncompatibleStruct)
-
-#     err_msg = str(exc_info.value)
-#     assert "The attributes 'bad1 and bad2' cannot be declared in struct" in err_msg
-#     assert "MultiIncompatibleStruct" in err_msg
-
-
-# def test_incompatible_nested_attribute_raises_type_error():
-#     class InvalidChild(B.Struct):
-#         invalid_field: object
-
-#     with pytest.raises(TypeError) as exc_info:
-#         class InvalidParent(B.Struct):
-#             child: InvalidChild
-#         create_schema(InvalidParent)
-
-#     err_msg = str(exc_info.value)
-#     assert "cannot be declared in struct" in err_msg
-
-
-# def test_schema_entries():
-#     schema = create_schema(SimpleStruct)
-#     entries = schema.entries()
-#     assert isinstance(entries, set)
-#     assert entries == {"val_int", "val_float", "val_bool"}
-
-
-# def test_array_generic_and_edge_cases():
-#     class ArrayStruct(B.Struct):
-#         arr_bare: B.Array[float]
-#         arr_typed: B.Array[int]
-
-#     schema = create_schema(ArrayStruct)
-#     assert "arr_bare" in schema.entries()
-#     assert "arr_typed" in schema.entries()
-
-#     with pytest.raises(TypeError) as exc_info:
-#         class BadArrayStruct(B.Struct):
-#             arr_bad: B.Array[object]
-#         create_schema(BadArrayStruct)
-
-#     assert "arr_bad" in str(exc_info.value)
-
-
-# def test_supports_array_storage_direct():
-#     assert _supports_array_storage(NestedChild) is not None
-#     assert _supports_array_storage(int) is True
-#     assert _supports_array_storage(object) is False
-#     assert _supports_array_storage("invalid_type_obj") is False
-
-
-# def test_schema_is_static():
-#     assert SimpleStruct.schema().is_static is True
-#     assert DeepNested.schema().is_static is True
-
-#     class DynamicArrayStruct(B.Struct):
-#         pixels: B.Array[float]
-
-#     assert DynamicArrayStruct.schema().is_static is False
-
-#     class ParentWithDynamicChild(B.Struct):
-#         child: DynamicArrayStruct
-#         x: int
-
-#     assert ParentWithDynamicChild.schema().is_static is False
-
-
-# def test_array_entry_is_static():
-#     static_entry = _ArrayEntry(
-#         dtype=np.dtype(float),
-#         storage=_ArrayLocation.AUTOMATIC,
-#         min_shape=(10, 10),
-#         max_shape=(10, 10),
-#         preferred_shape=None,
-#     )
-#     assert static_entry.is_static is True
-
-#     dynamic_entry = _ArrayEntry(
-#         dtype=np.dtype(float),
-#         storage=_ArrayLocation.AUTOMATIC,
-#         min_shape=None,
-#         max_shape=None,
-#         preferred_shape=None,
-#     )
-#     assert dynamic_entry.is_static is False
-
-#     mismatched_entry = _ArrayEntry(
-#         dtype=np.dtype(float),
-#         storage=_ArrayLocation.AUTOMATIC,
-#         min_shape=(5,),
-#         max_shape=(10,),
-#         preferred_shape=None,
-#     )
-#     assert mismatched_entry.is_static is False
-
-
-# def test_format_entry():
-#     arr_entry = _ArrayEntry(
-#         dtype=np.dtype(float),
-#         storage=_ArrayLocation.AUTOMATIC,
-#         min_shape=(10,),
-#         max_shape=(10,),
-#         preferred_shape=None,
-#     )
-#     assert arr_entry.format_entry("my_arr") == "my_arr: Array[float64](storage: auto, min: (10,), max: (10,))"
-
-#     arr_set_entry = _ArraySetEntry(
-#         dtype=np.dtype(int),
-#         storage=_ArrayLocation.AUTOMATIC,
-#         shape=(64, 64),
-#     )
-#     assert arr_set_entry.format_entry("my_set") == "my_set: ArraySet[int64](storage: auto, shape: (64, 64))"
-
-#     ragged_entry = _RaggedArraySetEntry(
-#         dtype=np.dtype(float),
-#         storage=_ArrayLocation.AUTOMATIC,
-#         min_shape=(1,),
-#         max_shape=None,
-#         preferred_shape=None,
-#     )
-#     assert ragged_entry.format_entry("my_ragged") == "my_ragged: RaggedArraySet[float64](storage: auto, min: (1,))"
-
-
-
-
-
-# def test_tree_iter():
-#     schema = create_schema(DeepNested)
-#     leaves = dict(schema.tree_iter())
-
-#     assert "parent.name_id" in leaves
-#     assert "parent.child.x" in leaves
-#     assert "parent.child.y" in leaves
-#     assert "tag" in leaves
-
-#     assert isinstance(leaves["tag"], _ArrayEntry)
-
-
-# def test_iter_leaves():
-#     schema = create_schema(DeepNested)
-#     leaves = dict(schema.iter_leaves())
-    
-#     assert "parent.name_id" in leaves
-#     assert "parent.child.x" in leaves
-#     assert "parent.child.y" in leaves
-#     assert "tag" in leaves
-    
-#     assert isinstance(leaves["tag"], _ArrayEntry)
-
-# def test_map_leaves():
-#     schema = create_schema(DeepNested)
-    
-#     # Map leaves to their entry's names
-#     mapped = schema.map_leaves(lambda path, entry: entry.entry_name)
-    
-#     expected = {
-#         "parent.name_id": "Array",
-#         "parent.child.x": "Array",
-#         "parent.child.y": "Array",
-#         "tag": "Array",
-#     }
-#     assert mapped == expected
-
-
-# def test_array_shape_syntax():
-#     class ParticleListShape(B.Struct):
-#         pixels: B.Array[np.float32, [256, 256]]
-
-#     class ParticleTupleShape(B.Struct):
-#         pixels: B.Array[np.float32, (256, 256)]
-
-#     class ParticleStructSyntax(B.Struct):
-#         pixels: B.Struct[np.float32, [256, 256]]
-
-#     class ParticleFlatShape(B.Struct):
-#         pixels: B.Array[np.float32, 256, 256]
-
-#     s_list = ParticleListShape.schema()
-#     s_tuple = ParticleTupleShape.schema()
-#     s_struct = ParticleStructSyntax.schema()
-#     s_flat = ParticleFlatShape.schema()
-
-#     assert s_list.fields["pixels"].min_shape == (256, 256)
-#     assert s_tuple.fields["pixels"].min_shape == (256, 256)
-#     assert s_struct.fields["pixels"].min_shape == (256, 256)
-#     assert s_flat.fields["pixels"].min_shape == (256, 256)
-
-
-if __name__ == "__main__":
-    test_basic_schema()
+from scipion_bridge.core.struct.schema import (
+    Schema,
+    Entry,
+    ArrayEntryBase,
+    ArrayEntry,
+    ArraySetEntry,
+    RaggedArraySetEntry,
+    SchemaEntry,
+    SchemaSetEntry,
+)
+
+
+def test_schema_construction_and_static_property():
+    class Simple(B.Struct):
+        val_int: int
+        val_float: float
+        val_bool: bool
+
+    schema = Simple.schema()
+    assert isinstance(schema, Schema)
+    assert schema.dtype is Simple
+    assert schema.is_static is True
+    assert set(schema.fields.keys()) == {"val_int", "val_float", "val_bool"}
+
+    int_entry = schema.fields["val_int"]
+    assert isinstance(int_entry, ArrayEntry)
+    assert int_entry.dtype == np.dtype(int)
+    assert int_entry.shape == (1,)
+    assert int_entry.is_static is True
+
+
+def test_schema_nested_struct_and_set():
+    class Child(B.Struct):
+        x: float
+        pixels = B.Array[float](shape=(32, 32))
+
+    class Parent(B.Struct):
+        tag: int
+        child: Child
+        items = B.Set[Child](capacity=10)
+
+    schema = Parent.schema()
+    assert schema.is_static is True
+    assert set(schema.fields.keys()) == {"tag", "child", "items"}
+
+    # StructEntry
+    child_entry = schema.fields["child"]
+    assert isinstance(child_entry, SchemaEntry)
+    assert child_entry.is_static is True
+    assert child_entry.children is not None
+    assert set(child_entry.children.fields.keys()) == {"x", "pixels"}
+
+    # SchemaSetEntry
+    items_entry = schema.fields["items"]
+    assert isinstance(items_entry, SchemaSetEntry)
+    assert items_entry.capacity == 10
+    assert items_entry.is_static is True
+    assert items_entry.children is not None
+
+
+def test_schema_dynamic_shape_is_not_static():
+    class Dynamic(B.Struct):
+        H = B.Dim(None)
+        pixels = B.Array[float](shape=(H, 32))
+
+    assert Dynamic.schema().is_static is False
+    pixels_entry = Dynamic.schema().fields["pixels"]
+    assert isinstance(pixels_entry, ArrayEntry)
+    assert pixels_entry.is_static is False
+
+
+def test_schema_lookup_and_lookup_array():
+    class SubChild(B.Struct):
+        val: int
+        tensor = B.Array[np.float32](shape=(4, 4))
+
+    class Container(B.Struct):
+        sub: SubChild
+        items = B.Set[SubChild](capacity=5)
+
+    schema = Container.schema()
+
+    # 1. Lookup with root prefix
+    assert schema.lookup(("root", "sub", "val")) is not None
+    assert isinstance(schema.lookup_array(("root", "sub", "val")), ArrayEntryBase)
+
+    # 2. Lookup without root prefix
+    val_entry = schema.lookup(("sub", "val"))
+    assert val_entry is not None
+    assert val_entry.dtype == np.dtype(int)
+
+    # 3. Lookup intermediate SchemaEntry
+    sub_entry = schema.lookup(("sub",))
+    assert isinstance(sub_entry, SchemaEntry)
+    # lookup_array returns None for non-array entries
+    assert schema.lookup_array(("sub",)) is None
+
+    # 4. Lookup nested set field
+    tensor_entry = schema.lookup_array(("items", "tensor"))
+    assert isinstance(tensor_entry, ArraySetEntry)
+    assert tensor_entry.shape == (4, 4)
+
+    # 5. Nonexistent paths return None
+    assert schema.lookup(("nonexistent",)) is None
+    assert schema.lookup(("sub", "missing")) is None
+    assert schema.lookup_array(("items", "missing")) is None
+    assert schema.lookup(()) is None
+
+
+def test_schema_tree_iter():
+    class Leaf(B.Struct):
+        a: int
+        b: float
+
+    class Root(B.Struct):
+        leaf: Leaf
+        tag: str
+
+    leaves = dict(Root.schema().tree_iter())
+    assert ("leaf", "a") in leaves
+    assert ("leaf", "b") in leaves
+    assert ("tag",) in leaves
+    for path, entry in leaves.items():
+        assert isinstance(entry, ArrayEntryBase)
+        assert isinstance(path, tuple)
+
+
+def test_schema_to_set_schema():
+    class Item(B.Struct):
+        val: float
+        pixels = B.Array[float](shape=(16, 16))
+
+    set_schema = Item.schema().to_set_schema(capacity=8)
+    assert set_schema.capacity == 8
+    assert set_schema.is_static is True
+
+    val_entry = set_schema.fields["val"]
+    assert isinstance(val_entry, ArraySetEntry)
+    assert val_entry.capacity == 8
+
+    pixels_entry = set_schema.fields["pixels"]
+    assert isinstance(pixels_entry, ArraySetEntry)
+    assert pixels_entry.shape == (16, 16)
+
+
+def test_format_entry_formatting():
+    entry_static = ArrayEntry(dtype=np.dtype("float32"), shape=(10, 10))
+    formatted = entry_static.format_entry("image")
+    # Verify no trailing unmatched closing parenthesis
+    assert formatted.endswith("[10, 10]")
+    assert "(" not in formatted
+    assert ")" not in formatted

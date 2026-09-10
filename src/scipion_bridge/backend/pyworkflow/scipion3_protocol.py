@@ -39,10 +39,9 @@ def convert_protocol_to_scipion3_protocol(
         from pwem.constants import ALIGN_PROJ, ALIGN_NONE  # type: ignore
         import pyworkflow.protocol.params as params  # type: ignore
         import pyworkflow.object as pywfobj  # type: ignore
-        from .resolvers import register_pyworkflow_resolvers
+        from . import resolvers
         from .utils.resolve_graph import find_pointer_class, find_output_pointer_class
 
-        register_pyworkflow_resolvers()
     except ImportError:
         raise ImportError(
             'Using scipion bridge with scipion requires pyworkflow option. Install it using pip install "scipion-bridge[pyworkflow]"'
@@ -361,7 +360,7 @@ def convert_protocol_to_scipion3_protocol(
                     previousDataStepDeps.append(dataStep)
                     stepDeps.append(dataStep)
 
-                time.sleep(self.__scipion_bridge_param_polling_freq)
+                time.sleep(self.__scipion_bridge_param_polling_freq.get())
 
                 for inputSet in inputs.values():
                     if (
