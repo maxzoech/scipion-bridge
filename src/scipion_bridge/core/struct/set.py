@@ -250,7 +250,10 @@ class Set(Marker[T], SchemaConvertible):
 
         batches = [s.to_arrow() for s in sets]
         table = pa.Table.from_batches(batches)
-        combined_batch = table.combine_chunks().to_batches()[0]
+        if table.num_rows == 0:
+            combined_batch = batches[0]
+        else:
+            combined_batch = table.combine_chunks().to_batches()[0]
         return cls.from_arrow(element_cls, combined_batch)
 
     def to_arrow(self) -> pa.RecordBatch:

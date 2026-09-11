@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+import pyarrow as pa
 
 import scipion_bridge as B
 from scipion_bridge.core.struct.schema import (
@@ -833,3 +834,109 @@ def test_nested_dynamic_ragged_set_cross_field_validation():
     # Compiling to Arrow should detect cross-field inconsistency and raise ValueError
     with pytest.raises(ValueError, match="Inconsistent child counts under dynamic Set"):
         dataset.to_arrow()
+
+
+def test_ragged_set_ndarray_column_assignment(as_engine):
+    class Particle(B.Struct):
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set = B.Set[Particle](capacity=5)
+    latents = np.arange(5 * 8, dtype=np.float64).reshape(5, 8)
+    p_set["embeddings"] = latents
+
+    p_set = as_engine(p_set)
+    for i in range(5):
+        assert np.allclose(p_set[i].embeddings, latents[i])
+    assert np.allclose(p_set["embeddings"][0], latents[0])
+    assert len(p_set["embeddings"]) == 5
+
+
+def test_ragged_set_ndarray_slice_assignment(as_engine):
+    class Particle(B.Struct):
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set = B.Set[Particle](capacity=10)
+    latents = np.arange(5 * 8, dtype=np.float64).reshape(5, 8)
+    p_set[2:7]["embeddings"] = latents
+
+    p_set = as_engine(p_set)
+    for i in range(5):
+        assert np.allclose(p_set[2 + i].embeddings, latents[i])
+
+
+def test_ragged_set_view_assignment():
+    class Particle(B.Struct):
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set1 = B.Set[Particle](capacity=5)
+    latents = np.arange(5 * 8, dtype=np.float64).reshape(5, 8)
+    p_set1["embeddings"] = latents
+
+    p_set2 = B.Set[Particle](capacity=5)
+    p_set2["embeddings"] = p_set1["embeddings"]
+
+    for i in range(5):
+        assert np.allclose(p_set2[i].embeddings, latents[i])
+
+    batch = p_set2.to_arrow()
+    assert batch.num_rows == 5
+
+
+def test_sliced_set_to_arrow(as_engine):
+    class Particle(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(4, 4))
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set = B.Set[Particle](capacity=10)
+    pixels = np.arange(10 * 16, dtype=np.float32).reshape(10, 4, 4)
+    embeddings = np.arange(10 * 8, dtype=np.float64).reshape(10, 8)
+    p_set["pixels"] = pixels
+    p_set["embeddings"] = embeddings
+
+    p_set = as_engine(p_set)
+    sliced = p_set[2:7]
+    assert len(sliced) == 5
+
+    batch = sliced.to_arrow()
+    assert isinstance(batch, pa.RecordBatch)
+    assert batch.num_rows == 5
+    assert batch.schema.names == ["pixels", "embeddings"]
+
+    restored = B.Set[Particle].from_arrow(batch)
+    assert len(restored) == 5
+    for i in range(5):
+        assert np.allclose(restored[i].pixels, pixels[2 + i])
+        assert np.allclose(restored[i].embeddings, embeddings[2 + i])
+
+
+def test_sliced_set_concat(as_engine):
+    class Particle(B.Struct):
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set = B.Set[Particle](capacity=10)
+    embeddings = np.arange(10 * 8, dtype=np.float64).reshape(10, 8)
+    p_set["embeddings"] = embeddings
+
+    p_set = as_engine(p_set)
+    chunk1 = p_set[0:4]
+    chunk2 = p_set[4:7]
+    chunk3 = p_set[7:10]
+
+    combined = B.Set.concat(chunk1, chunk2, chunk3)
+    assert len(combined) == 10
+    for i in range(10):
+        assert np.allclose(combined[i].embeddings, embeddings[i])
+
+
+def test_empty_set_concat():
+    class Particle(B.Struct):
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set1 = B.Set[Particle](capacity=0)
+    p_set1["embeddings"] = np.empty((0, 8), dtype=np.float64)
+
+    p_set2 = B.Set[Particle](capacity=0)
+    p_set2["embeddings"] = np.empty((0, 8), dtype=np.float64)
+
+    combined = B.Set.concat(p_set1, p_set2)
+    assert len(combined) == 0

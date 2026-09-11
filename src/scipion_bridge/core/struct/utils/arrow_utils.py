@@ -80,6 +80,40 @@ class RaggedArrayView(Sequence[Any]):
             )
         return False
 
+    def to_numpy(self) -> np.ndarray:
+        """Convert the ragged array view to a regular NumPy ndarray.
+
+        Raises:
+            ValueError: If subarray lengths are irregular or contain null values.
+        """
+        try:
+            arr = ak.to_numpy(ak.from_arrow(self._list_array))
+        except ValueError as e:
+            raise ValueError(
+                f"Cannot resolve {type(self).__name__} to regular NumPy ndarray: "
+                "subarray lengths are not uniform."
+            ) from e
+
+        if isinstance(arr, np.ma.MaskedArray):
+            if np.ma.is_masked(arr):
+                raise ValueError(
+                    f"Cannot resolve {type(self).__name__} to NumPy ndarray: "
+                    "data contains null or uninitialized values."
+                )
+            return arr.data
+        return arr
+
+    def __array__(
+        self, dtype: Optional[np.dtype] = None, copy: Optional[bool] = None
+    ) -> np.ndarray:
+        arr = self.to_numpy()
+        if dtype is not None and arr.dtype != dtype:
+            return arr.astype(dtype, copy=copy if copy is not None else True)
+        elif copy:
+            return arr.copy()
+        else:
+            return arr
+
     def __repr__(self) -> str:
         if len(self) <= 3:
             shapes = [tuple(arr.shape) if isinstance(arr, np.ndarray) else f"len={len(arr)}" for arr in self]

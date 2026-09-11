@@ -14,6 +14,8 @@ from .core.struct import Struct, Set, Array, Arg, Dim
 
 from .core.streaming.ops import Op, FlushSignal, FLUSH
 
+from .core.struct import RaggedArrayView
+
 from .core.typed import core_resolvers
 lift_resolvers(core_resolvers, proxy)
 
@@ -41,6 +43,7 @@ __all__ = [
     "Struct",
     "Set",
     "Array",
+    "RaggedArrayView",
     "Op",
     "FlushSignal",
     "FLUSH",

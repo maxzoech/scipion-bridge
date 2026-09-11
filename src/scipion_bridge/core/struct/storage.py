@@ -376,7 +376,11 @@ class _StagingEngine(_StorageEngine):
         cap = batch_capacities[0] if batch_capacities else None
 
         if offset.is_unbounded:
-            needed = len(prepared) if isinstance(prepared, (list, tuple)) else 0
+            needed = (
+                len(prepared)
+                if isinstance(prepared, (list, tuple, np.ndarray, RaggedArrayView))
+                else 0
+            )
             if cap is not None and needed > cap:
                 raise ValueError(
                     f"Ragged data length {needed} exceeds capacity {cap} for field '{key}'."
@@ -465,7 +469,7 @@ class _StagingEngine(_StorageEngine):
                             slots.extend([None] * (idx + 1 - len(slots)))
                         slots[idx] = data
                     case slice() as sl:
-                        if not isinstance(data, (list, tuple)):
+                        if not isinstance(data, (list, tuple, np.ndarray, RaggedArrayView)):
                             raise TypeError(
                                 f"Expected Sequence for ragged slice assignment, got {type(data).__name__}."
                             )
@@ -507,7 +511,7 @@ class _StagingEngine(_StorageEngine):
                 )
 
             case (slice() as sl, *tail):
-                if not isinstance(data, (list, tuple)):
+                if not isinstance(data, (list, tuple, np.ndarray, RaggedArrayView)):
                     raise TypeError(
                         f"Expected Sequence for ragged slice assignment, got {type(data).__name__}."
                     )
@@ -1184,4 +1188,49 @@ class ArrayStorageView(_BaseStorage):
     """Sub-view into a parent storage with qualified path prefix and offset propagation."""
 
     def to_record_batch(self) -> pa.RecordBatch:
-        raise NotImplementedError
+        root_batch = self.root_storage.to_record_batch()
+
+        # 1. Resolve column target if path points to a nested field
+        if self.path == self.root_storage.path or len(self.path) <= 1:
+            batch = root_batch
+        else:
+            root_path_len = len(self.root_storage.path)
+            if self.path[:root_path_len] == self.root_storage.path:
+                rel_path = self.path[root_path_len:]
+            else:
+                rel_path = self.path[1:]
+
+            col = _get_nested_arrow_field(
+                root_batch.column(rel_path[0]), tuple(rel_path[1:])
+            )
+
+            if isinstance(col, pa.StructArray):
+                batch = pa.RecordBatch.from_struct_array(col)
+            elif (
+                isinstance(col, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray))
+                and isinstance(col.values, pa.StructArray)
+            ):
+                batch = pa.RecordBatch.from_struct_array(col.values)
+            else:
+                raise NotImplementedError(
+                    f"Cannot convert sub-view of type {type(col).__name__} to RecordBatch."
+                )
+
+        # 2. Slice batch based on offset
+        if self.offset.is_empty or self.offset.is_unbounded:
+            return batch
+
+        first = self.offset.first
+        match first:
+            case slice() as sl:
+                start, stop, _ = sl.indices(len(batch))
+                return batch.slice(start, max(0, stop - start))
+            case int(idx):
+                norm_idx = idx + len(batch) if idx < 0 else idx
+                if norm_idx < 0 or norm_idx >= len(batch):
+                    raise IndexError(
+                        f"Index {idx} out of range for RecordBatch of length {len(batch)}."
+                    )
+                return batch.slice(norm_idx, 1)
+            case _:
+                return batch
