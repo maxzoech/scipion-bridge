@@ -36,6 +36,10 @@ class Op(Node):
     def combine_latest(self, *others: "Node") -> "CombineLatestOp":
         return CombineLatestOp(self, *others)
 
+    def flatten(self) -> "FlattenOp":
+        """Unroll lists, tuples, or struct.Set items into individual emissions."""
+        return self.op(FlattenOp())
+
     def sink(self, callback: Callable[[Any], Any]) -> Sink:
         """Attach a terminal Sink node and return it."""
         sink_node = Sink(callback)
@@ -374,6 +378,35 @@ class CombineLatestOp(Op):
             s.sink(partial(_on_emit, idx))
 
         return out_stream
+
+
+class FlattenOp(Op):
+    """
+    Unrolls iterable containers (list, tuple, struct.Set, etc.) into individual emissions.
+    Passes FlushSignal through as [FLUSH] to preserve pipeline lifecycle.
+    """
+
+    def __init__(self, upstream: Optional[List[Node]] = None):
+        super().__init__(upstream=upstream)
+
+    def _prepare_unroll(self, x: Any) -> Any:
+        if isinstance(x, FlushSignal):
+            return [FLUSH]
+
+        if isinstance(x, (list, tuple, set, struct.Set)):
+            return x
+
+        # 4. If an unexpected non-iterable arrives, raise or wrap it
+        raise TypeError(
+            f"FlattenOp expected an iterable or struct.Set, got {type(x).__name__}"
+        )
+
+    def transform(self, *streams: Stream) -> Stream:
+        return (
+            streams[0]
+            .map(self._prepare_unroll)
+            .flatten()
+        )
 
 
 CombineOp = CombineLatestOp

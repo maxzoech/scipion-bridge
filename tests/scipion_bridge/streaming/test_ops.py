@@ -1,7 +1,16 @@
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.streaming.ops import Source, MapOp, ChunkOp, MinChunkOp, CollectOp, CombineOp
+from scipion_bridge.core.streaming.ops import (
+    Source,
+    MapOp,
+    ChunkOp,
+    MinChunkOp,
+    CollectOp,
+    CombineOp,
+    FlattenOp,
+)
+from scipion_bridge.core.streaming.node import FLUSH
 from scipion_bridge.core.streaming.pipeline import Pipeline
 
 
@@ -368,6 +377,80 @@ def test_combine_op_buffers_pre_emission_items():
     assert received == [(10, "trained"), (20, "trained"), (30, "trained"), (40, "trained")]
 
 
+def test_flatten_op_unrolls_set():
+    received = []
+
+    source = Source("items")
+    sink_node = source.flatten().sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
+    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p3 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3))
+
+    stream.send(items=B.Set[Particle]([p1, p2]))
+    assert len(received) == 2
+    assert received[0].metadata.foo == 1
+    assert received[1].metadata.foo == 2
+
+    stream.send(items=B.Set[Particle]([p3]))
+    assert len(received) == 3
+    assert received[2].metadata.foo == 3
+
+
+def test_flatten_op_empty_set():
+    received = []
+
+    source = Source("items")
+    sink_node = source.flatten().sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    stream.send(items=B.Set[Particle]([]))
+    assert len(received) == 0
+
+
+def test_flatten_op_unrolls_tuple():
+    received = []
+
+    source = Source("items")
+    sink_node = source.flatten().sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    stream.send(items=(10, 20, 30))
+    assert received == [10, 20, 30]
+
+
+def test_flatten_op_flush_lifecycle():
+    received = []
+
+    source = Source("items")
+    sink_node = source.flatten().sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
+    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+
+    stream.send(items=B.Set[Particle]([p1, p2]))
+    assert len(received) == 2
+
+    # Flush should not crash and should not append to normal sink output
+    stream.flush()
+    assert len(received) == 2
+
+    op = FlattenOp()
+    assert op._prepare_unroll(FLUSH) == [FLUSH]
+
+
+def test_flatten_op_invalid_type_raises():
+    op = FlattenOp()
+    with pytest.raises(TypeError, match="FlattenOp expected an iterable or struct.Set, got int"):
+        op._prepare_unroll(42)
+
+    with pytest.raises(TypeError, match="FlattenOp expected an iterable or struct.Set, got Particle"):
+        p = Particle(pixels=np.zeros([256, 256], dtype=np.float32), metadata=Metadata(foo=1))
+        op._prepare_unroll(p)
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
     configure_default_env()
@@ -385,6 +468,12 @@ if __name__ == "__main__":
     test_collect_count_none_buffers_until_flush()
     test_combine_op()
     test_combine_op_buffers_pre_emission_items()
+    test_flatten_op_unrolls_set()
+    test_flatten_op_empty_set()
+    test_flatten_op_unrolls_tuple()
+    test_flatten_op_flush_lifecycle()
+    test_flatten_op_invalid_type_raises()
+
 
 
 
