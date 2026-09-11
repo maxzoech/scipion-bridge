@@ -940,3 +940,135 @@ def test_empty_set_concat():
 
     combined = B.Set.concat(p_set1, p_set2)
     assert len(combined) == 0
+
+
+def test_set_boolean_mask_filtering(as_engine):
+    class Particle(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(4, 4))
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set = B.Set[Particle](capacity=6)
+    pixels = np.arange(6 * 16, dtype=np.float32).reshape(6, 4, 4)
+    embeddings = np.arange(6 * 8, dtype=np.float64).reshape(6, 8)
+    p_set["pixels"] = pixels
+    p_set["embeddings"] = embeddings
+
+    p_set = as_engine(p_set)
+
+    # 1. NumPy boolean array
+    mask_np = np.array([True, False, True, False, False, True])
+    sub_np = p_set[mask_np]
+    assert len(sub_np) == 3
+    assert np.allclose(sub_np[0].pixels, pixels[0])
+    assert np.allclose(sub_np[1].pixels, pixels[2])
+    assert np.allclose(sub_np[2].pixels, pixels[5])
+
+    # 2. Python list of bools
+    mask_list = [False, True, False, True, False, False]
+    sub_list = p_set[mask_list]
+    assert len(sub_list) == 2
+    assert np.allclose(sub_list[0].embeddings, embeddings[1])
+    assert np.allclose(sub_list[1].embeddings, embeddings[3])
+
+    # 3. All-False mask -> empty set
+    empty_sub = p_set[np.array([False] * 6)]
+    assert len(empty_sub) == 0
+
+    # 4. All-True mask -> full set
+    full_sub = p_set[np.array([True] * 6)]
+    assert len(full_sub) == 6
+
+
+def test_set_boolean_mask_errors():
+    class Particle(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(2, 2))
+
+    p_set = B.Set[Particle](capacity=3)
+    p_set["pixels"] = np.zeros((3, 2, 2), dtype=np.float32)
+
+    # Length mismatch
+    with pytest.raises(IndexError, match="Boolean mask length 2 does not match"):
+        _ = p_set[np.array([True, False])]
+
+    # Single boolean indexing
+    with pytest.raises(TypeError, match="Cannot index Set with a single boolean"):
+        _ = p_set[True]
+
+
+def test_set_integer_indices_take(as_engine):
+    class Particle(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(4, 4))
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    p_set = B.Set[Particle](capacity=5)
+    pixels = np.arange(5 * 16, dtype=np.float32).reshape(5, 4, 4)
+    embeddings = np.arange(5 * 8, dtype=np.float64).reshape(5, 8)
+    p_set["pixels"] = pixels
+    p_set["embeddings"] = embeddings
+
+    p_set = as_engine(p_set)
+
+    # 1. Python list of ints with negative index
+    taken_list = p_set[[0, -1, 2]]
+    assert len(taken_list) == 3
+    assert np.allclose(taken_list[0].pixels, pixels[0])
+    assert np.allclose(taken_list[1].pixels, pixels[4])
+    assert np.allclose(taken_list[2].pixels, pixels[2])
+
+    # 2. NumPy array of ints
+    taken_np = p_set[np.array([1, 3])]
+    assert len(taken_np) == 2
+    assert np.allclose(taken_np[0].embeddings, embeddings[1])
+    assert np.allclose(taken_np[1].embeddings, embeddings[3])
+
+    # 3. Duplicate indices
+    taken_dup = p_set[[0, 0, 1]]
+    assert len(taken_dup) == 3
+    assert np.allclose(taken_dup[0].pixels, pixels[0])
+    assert np.allclose(taken_dup[1].pixels, pixels[0])
+    assert np.allclose(taken_dup[2].pixels, pixels[1])
+
+    # 4. Empty indices
+    assert len(p_set[[]]) == 0
+    assert len(p_set[np.array([], dtype=int)]) == 0
+
+    # 5. Out of bounds errors
+    with pytest.raises(IndexError, match="out of bounds"):
+        _ = p_set[[0, 5]]
+
+    with pytest.raises(IndexError, match="out of bounds"):
+        _ = p_set[[-6]]
+
+
+def test_set_clustering_filtering_workflow(as_engine):
+    class Particle(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(4, 4))
+        embeddings: B.Array[float] = B.Array(shape=(None,))
+
+    num_particles = 12
+    num_classes = 3
+    p_set = B.Set[Particle](capacity=num_particles)
+    pixels = np.arange(num_particles * 16, dtype=np.float32).reshape(num_particles, 4, 4)
+    embeddings = np.arange(num_particles * 8, dtype=np.float64).reshape(num_particles, 8)
+    p_set["pixels"] = pixels
+    p_set["embeddings"] = embeddings
+
+    p_set = as_engine(p_set)
+
+    # Predicted labels for each particle
+    predicted_labels = [0, 1, 2, 0, 1, 2, 0, 0, 1, 2, 1, 2]
+    labels = np.asarray(predicted_labels)
+
+    # User's target workflow:
+    classes = [p_set[labels == k] for k in range(num_classes)]
+
+    assert len(classes) == 3
+    assert len(classes[0]) == 4
+    assert len(classes[1]) == 4
+    assert len(classes[2]) == 4
+
+    # Verify elements in class 0
+    cls0_indices = [0, 3, 6, 7]
+    for i, orig_idx in enumerate(cls0_indices):
+        assert np.allclose(classes[0][i].pixels, pixels[orig_idx])
+        assert np.allclose(classes[0][i].embeddings, embeddings[orig_idx])

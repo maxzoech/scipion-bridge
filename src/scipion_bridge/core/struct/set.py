@@ -18,10 +18,11 @@ from typing import (
     cast,
     overload,
 )
-from typing_extensions import Self
+from typing_extensions import Self, TypeGuard
 import numpy as np
 from numpy.typing import NDArray
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from .struct import Struct, Arg, Trait
 from .schema import (
@@ -41,6 +42,35 @@ from .utils.arrow_utils import RaggedArrayView
 from ..utils.marker import Marker
 
 T = TypeVar("T", bound=Struct)
+
+
+def _is_bool_sequence(
+    key: Any,
+) -> TypeGuard[Union[Sequence[bool], NDArray[np.bool_], pa.BooleanArray]]:
+    if isinstance(key, np.ndarray):
+        return key.ndim == 1 and (key.dtype == bool or np.issubdtype(key.dtype, np.bool_))
+    if isinstance(key, (pa.Array, pa.ChunkedArray)) and pa.types.is_boolean(key.type):
+        return True
+    if isinstance(key, (list, tuple)):
+        return len(key) > 0 and all(type(x) is bool or isinstance(x, (bool, np.bool_)) for x in key)
+    return False
+
+
+def _is_int_sequence(
+    key: Any,
+) -> TypeGuard[Union[Sequence[int], NDArray[np.integer], pa.Array]]:
+    if isinstance(key, np.ndarray):
+        return key.ndim == 1 and np.issubdtype(key.dtype, np.integer)
+    if isinstance(key, (pa.Array, pa.ChunkedArray)) and pa.types.is_integer(key.type):
+        return True
+    if isinstance(key, (list, tuple)):
+        return all(
+            isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_))
+            for x in key
+        )
+    return False
+
+
 
 
 class BoundSetView(SchemaConvertible):
@@ -100,6 +130,7 @@ class Set(Marker[T], SchemaConvertible):
         super().__init__(**kwargs)
 
         items_to_populate: Optional[Sequence[Struct]] = None
+        cap_val: Optional[int] = None
 
         if capacity is not None and isinstance(capacity, Sequence) and not isinstance(capacity, (str, bytes)):
             items_to_populate = capacity
@@ -291,8 +322,12 @@ class Set(Marker[T], SchemaConvertible):
         set_schema = element_cls.schema().to_set_schema(capacity=len(actual_batch))
         root_entry = SchemaSetEntry(schema=set_schema, capacity=len(actual_batch))
         storage = ArrayStorage.from_record_batch(actual_batch, schema=set_schema, root_entry=root_entry)
-        
-        return cast(Any, cls)[element_cls](capacity=len(actual_batch), _storage_view=storage)
+
+        if cls._dtype == element_cls:
+            target_cls = cls
+        else:
+            target_cls = cast(Any, Set)[element_cls]
+        return target_cls(capacity=len(actual_batch), _storage_view=storage)
 
     @property
     def capacity(self) -> Optional[int]:
@@ -382,12 +417,72 @@ class Set(Marker[T], SchemaConvertible):
     def __getitem__(self, key: slice) -> Self: ...
 
     @overload
+    def __getitem__(
+        self, key: Union[Sequence[bool], NDArray[np.bool_], pa.BooleanArray]
+    ) -> Self: ...
+
+    @overload
+    def __getitem__(
+        self, key: Union[Sequence[int], NDArray[np.integer], pa.IntegerArray]
+    ) -> Self: ...
+
+    @overload
     def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
 
     def __getitem__(
-        self, key: Union[int, slice, str]
+        self,
+        key: Union[
+            int,
+            slice,
+            str,
+            Sequence[bool],
+            Sequence[int],
+            NDArray[np.bool_],
+            NDArray[np.integer],
+            pa.Array,
+        ],
     ) -> Union[T, Self, NDArray, RaggedArrayView, "Set[Any]"]:
         match key:
+            case bool():
+                raise TypeError(
+                    "Cannot index Set with a single boolean. Use an integer, slice, str, or boolean mask."
+                )
+
+            case _ if _is_bool_sequence(key):
+                if self.dtype is None:
+                    raise TypeError("Cannot index Set with unspecified element type.")
+
+                batch = self.to_arrow()
+                pa_mask = pa.array(key, type=pa.bool_())
+                if len(pa_mask) != len(batch):
+                    raise IndexError(
+                        f"Boolean mask length {len(pa_mask)} does not match Set length {len(batch)}."
+                    )
+
+                filtered_batch = pc.filter(batch, pa_mask)
+                return self.from_arrow(self.dtype, filtered_batch)
+
+            case _ if _is_int_sequence(key):
+                if self.dtype is None:
+                    raise TypeError("Cannot index Set with unspecified element type.")
+
+                batch = self.to_arrow()
+                set_len = len(batch)
+
+                idx_arr = np.asarray(key, dtype=np.int64)
+                if len(idx_arr) > 0:
+                    norm_arr = np.where(idx_arr < 0, idx_arr + set_len, idx_arr)
+                    if np.any((norm_arr < 0) | (norm_arr >= set_len)):
+                        raise IndexError(
+                            f"Index out of bounds for Set of length {set_len}."
+                        )
+                    pa_indices = pa.array(norm_arr, type=pa.int64())
+                else:
+                    pa_indices = pa.array([], type=pa.int64())
+
+                taken_batch = pc.take(batch, pa_indices)
+                return self.from_arrow(self.dtype, taken_batch)
+
             case int(idx):
                 assert (isinstance(self.dtype, type) and issubclass(self.dtype, Struct))
 
@@ -469,4 +564,6 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
             case _:
-                raise TypeError(f"Invalid Set index type '{type(key).__name__}'. Expected int, slice, or str.")
+                raise TypeError(
+                    f"Invalid Set index type '{type(key).__name__}'. Expected int, slice, str, or integer/boolean sequence."
+                )
