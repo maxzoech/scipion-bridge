@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Callable, Any, Type, Union, Tuple, TypeVar
+from typing import Optional, List, Dict, Callable, Any, Type, TypeAlias, Union, Tuple, TypeVar, Mapping, Generic, cast, overload
 from functools import partial, reduce
 from pyrsistent import pdeque, PDeque
 
@@ -10,6 +10,11 @@ from .sink import Sink
 
 _NodeT = TypeVar("_NodeT", bound=Node)
 
+E = TypeVar("E")
+S = TypeVar("S")
+
+_NO_DEFAULT = object()
+
 
 class Op(Node):
     """
@@ -20,6 +25,28 @@ class Op(Node):
         """Connect a downstream node to this op."""
         node.upstream.append(self)
         return node
+
+    @overload
+    def accumulate(
+        self,
+        func: Callable[[E, E], Tuple[E, Optional[E]]],
+        start: object = _NO_DEFAULT,
+    ) -> "AccumulateOp[E, E]": ...
+
+    @overload
+    def accumulate(
+        self,
+        func: Callable[[S, E], Tuple[S, Optional[E]]],
+        start: S,
+    ) -> "AccumulateOp[E, S]": ...
+
+    def accumulate(
+        self,
+        func: Callable[[S, E], Tuple[S, Optional[E]]],
+        start: Union[S, object] = _NO_DEFAULT,
+    ) -> "AccumulateOp":
+        """Fold stream items using func, emitting the running accumulated value on every item."""
+        return self.op(AccumulateOp(func, start=start))
 
     def map(self, func: Callable[[Any], Any]) -> "MapOp":
         return self.op(MapOp(func))
@@ -39,6 +66,18 @@ class Op(Node):
     def flatten(self) -> "FlattenOp":
         """Unroll lists, tuples, or struct.Set items into individual emissions."""
         return self.op(FlattenOp())
+
+    def group_by(self, key: Union[Callable[[Any], Any], str, int]) -> "GroupByOp":
+        """Group stream items by key, emitting (key, full_item) pairs."""
+        return self.op(GroupByOp(key))
+
+    def reduce(
+        self,
+        func: Callable[[Any, Any], Any],
+        start: Any = _NO_DEFAULT,
+    ) -> "ReduceOp":
+        """Reduce stream items using func into a single value, emitted upon FlushSignal."""
+        return self.op(ReduceOp(func, start=start))
 
     def sink(self, callback: Callable[[Any], Any]) -> Sink:
         """Attach a terminal Sink node and return it."""
@@ -73,6 +112,57 @@ class Source(Op):
         raise NotImplementedError(
             "Source node must be compiled via sources_map lookup."
         )
+
+
+_AccumulatorState: TypeAlias = Union[S, object]
+
+class AccumulateOp(Op, Generic[E, S]):
+    """
+    Folds stream elements using an accumulator function, emitting the running accumulator on every item.
+    """
+
+    def __init__(
+        self,
+        func: Callable[[S, E], Tuple[S, Optional[E]]],
+        start: _AccumulatorState = _NO_DEFAULT,
+        upstream: Optional[List[Node]] = None,
+    ):
+        super().__init__(upstream=upstream)
+
+        self.func = func
+        self.start = start
+
+    def _accumulate_step(
+        self,
+        state: S,
+        new_val: E,
+    ) -> Tuple[_AccumulatorState, List[Union[Optional[E], FlushSignal]]]:
+        
+        match (state, new_val):
+
+            case (state, new_val) if state == _NO_DEFAULT:
+                return cast(S, new_val), [new_val]
+
+            case (_, FlushSignal()):
+                _, final_val = self.func(state, new_val)
+                return self.start, [FLUSH, final_val]
+
+            case (state, new_val):
+                next_state, next_val = self.func(state, new_val)
+                return next_state, [next_val]
+
+    def transform(self, *streams: Stream) -> Stream:
+
+        return (
+                streams[0].accumulate(
+                self._accumulate_step,
+                start=self.start,
+                returns_state=True,
+            )
+            .flatten()
+            .filter(lambda x: x is not None)
+        )
+
 
 class ReduceOutputOp(Op):
     """Reduce operation node that accumulates input values into a single output."""
@@ -410,5 +500,317 @@ class FlattenOp(Op):
 
 
 CombineOp = CombineLatestOp
+
+
+class GroupedOp(Op):
+    """
+    Intermediate operation node for streams carrying (key, value) pairs.
+    Provides key-aware operations (such as map, keyed chunk, and keyed reduce)
+    that operate on values while preserving keys.
+    """
+
+    def map(self, func: Callable[[Any], Any]) -> "GroupedMapOp":
+        """Apply func to each value in the (key, value) stream, emitting (key, func(value))."""
+        return self.op(GroupedMapOp(func))
+
+    def chunk(self, size: int) -> "KeyedChunkOp":
+        """Buffer items per key until size is reached, emitting (key, chunk)."""
+        return self.op(KeyedChunkOp(size))
+
+    def reduce_by_key(
+        self,
+        func: Callable[[Any, Any], Any],
+        start: Any = _NO_DEFAULT,
+    ) -> "KeyedReduceOp":
+        """Reduce elements independently for each key, emitting (key, reduced_value) upon FlushSignal."""
+        return self.op(KeyedReduceOp(func, start=start))
+
+
+class GroupByOp(GroupedOp):
+    """
+    Groups stream elements by a key, emitting (key, full_item) pairs.
+    Preserves the full original element and propagates FlushSignal.
+    """
+
+    def __init__(
+        self,
+        key: Union[Callable[[Any], Any], str, int],
+        upstream: Optional[List[Node]] = None,
+    ):
+        super().__init__(upstream=upstream)
+        self.key = key
+
+    def _extract_key(self, item: Any) -> Any:
+        if callable(self.key):
+            return self.key(item)
+        if isinstance(self.key, int):
+            return item[self.key]
+        if isinstance(self.key, str):
+            if isinstance(item, (dict, Mapping)) and self.key in item:
+                return item[self.key]
+            if hasattr(item, self.key):
+                return getattr(item, self.key)
+            if isinstance(item, (list, tuple)) and self.key.isdigit():
+                return item[int(self.key)]
+            if hasattr(item, "__getitem__"):
+                try:
+                    return item[self.key]
+                except Exception:
+                    pass
+            raise KeyError(
+                f"Field or attribute '{self.key}' not found on {type(item).__name__}."
+            )
+        raise TypeError(
+            f"Unsupported key type '{type(self.key).__name__}'. Expected callable, str, or int."
+        )
+
+    def _group_func(self, x: Any) -> Any:
+        if isinstance(x, FlushSignal):
+            return x
+        k = self._extract_key(x)
+        return (k, x)
+
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].map(self._group_func)
+
+
+class GroupedMapOp(MapOp, GroupedOp):
+    """
+    Applies a mapping function to the value in each (key, value) pair, emitting (key, func(value)).
+    """
+
+    def __init__(
+        self,
+        func: Callable[[Any], Any],
+        upstream: Optional[List[Node]] = None,
+    ):
+        super().__init__(func=func)
+        if upstream is not None:
+            self.upstream = upstream
+
+    def _map_func(self, x: Any) -> Any:
+        if isinstance(x, FlushSignal):
+            return x
+        if not (isinstance(x, tuple) and len(x) == 2):
+            raise TypeError(
+                f"GroupedMapOp expects (key, value) pairs, got {type(x).__name__}"
+            )
+        k, v = x
+        return (k, self.func(v))
+
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].map(self._map_func)
+
+
+class ReduceOp(Op):
+    """
+    Folds stream elements using an accumulator function and emits the final reduced value upon FlushSignal.
+    """
+
+    def __init__(
+        self,
+        func: Callable[[Any, Any], Any],
+        start: Any = _NO_DEFAULT,
+        upstream: Optional[List[Node]] = None,
+    ):
+        super().__init__(upstream=upstream)
+        self.func = func
+        self.start = start
+
+    def _reduce_step(
+        self,
+        state: Tuple[Any, bool, bool],
+        new_val: Any,
+    ) -> Tuple[Tuple[Any, bool, bool], List[Any]]:
+        acc, has_val, has_start = state
+
+        if isinstance(new_val, FlushSignal):
+            emitted: List[Any] = []
+            if has_val:
+                emitted.append(acc)
+            emitted.append(FLUSH)
+            reset_acc = self.start if has_start else None
+            return (reset_acc, has_start, has_start), emitted
+
+        if not has_val:
+            acc = new_val
+            has_val = True
+        else:
+            acc = self.func(acc, new_val)
+
+        return (acc, True, has_start), []
+
+    def transform(self, *streams: Stream) -> Stream:
+        has_start = self.start is not _NO_DEFAULT
+        initial_acc = self.start if has_start else None
+        return streams[0].accumulate(
+            self._reduce_step,
+            start=(initial_acc, has_start, has_start),
+            returns_state=True,
+        ).flatten()
+
+
+class _KeyedChunkState:
+    def __init__(self) -> None:
+        self.set_queue: List[struct.Set] = []
+        self.set_capacity: int = 0
+        self.item_queue: List[Any] = []
+        self.is_set: Optional[bool] = None
+
+
+class KeyedChunkOp(ChunkOp, GroupedOp):
+    """
+    Buffers stream items per key until size is reached, emitting (key, chunk).
+    If values are struct.Set or Struct, chunks are emitted as struct.Set[T].
+    Otherwise, chunks are emitted as Python lists.
+    """
+
+    def __init__(self, size: int, upstream: Optional[List[Node]] = None):
+        super().__init__(size=size, upstream=upstream)
+
+    def _accumulate_keyed_chunks(
+        self,
+        states: Dict[Any, _KeyedChunkState],
+        new_item: Any,
+    ) -> Tuple[Dict[Any, _KeyedChunkState], List[Any]]:
+        emitted: List[Any] = []
+
+        if isinstance(new_item, FlushSignal):
+            for k, state in list(states.items()):
+                if state.is_set:
+                    if state.set_queue:
+                        leftover = (
+                            state.set_queue[0]
+                            if len(state.set_queue) == 1
+                            else struct.Set.concat(*state.set_queue)
+                        )
+                        emitted.append((k, leftover))
+                else:
+                    if state.item_queue:
+                        emitted.append((k, state.item_queue))
+            states.clear()
+            emitted.append(FLUSH)
+            return states, emitted
+
+        if not (isinstance(new_item, tuple) and len(new_item) == 2):
+            raise TypeError(
+                f"KeyedChunkOp expects (key, value) pairs, got {type(new_item).__name__}"
+            )
+
+        k, val = new_item
+        if k not in states:
+            states[k] = _KeyedChunkState()
+        state = states[k]
+
+        if isinstance(val, (struct.Set, Struct)):
+            state.is_set = True
+            if isinstance(val, Struct):
+                set_cls: Any = struct.Set
+                item_set: struct.Set = set_cls[type(val)]([val])
+            else:
+                item_set = val
+            if len(item_set) > 0:
+                state.set_queue.append(item_set)
+                state.set_capacity += len(item_set)
+
+            while state.set_capacity >= self.chunk_size:
+                accumulated: List[struct.Set] = []
+                needed = self.chunk_size
+
+                while state.set_queue and needed > 0:
+                    head = state.set_queue[0]
+                    head_len = len(head)
+
+                    if head_len <= needed:
+                        accumulated.append(head)
+                        needed -= head_len
+                        state.set_queue.pop(0)
+                    else:
+                        accumulated.append(head[:needed])
+                        state.set_queue[0] = head[needed:]
+                        needed = 0
+
+                chunk = (
+                    accumulated[0]
+                    if len(accumulated) == 1
+                    else struct.Set.concat(*accumulated)
+                )
+                emitted.append((k, chunk))
+                state.set_capacity -= self.chunk_size
+
+        else:
+            state.is_set = False
+            state.item_queue.append(val)
+            while len(state.item_queue) >= self.chunk_size:
+                chunk_items = state.item_queue[: self.chunk_size]
+                state.item_queue = state.item_queue[self.chunk_size :]
+                emitted.append((k, chunk_items))
+
+        return states, emitted
+
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].accumulate(
+            self._accumulate_keyed_chunks,
+            start={},
+            returns_state=True,
+        ).flatten()
+
+
+class KeyedReduceOp(GroupedOp):
+    """
+    Reduces stream elements independently for each key, emitting (key, reduced_value) upon FlushSignal.
+    """
+
+    def __init__(
+        self,
+        func: Callable[[Any, Any], Any],
+        start: Any = _NO_DEFAULT,
+        upstream: Optional[List[Node]] = None,
+    ):
+        super().__init__(upstream=upstream)
+        self.func = func
+        self.start = start
+
+    def _accumulate_keyed_reduce(
+        self,
+        states: Dict[Any, Tuple[Any, bool]],
+        new_item: Any,
+    ) -> Tuple[Dict[Any, Tuple[Any, bool]], List[Any]]:
+        emitted: List[Any] = []
+        has_start = self.start is not _NO_DEFAULT
+
+        if isinstance(new_item, FlushSignal):
+            for k, (acc, has_val) in list(states.items()):
+                if has_val:
+                    emitted.append((k, acc))
+            states.clear()
+            emitted.append(FLUSH)
+            return states, emitted
+
+        if not (isinstance(new_item, tuple) and len(new_item) == 2):
+            raise TypeError(
+                f"KeyedReduceOp expects (key, value) pairs, got {type(new_item).__name__}"
+            )
+
+        k, val = new_item
+        if k not in states:
+            if has_start:
+                acc = self.func(self.start, val)
+                states[k] = (acc, True)
+            else:
+                states[k] = (val, True)
+        else:
+            acc, _ = states[k]
+            states[k] = (self.func(acc, val), True)
+
+        return states, emitted
+
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].accumulate(
+            self._accumulate_keyed_reduce,
+            start={},
+            returns_state=True,
+        ).flatten()
+
 
 

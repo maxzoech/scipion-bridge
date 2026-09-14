@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Dict, get_type_hints, get_origin, get_args, Any, Type, OrderedDict
 
-from ..streaming.ops import Op, ReduceOutputOp
+from ..streaming.ops import Op, ReduceOutputOp, ReduceOp
 from .fields import Field, Input
 
 from ..utils.ast import parse_ast
@@ -84,11 +84,10 @@ class Protocol(metaclass=abc.ABCMeta):
 
             return outputs
 
-        return (
-            self.steps()
-            .map(_verify_outputs)
-            .op(ReduceOutputOp())
-        )
+        steps_op = self.steps()
+        pipeline: Op = steps_op.map(_verify_outputs)
+
+        return pipeline
 
     @abc.abstractmethod
     def outputs(self) -> Dict[str, Type]:

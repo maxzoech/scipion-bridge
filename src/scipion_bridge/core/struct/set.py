@@ -298,6 +298,12 @@ class Set(Marker[T], SchemaConvertible):
         self.to_arrow()
         return self
 
+    def __reduce__(self) -> Tuple[Any, ...]:
+        """Support pickle and Ray object store serialization via Apache Arrow RecordBatch."""
+        if self.dtype is not None:
+            return (Set.from_arrow, (self.dtype, self.to_arrow()))
+        raise TypeError("Cannot serialize Set with unspecified element type.")
+
     @classmethod
     def from_arrow(
         cls,

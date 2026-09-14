@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import numpy as np
 import pytest
 import scipion_bridge as B
@@ -451,29 +453,75 @@ def test_flatten_op_invalid_type_raises():
         op._prepare_unroll(p)
 
 
+def test_basic_accumulate():
+    def _acc_fn(state: B.Set, new_value: B.Set):
+        state = B.Set.concat(state, new_value)
+
+        return state, state
+
+    received = []
+
+    source = Source("items")
+    sink_node = (
+        source.accumulate(
+            _acc_fn,
+        )
+        .sink(lambda x: received.append(x))
+    )
+
+    stream = Pipeline.from_sink(sink_node)
+
+    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
+    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+
+    stream.send(items=B.Set[Particle]([p1]))
+    stream.send(items=B.Set[Particle]([p2]))
+
+    assert len(received[-1]) == 2
+
+
+# def test_basic_accumulate_start_value():
+
+#     class Sample(B.Struct):
+
+#         label: int
+
+#     class Group(B.Struct):
+
+#         samples: B.Set[Sample]
+
+#     def _acc_fn(state: B.Set[Group], new_value: Tuple[int, B.Set]):
+#         idx, next_set = new_value
+
+#         current_group = state[idx]
+#         new_set = B.Set.concat(current_group.samples, next_set)
+
+#         print(new_set)
+
+#         return state, new_value
+
+#     received = []
+    
+#     source = Source("items")
+#     sink_node = (
+#         source.accumulate(
+#             _acc_fn,
+#             start=B.Set[Group](capacity=20)
+#         )
+#         .sink(lambda x: received.append(x))
+#     )
+
+#     stream = Pipeline.from_sink(sink_node)
+
+#     stream.send(items=(0, B.Set[Sample]([Sample(label=0)])))
+    
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
     configure_default_env()
-    test_chunk_single_elements_into_set()
-    test_chunk_large_number_of_elements()
-    test_map_op()
-    test_map_op_transform_struct()
-    test_chunk_op_flush_partial_set()
-    test_chunk_op_flush_empty_queue()
-    test_min_chunk_buffers_and_emits_complete_set()
-    test_min_chunk_flush()
-    test_collect_buffers_emits_once_and_ignores_subsequent_items()
-    test_collect_single_large_set_truncated_to_count()
-    test_collect_flush_before_threshold()
-    test_collect_count_none_buffers_until_flush()
-    test_combine_op()
-    test_combine_op_buffers_pre_emission_items()
-    test_flatten_op_unrolls_set()
-    test_flatten_op_empty_set()
-    test_flatten_op_unrolls_tuple()
-    test_flatten_op_flush_lifecycle()
-    test_flatten_op_invalid_type_raises()
 
+    test_basic_accumulate_start_value()
 
 
 
