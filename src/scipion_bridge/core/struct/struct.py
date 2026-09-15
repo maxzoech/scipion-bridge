@@ -201,7 +201,12 @@ class Array(Marker[T], SchemaConvertible):
             
             shape_items.append(Dim.new(v))
 
+        self._owner_cls: Optional[type] = None
         self.shape_spec: Tuple[Dim, ...] = tuple(shape_items)
+
+    @property
+    def shape(self) -> Tuple[Optional[int], ...]:
+        return tuple([d.value for d in self.shape_spec])
 
     @property
     def dtype(self) -> Optional[np.dtype]:
@@ -294,7 +299,7 @@ class Array(Marker[T], SchemaConvertible):
     def __repr__(self) -> str:
         dtype_str = getattr(self.dtype, "name", getattr(self.dtype, "__name__", str(self.dtype))) if self.dtype is not None else "?"
         owner_str = f", owner={self._owner_cls.__name__}" if self._owner_cls is not None else ""
-        return f"Array[{dtype_str}](shape={self.shape_spec}{owner_str})"
+        return f"Array[{dtype_str}](shape={self.shape}{owner_str})"
 
 
 class Trait:

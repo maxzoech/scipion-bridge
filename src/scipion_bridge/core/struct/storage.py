@@ -190,7 +190,7 @@ class StorageView(_BaseStorage):
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         path = KeyPath([*self.root, *key])
-        return self.root_storage.read(key, entry)
+        return self.root_storage.write(key, entry, data)
 
 
 class StagingEngine(_BaseStorage):

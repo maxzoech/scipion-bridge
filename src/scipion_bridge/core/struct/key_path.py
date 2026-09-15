@@ -1,4 +1,4 @@
-from typing import Sequence, Tuple, Union, TypeAlias
+from typing import Any, Sequence, Tuple, Union, TypeAlias
 
 IndexType: TypeAlias = Union[slice, int]
 
@@ -291,6 +291,14 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
     def __repr__(self) -> str:
         return f"KeyPath('{self}')"
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, KeyPath):
+            return False
+        return tuple(self.components) == tuple(other.components)
+
+    def __hash__(self) -> int:
+        return hash(tuple(self.components))
 
 
 
