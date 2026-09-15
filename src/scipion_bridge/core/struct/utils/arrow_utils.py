@@ -9,8 +9,8 @@ from numpy.typing import NDArray
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from ..schema import Schema, ArrayEntryBase, KeyPath, RaggedArraySetEntry
-from ..offset import Offset, IndexType
+from ..schema import Schema, ArrayEntryBase, RaggedArraySetEntry
+from ..key_path import IndexType, KeyPath
 from ..exceptions import UninitializedFieldError
 
 
@@ -248,7 +248,7 @@ def is_regular_awkward(arr: ak.Array) -> bool:
     return True
 
 
-def read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Offset) -> Any:
+def read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Any) -> Any:
     """Resolve a read on a RaggedArraySetEntry from an Awkward array slice."""
     if offset.is_element_index:
         if isinstance(sliced, ak.Array) and is_regular_awkward(sliced):
@@ -352,7 +352,7 @@ def rewrap_extension_after_compute(
 
 
 def slice_arrow_array(
-    arr: pa.Array, offset: Union[Offset, Sequence[IndexType]]
+    arr: pa.Array, offset: Any
 ) -> pa.Array:
     """Apply multi-dimensional offset tuple using PyArrow slicing and pc.list_slice."""
     offset_val = Offset(offset)

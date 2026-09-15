@@ -467,7 +467,7 @@ def test_read_ragged_predicate_control_flow():
     """Verify _read_ragged uses deterministic predicate checks without exception-based control flow."""
     import awkward as ak
     from scipion_bridge.core.struct.storage import _read_ragged
-    from scipion_bridge.core.struct.offset import Offset
+    from scipion_bridge.core.struct.key_path import Offset
 
     float_entry = RaggedArraySetEntry(dtype=np.dtype(np.float32), shape=(None,), capacity=10)
     complex_entry = RaggedArraySetEntry(dtype=np.dtype(np.complex128), shape=(None,), capacity=10)

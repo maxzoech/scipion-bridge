@@ -3,7 +3,6 @@
 from .schema import (
     Entry,
     Schema,
-    KeyPath,
     ArrayEntryBase,
     ArrayEntry,
     ArraySetEntry,
@@ -13,10 +12,11 @@ from .schema import (
 )
 from .struct import Struct, Array, Arg, Dim
 from .set import Set
-from .offset import Offset
+from .key_path import KeyPath, IndexType
 from .storage import (
-    ArrayStorage,
-    ArrayStorageView,
+    _BaseStorage,
+    _StorageEngine,
+    StorageView,
 )
 from .utils.arrow_utils import RaggedArrayView
 from .exceptions import UninitializedFieldError
@@ -30,16 +30,17 @@ __all__ = [
     "Dim",
     "Entry",
     "KeyPath",
+    "IndexType",
     "Schema",
-    "Offset",
+    "_BaseStorage",
+    "_StorageEngine",
+    "StorageView",
     "ArrayEntryBase",
     "ArrayEntry",
     "ArraySetEntry",
     "RaggedArraySetEntry",
     "SchemaEntry",
     "SchemaSetEntry",
-    "ArrayStorage",
-    "ArrayStorageView",
     "RaggedArrayView",
     "UninitializedFieldError",
 ]

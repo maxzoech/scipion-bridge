@@ -16,6 +16,9 @@ from typing import (
 from typing_extensions import Self, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
+from functools import cache
+
+from ..struct.key_path import KeyPath
 
 from .schema import (
     ArrayEntryBase,
@@ -24,9 +27,10 @@ from .schema import (
     Entry,
     Schema,
     SchemaEntry,
+    SchemaSetEntry,
 )
 from ..utils.marker import Marker
-from .storage import _BaseStorage, ArrayStorage, ArrayStorageView
+from .storage import _BaseStorage, StagingEngine
 
 
 def _is_supported_scalar_value(cls: Type) -> bool:
@@ -43,7 +47,6 @@ def _init_default_trait_field(owner_cls: Type["Trait"], dtype: Type) -> Any:
         return Array(
             dtype=np.dtype(dtype),
             shape=(Dim(1),),
-            owner_cls=owner_cls,
             is_scalar=True,
         )
     elif isinstance(dtype, type) and issubclass(dtype, SchemaConvertible):
@@ -176,8 +179,6 @@ class Array(Marker[T], SchemaConvertible):
         dtype: Optional[Union[np.dtype, type, str]] = None,
         *,
         shape: Optional[Union[Tuple[Union[Dim, int, None], ...], list]] = None,
-        owner_cls: Optional[Type["Trait"]] = None,
-        name: Optional[str] = None,
         is_scalar: bool = False,
     ) -> None:
         super().__init__(dtype)
@@ -197,38 +198,14 @@ class Array(Marker[T], SchemaConvertible):
         for v in shape:
             if isinstance(v, int) and not isinstance(v, bool) and v < 0:
                 raise ValueError(f"Array dimension cannot be negative, got: {v}")
+            
             shape_items.append(Dim.new(v))
 
         self.shape_spec: Tuple[Dim, ...] = tuple(shape_items)
-        self._owner_cls: Optional[Type["Trait"]] = owner_cls
-        self.is_scalar: bool = is_scalar
-        if name is not None:
-            self.name = name
 
     @property
     def dtype(self) -> Optional[np.dtype]:
-        if self._dtype is None:
-            return None
-        if isinstance(self._dtype, np.dtype):
-            return self._dtype
-        try:
-            return np.dtype(self._dtype)
-        except (TypeError, ValueError):
-            return self._dtype  # type: ignore
-
-    @property
-    def shape(self) -> Tuple[Optional[int], ...]:
-        def _resolve(dim: Union[Dim, int, None]) -> Optional[int]:
-            if isinstance(dim, Arg):
-                if not dim.name:
-                    return dim.value
-                if self._owner_cls is not None:
-                    target = getattr(self._owner_cls, dim.name, dim)
-                    return target.value if isinstance(target, Arg) else target
-                return dim.value
-            return dim
-
-        return tuple(_resolve(d) for d in self.shape_spec)
+        return np.dtype(self._dtype) if self._dtype is not None else None
 
     @classmethod
     def default(cls) -> SchemaConvertible:
@@ -239,30 +216,30 @@ class Array(Marker[T], SchemaConvertible):
 
     @classmethod
     def schema(cls) -> Schema:
-        raise NotImplementedError("Cannot get schema directly from an uninstantiated Array class.")
+        raise NotImplementedError(
+            "Cannot get schema directly from an uninstantiated Array class."
+        )
 
     def convert_to_entry(self) -> Entry:
         if self.dtype is None:
-            owner_name = f" on '{self._owner_cls.__name__}'" if self._owner_cls is not None else ""
-            raise TypeError(
-                f"Array field '{self.name}'{owner_name} is missing a dtype specification."
+            owner_name = (
+                f" on '{self._owner_cls.__name__}'"
+                if self._owner_cls is not None
+                else ""
             )
+            raise TypeError(
+                f"Array field '{self.name}' on {owner_name} is missing a dtype specification."
+            )
+        
         if self._owner_cls is not None and not (
             isinstance(self._owner_cls, type) and issubclass(self._owner_cls, Trait)
         ):
             raise TypeError(
                 f"Owner class '{self._owner_cls}' must be a subclass of Trait."
             )
-        return ArrayEntry(np.dtype(self.dtype), shape=self.shape)
 
-    def _bind(self, owner: Type["Trait"]) -> "Array[T]":
-        return type(self)(
-            dtype=self._dtype,
-            shape=self.shape_spec,
-            owner_cls=owner,
-            name=self.name,
-            is_scalar=self.is_scalar,
-        )
+        shape = tuple([d.value for d in self.shape_spec])
+        return ArrayEntry(np.dtype(self.dtype), shape=shape)
 
     def __set_name__(self, owner: type, name: str) -> None:
         super().__set_name__(owner, name)
@@ -272,66 +249,52 @@ class Array(Marker[T], SchemaConvertible):
     def __get__(self, instance: None, owner: Any) -> "Array[T]": ...
 
     @overload
-    def __get__(self, instance: "Struct", owner: Optional[Any] = None) -> Union[NDArray, Any]: ...
+    def __get__(
+        self, instance: "Struct", owner: Optional[Any] = None
+    ) -> Union[NDArray, Any]: ...
 
-    def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
+    def __get__(self, instance: Optional[Struct], owner: Optional[type] = None) -> Any:
         if instance is None:
-            if owner is None:
-                return self
-            if self.dtype is None:
-                raise TypeError(
-                    f"Array field '{self.name}' on '{owner.__name__}' is missing a dtype specification. "
-                    f"Specify a dtype using Array[dtype](...) or Array(dtype=...)."
-                )
-            if self._owner_cls is None or self._owner_cls != owner:
-                return self._bind(owner)
             return self
 
         if not isinstance(instance, Struct):
             raise TypeError(
-                f"Cannot access Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
+                f"Cannot read Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
             )
+
         if self.name is None:
             raise AttributeError("Array descriptor name is not set.")
 
-        entry = instance.schema().fields.get(self.name)
-        if entry is None or not isinstance(entry, ArrayEntryBase):
-            raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
+        path = instance.storage.root.append(self.name)
+        return instance.storage.read(
+            path,
+            self.entry,
+        )
 
-        arr = instance.storage.read((self.name,), entry=entry)
-        if not isinstance(arr, np.ndarray):
-            raise TypeError(f"Expected numpy.ndarray for field '{self.name}', got {type(arr).__name__}.")
 
-        if self.is_scalar:
-            return arr.item()
-        return arr
-
-    def __set__(self, instance: Any, value: Any) -> None:
+    def __set__(self, instance: Struct, value: Any) -> None:
         if not isinstance(instance, Struct):
             raise TypeError(
                 f"Cannot assign Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
             )
+
         if self.name is None:
             raise AttributeError("Array descriptor name is not set.")
 
-        schema = instance.schema()
-        entry = schema.fields.get(self.name)
-        if entry is None or not isinstance(entry, ArrayEntryBase):
-            raise AttributeError(f"Field '{self.name}' not found in Struct schema.")
+        # TODO: Validate the shape against the array spec
 
-        if np.ndim(value) == 0 and self.is_scalar:
-            value = np.asarray(value).reshape([1])
-
+        path = instance.storage.root.append(self.name)
         instance.storage.write(
-            (self.name,),
-            entry=entry,
-            data=value,
+            path,
+            self.entry,
+            value,
         )
+
 
     def __repr__(self) -> str:
         dtype_str = getattr(self.dtype, "name", getattr(self.dtype, "__name__", str(self.dtype))) if self.dtype is not None else "?"
         owner_str = f", owner={self._owner_cls.__name__}" if self._owner_cls is not None else ""
-        return f"Array[{dtype_str}](shape={self.shape}{owner_str})"
+        return f"Array[{dtype_str}](shape={self.shape_spec}{owner_str})"
 
 
 class Trait:
@@ -430,29 +393,13 @@ class Struct(Trait, SchemaConvertible):
         return cls._bridge_schema
 
     @property
-    def storage(self) -> _BaseStorage:
+    def storage(self):
         return self._storage
 
-    def __init_subclass__(
-        cls, specializations: Dict[str, int] = {}, **kwargs: Any
-    ) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        for k, v in specializations.items():
-            if k not in cls._arg_specs:
-                raise TypeError(
-                    f"Unknown schema overwrite argument '{k}' for '{cls.__name__}'. "
-                    f"Available dimensions: {list(cls._arg_specs.keys())}"
-                )
-
-            new_arg = Arg.new(v, name=k)
-            cls._arg_specs[k].validate(new_arg)
-
-            cls._arg_specs[k] = new_arg
-            cls._cls_fields[k] = new_arg
-            setattr(cls, k, new_arg)
-
-        # Use getattr to trigger descriptors (Array -> bound Array, Set -> BoundSetView)
+        # Use getattr to trigger descriptors
         schema_specs: Dict[str, SchemaConvertible] = {}
         for k, v in cls._cls_fields.items():
             resolved = getattr(cls, k, v)
@@ -464,82 +411,74 @@ class Struct(Trait, SchemaConvertible):
             fields={k: v.convert_to_entry() for k, v in schema_specs.items()},
         )
 
-    def __init__(self, **kwargs: Any) -> None:
-        storage = kwargs.pop("_storage_view", None)
-        if storage is None:
-            root_entry = SchemaEntry(schema=self._bridge_schema)
-            storage = ArrayStorage(
-                schema=self._bridge_schema,
-                path=("root",),
-                offset=(),
-                root_entry=root_entry,
-            )
+    def __init__(
+        self,
+        storage:_BaseStorage = StagingEngine(),
+        **kwargs: Any,
+    ) -> None:
 
-        if not isinstance(storage, _BaseStorage):
-            raise TypeError(f"Expected _BaseStorage instance, got {type(storage).__name__}")
+        if storage is not None and not isinstance(storage, _BaseStorage):
+            raise TypeError(
+                f"Expected _BaseStorage instance, got {type(storage).__name__}"
+            )
 
         self._storage = storage
 
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
     def __get__(
         self,
         instance: Optional["Struct"],
         owner: Optional[Type["Struct"]] = None,
-    ) -> Any:
-        if isinstance(instance, Struct):
-            if self._name is None:
-                raise AttributeError("Struct descriptor name is not set.")
-            new_path = (*instance._storage.path, self._name)
+    ):
 
-            subview = ArrayStorageView(
-                self.schema(),
-                parent=instance._storage.root_storage,
-                path=new_path,
-                offset=instance._storage.offset,
+        if instance is None:
+            return self 
+
+        assert self.name is not None, "Struct descriptor name is not set."
+
+        if not isinstance(instance, Struct):
+            raise TypeError(
+                f"Cannot read Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
             )
 
-            return type(self)(_storage_view=subview)
-
-        return self
-
-    def __set__(self, instance: Any, value: Any) -> None:
-        if not isinstance(instance, Struct):
-            raise TypeError(f"Expected Struct instance, got '{type(instance).__name__}'.")
-        if not isinstance(value, Struct):
-            raise TypeError(f"Expected Struct value, got '{type(value).__name__}'.")
-        if self._name is None:
-            raise AttributeError("Struct descriptor name is not set.")
-
-        for key, entry in value.schema().tree_iter():
-            data = value._storage.read(key, entry)
-            instance._storage.write((self._name, *key), entry=entry, data=data)
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        self._name = name
-
-    @classmethod
-    def static(cls: Type[Self], **kwargs: Union[int, Arg]) -> Type[Self]:
-        """Create a new specialized subclass of this Struct with concrete dimension values."""
-        for k in kwargs:
-            if k not in cls._arg_specs:
-                raise TypeError(
-                    f"'{cls.__name__}.static()' got unexpected dimension argument: {k!r}. "
-                    f"Available dimensions: {list(cls._arg_specs.keys())}"
-                )
-
-        args_suffix = "__".join(f"{k}{v}" for k, v in sorted(kwargs.items()))
-        subclass_name = f"{cls.__name__}_{args_suffix}" if args_suffix else f"{cls.__name__}_Static"
-
-        subtype = type(
-            subclass_name,
-            (cls,),
-            {},
-            specializations=kwargs,
+        return type(self)(
+            storage=instance.storage.append(self.name)
         )
 
-        return cast(Type[Self], subtype)
+    def __set__(self, instance: Optional["Struct"], value: Any) -> None:
+        if not isinstance(instance, Struct):
+            raise TypeError(
+                f"Expected Struct instance, got '{type(instance).__name__}'."
+            )
+
+        if not isinstance(value, Struct):
+            raise TypeError(f"Expected Struct value, got '{type(value).__name__}'.")
+
+        if self.name is None:
+            raise AttributeError("Struct descriptor name is not set.")
+
+        field_entry = instance.schema().fields[self.name]
+        if not isinstance(field_entry, (SchemaEntry, SchemaSetEntry)):
+            raise AttributeError
+
+        dtype = field_entry.schema.dtype
+        assert dtype is not None
+
+        if not isinstance(value, dtype):
+            raise ValueError
+
+        for path, entry in field_entry.schema.tree_iter():
+            source_path = value.storage.root.extend(path)
+            data = value.storage.read(source_path, entry)
+
+            target_path = instance.storage.root.append(self.name).extend(path)
+            instance.storage.write(target_path, entry, data)
+            
 
     def convert_to_entry(self) -> Entry:
         return SchemaEntry(schema=self.schema())

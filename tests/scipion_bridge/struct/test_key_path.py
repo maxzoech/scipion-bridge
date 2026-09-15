@@ -119,5 +119,15 @@ def test_narrow_by_slice_invalid_anchors():
         key.narrow_slice(slice(0, 10, 2))
 
 
+def test_str_and_repr():
+    key = KeyPath().append("foo").append("bar")
+    assert str(key) == "root[:].foo[:].bar[:]"
+    assert repr(key) == "KeyPath('root[:].foo[:].bar[:]')"
+
+    narrowed = key.narrow_slice(slice(3, 10)).narrow_index(2)
+    assert str(narrowed) == "root[:].foo[:].bar[5]"
+    assert repr(narrowed) == "KeyPath('root[:].foo[:].bar[5]')"
+
+
 if __name__ == "__main__":
     test_narrow_by_slice_invalid_anchors()

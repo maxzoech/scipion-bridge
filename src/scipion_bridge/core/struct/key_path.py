@@ -1,22 +1,7 @@
-"""Offset value class for multi-dimensional storage indexing and slicing."""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any, Iterator, Optional, Sequence, Tuple, Union, TypeAlias
-
-from functools import cache
+from typing import Sequence, Tuple, Union, TypeAlias
 
 IndexType: TypeAlias = Union[slice, int]
 
-def _add_bound(base: int | None, delta: int | None) -> int | None:
-    if delta is None:
-        return base
-    if base is None:
-        return delta
-    if (base >= 0) != (delta >= 0):
-        raise ValueError(f"Cannot compose mixed-sign bounds ({base}, {delta}) without sequence length.")
-    return base + delta
 
 class KeyPath(Sequence[Tuple[str, IndexType]]):
     """Represents an immutable navigation path to nested data structures or array-backed storage.
@@ -67,7 +52,6 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
         self.components = root
 
-
     @property
     def path(self) -> Tuple[str, ...]:
         return tuple([n for (n, _) in self.components])
@@ -77,7 +61,11 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         return tuple([i for (_, i) in self.components])
 
 
-    def append(self, name: str) -> KeyPath:
+    def extend(self, path: "KeyPath") -> "KeyPath":
+        return KeyPath([*self.components, *path.components])
+
+
+    def append(self, name: str) -> "KeyPath":
         """Appends an attribute or field name to the key path.
 
         Extends the path to target a child attribute on an object, a struct field,
@@ -104,7 +92,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         return KeyPath([*self.components, (name, slice(None))])
 
 
-    def narrow_index(self, index: int) -> KeyPath:
+    def narrow_index(self, index: int) -> "KeyPath":
         """Narrows the terminal component's slice down to a concrete integer index.
 
         Composes a relative scalar index with the slice currently held at the tail
@@ -173,10 +161,10 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 p_stop = parent_index.stop
 
                 # If the span is known, we can compute the offset directly for
-                # positive and negative indices
+                # positive and negative indices.
                 if p_start >= 0 and p_stop is not None and p_stop >= 0:
                     span = max(0, p_stop - p_start)
-                    offset = span - index if index < 0 else index
+                    offset = span + index if index < 0 else index
                     
                     if not (0 <= offset < span):
                         raise IndexError(f"Index {index} out of bounds for span {span}.")
@@ -200,7 +188,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 raise ValueError
 
 
-    def narrow_slice(self, index: slice) -> KeyPath:
+    def narrow_slice(self, index: slice) -> "KeyPath":
         """Narrows the terminal component's slice by composing it with a subslice.
 
         Projects a relative `slice` into the coordinate frame of the parent slice 
@@ -293,7 +281,35 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
     
 
     def __getitem__(self, index):
-        return self.components[index]
+        return tuple(self.components[index])
 
     def __len__(self) -> int:
         return len(self.components)
+
+    def __str__(self) -> str:
+        return ".".join(f"{name}{_format_index(idx)}" for name, idx in self.components)
+
+    def __repr__(self) -> str:
+        return f"KeyPath('{self}')"
+
+
+
+def _add_bound(base: int | None, delta: int | None) -> int | None:
+    if delta is None:
+        return base
+    
+    if base is None:
+        return delta
+    
+    if (base >= 0) != (delta >= 0):
+        raise ValueError(f"Cannot compose mixed-sign bounds ({base}, {delta}) without sequence length.")
+    
+    return base + delta
+
+def _format_index(index: IndexType) -> str:
+    if isinstance(index, slice):
+        start = "" if index.start is None else str(index.start)
+        stop = "" if index.stop is None else str(index.stop)
+        step = f":{index.step}" if index.step not in (None, 1) else ""
+        return f"[{start}:{stop}{step}]"
+    return f"[{index}]"

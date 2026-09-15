@@ -1,8 +1,11 @@
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 import numpy as np
 import pytest
 import scipion_bridge as B
+from scipion_bridge.core.struct.key_path import KeyPath
 from scipion_bridge.core.struct.schema import Entry, Schema, ArrayEntryBase
+
+from scipion_bridge.core.struct.storage import _BaseStorage
 
 def assert_array_entry(
     entry: Entry,
@@ -752,10 +755,47 @@ def test_array_descriptor_error_handling():
         non_struct_inst.pixels = np.ones(10)
 
 
+class MockStorage(_BaseStorage):
+
+    def read(self, key: KeyPath, entry: Entry) -> Any:
+        print(f"Read entry {entry} at {key}")
+
+    def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
+        print(f"Write for entry {entry} at {key}")
+
+
+def test_basic_struct_storage_inference():
+
+    class Bar(B.Struct):
+
+        data_1: int
+        data_2: int
+
+    class Foo(B.Struct):
+
+        pixels = B.Array[np.float32](shape=(128, 128))
+        bar: Bar
+
+    foo = Foo(storage=MockStorage())
+    foo.print_schema()
+
+    foo.pixels = np.random.uniform(size=[28, 28])
+    _ = foo.pixels # Trigger read
+
+    # Reading substruct
+    bar = foo.bar
+    print(bar.storage.root)
+    _ = bar.data_1
+
+    # Writing substruct
+    foo.bar = Bar(storage=MockStorage())
+    
+
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
         
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
 
-    test_basic_dynamic_struct()
+    test_basic_struct_storage_inference()

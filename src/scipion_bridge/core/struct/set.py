@@ -27,7 +27,6 @@ import pyarrow.compute as pc
 from .struct import Struct, Arg, Trait
 from .schema import (
     Entry,
-    KeyPath,
     SchemaConvertible,
     Schema,
     ArrayEntryBase,
@@ -36,8 +35,8 @@ from .schema import (
     ArraySetEntry,
     RaggedArraySetEntry,
 )
-from .offset import Offset
-from .storage import _BaseStorage, ArrayStorage, ArrayStorageView
+from .key_path import KeyPath
+from .storage import _BaseStorage, StorageView
 from .utils.arrow_utils import RaggedArrayView
 from ..utils.marker import Marker
 
@@ -142,17 +141,8 @@ class Set(Marker[T], SchemaConvertible):
             cap_val = self._capacity.value
 
         root_entry = SchemaSetEntry(schema=self.schema(), capacity=cap_val)
-        storage = kwargs.get(
-            "_storage_view",
-            ArrayStorage(
-                schema=self.schema(),
-                capacity=cap_val,
-                path=("root",),
-                offset=Offset.from_slice(None, None),
-                root_entry=root_entry,
-            ),
-        )
-        if not isinstance(storage, _BaseStorage):
+        storage = kwargs.get("_storage_view", None)
+        if storage is not None and not isinstance(storage, _BaseStorage):
             raise TypeError(f"Expected _BaseStorage instance, got {type(storage).__name__}")
         self._storage = storage
 

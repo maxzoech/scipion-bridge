@@ -12,7 +12,7 @@ from scipion_bridge.core.struct.schema import (
     SchemaEntry,
     ArrayEntryBase,
 )
-from scipion_bridge.core.struct.offset import Offset
+from scipion_bridge.core.struct.key_path import Offset
 
 
 class Data(B.Struct):

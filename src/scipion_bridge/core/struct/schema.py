@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Optional, Tuple, Type, Union, TypeAlias
+from functools import cache
+from typing import Any, Dict, Iterator, Optional, Sequence, Tuple, Type, Union, TypeAlias
 
 import numpy as np
 
-KeyPath: TypeAlias = Tuple[str, ...]
-
+from .key_path import KeyPath
 
 class SchemaConvertible(metaclass=abc.ABCMeta):
     """Abstract base for classes or objects convertible to a schema representation."""
@@ -24,6 +24,11 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
     def default(cls) -> "SchemaConvertible":
         """Create a default, unspecialized instance from the type."""
         ...
+
+    @property
+    @cache
+    def entry(self) -> Entry:
+        return self.convert_to_entry()
 
     @abc.abstractmethod
     def convert_to_entry(self) -> "Entry":
@@ -225,29 +230,15 @@ class Schema:
         """True when every field in the schema has a fixed shape."""
         return all(entry.is_static for entry in self.fields.values())
 
-    def tree_iter(self, root: KeyPath = ()) -> Iterator[Tuple[KeyPath, ArrayEntryBase]]:
+    def tree_iter(self, root: KeyPath = KeyPath(root=())) -> Iterator[Tuple[KeyPath, ArrayEntryBase]]:
         """Yield (path_tuple, entry) for all leaf array entries in the schema."""
         for field_name, entry in self.fields.items():
-            path = (*root, field_name)
+            path = root.append(field_name)
             if entry.children is not None:
                 yield from entry.children.tree_iter(root=path)
             elif isinstance(entry, ArrayEntryBase):
                 yield path, entry
 
-    def lookup(self, path: KeyPath) -> Optional[Entry]:
-        """Look up an Entry in the schema hierarchy by KeyPath tuple."""
-        match path:
-            case ("root", *tail):
-                return self.lookup(tuple(tail))
-            case (head,):
-                return self.fields.get(head)
-            case (head, *tail):
-                entry = self.fields.get(head)
-                if entry is not None and entry.children is not None:
-                    return entry.children.lookup(tuple(tail))
-                return None
-            case _:
-                return None
 
     def lookup_array(self, path: KeyPath) -> Optional[ArrayEntryBase]:
         """Look up a leaf ArrayEntryBase in the schema hierarchy by KeyPath tuple."""
