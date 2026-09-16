@@ -94,7 +94,7 @@ class _BaseStorage(abc.ABC):
         self.root: KeyPath = root
 
     def view(self, path: KeyPath) -> StorageView:
-        assert path[:len(self.root)] == self.root[:]
+        assert path.path[:len(self.root)] == self.root.path
 
         return StorageView(
             path,
@@ -185,12 +185,11 @@ class StorageView(_BaseStorage):
     """
 
     def read(self, key: KeyPath, entry: Entry) -> Any:
-        path = KeyPath([*self.root, *key])
         return self.root_storage.read(key, entry)
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
-        path = KeyPath([*self.root, *key])
         return self.root_storage.write(key, entry, data)
+
 
 
 class StagingEngine(_BaseStorage):

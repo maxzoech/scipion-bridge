@@ -18,10 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 from functools import cache
 
-from ..struct.key_path import KeyPath
-
 from .schema import (
-    ArrayEntryBase,
     ArrayEntry,
     SchemaConvertible,
     Entry,
@@ -198,11 +195,13 @@ class Array(Marker[T], SchemaConvertible):
         for v in shape:
             if isinstance(v, int) and not isinstance(v, bool) and v < 0:
                 raise ValueError(f"Array dimension cannot be negative, got: {v}")
-            
+
             shape_items.append(Dim.new(v))
 
-        self._owner_cls: Optional[type] = None
+        self.is_scalar = is_scalar
         self.shape_spec: Tuple[Dim, ...] = tuple(shape_items)
+
+        self._owner_cls: Optional[type] = None
 
     @property
     def shape(self) -> Tuple[Optional[int], ...]:
@@ -235,7 +234,7 @@ class Array(Marker[T], SchemaConvertible):
             raise TypeError(
                 f"Array field '{self.name}' on {owner_name} is missing a dtype specification."
             )
-        
+
         if self._owner_cls is not None and not (
             isinstance(self._owner_cls, type) and issubclass(self._owner_cls, Trait)
         ):
@@ -276,7 +275,6 @@ class Array(Marker[T], SchemaConvertible):
             self.entry,
         )
 
-
     def __set__(self, instance: Struct, value: Any) -> None:
         if not isinstance(instance, Struct):
             raise TypeError(
@@ -295,10 +293,17 @@ class Array(Marker[T], SchemaConvertible):
             value,
         )
 
-
     def __repr__(self) -> str:
-        dtype_str = getattr(self.dtype, "name", getattr(self.dtype, "__name__", str(self.dtype))) if self.dtype is not None else "?"
-        owner_str = f", owner={self._owner_cls.__name__}" if self._owner_cls is not None else ""
+        dtype_str = (
+            getattr(
+                self.dtype, "name", getattr(self.dtype, "__name__", str(self.dtype))
+            )
+            if self.dtype is not None
+            else "?"
+        )
+        owner_str = (
+            f", owner={self._owner_cls.__name__}" if self._owner_cls is not None else ""
+        )
         return f"Array[{dtype_str}](shape={self.shape}{owner_str})"
 
 
@@ -418,7 +423,7 @@ class Struct(Trait, SchemaConvertible):
 
     def __init__(
         self,
-        storage:_BaseStorage = StagingEngine(),
+        storage: _BaseStorage = StagingEngine(),
         **kwargs: Any,
     ) -> None:
 
@@ -442,7 +447,7 @@ class Struct(Trait, SchemaConvertible):
     ):
 
         if instance is None:
-            return self 
+            return self
 
         assert self.name is not None, "Struct descriptor name is not set."
 
@@ -451,9 +456,7 @@ class Struct(Trait, SchemaConvertible):
                 f"Cannot read Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
             )
 
-        return type(self)(
-            storage=instance.storage.append(self.name)
-        )
+        return type(self)(storage=instance.storage.append(self.name))
 
     def __set__(self, instance: Optional["Struct"], value: Any) -> None:
         if not isinstance(instance, Struct):

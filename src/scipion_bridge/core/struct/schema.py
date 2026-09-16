@@ -5,7 +5,7 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass
 from functools import cache
-from typing import Any, Dict, Iterator, Optional, Sequence, Tuple, Type, Union, TypeAlias
+from typing import Any, Dict, Iterator, Optional, Sequence, Tuple, Type, Union, TypeAlias, overload
 
 import numpy as np
 
@@ -97,6 +97,11 @@ class ArrayEntryBase(Entry):
         return f"{name}: {self.entry_name}[{dtype_str}], shape: {list(self.shape)}"
 
 
+class SetEntryBase(Entry):
+
+    capacity: Optional[int] = None
+
+
 @dataclass
 class ArrayEntry(ArrayEntryBase):
     """An array field whose shape may or may not be fully static."""
@@ -115,7 +120,7 @@ class ArrayEntry(ArrayEntryBase):
 
 
 @dataclass
-class ArraySetEntry(ArrayEntryBase):
+class ArraySetEntry(ArrayEntryBase, SetEntryBase):
     """A fixed-shape array field inside a Set context."""
 
     capacity: Optional[int] = None
@@ -142,7 +147,7 @@ class ArraySetEntry(ArrayEntryBase):
 
 
 @dataclass
-class RaggedArraySetEntry(ArrayEntryBase):
+class RaggedArraySetEntry(ArrayEntryBase, SetEntryBase):
     """A variable-shape array field inside a Set."""
 
     capacity: Optional[int] = None
@@ -185,7 +190,7 @@ class SchemaEntry(Entry):
 
 
 @dataclass
-class SchemaSetEntry(SchemaEntry):
+class SchemaSetEntry(SchemaEntry, SetEntryBase):
     """Wraps a Set[Foo] container entry capable of instantiating Foo elements."""
 
     capacity: Optional[int] = None
@@ -230,20 +235,53 @@ class Schema:
         """True when every field in the schema has a fixed shape."""
         return all(entry.is_static for entry in self.fields.values())
 
-    def tree_iter(self, root: KeyPath = KeyPath(root=())) -> Iterator[Tuple[KeyPath, ArrayEntryBase]]:
-        """Yield (path_tuple, entry) for all leaf array entries in the schema."""
-        for field_name, entry in self.fields.items():
+    def tree_iter(
+        self,
+        *others: "Schema",
+        root: KeyPath = KeyPath(root=()),
+    ) -> Iterator[Tuple[Any, ...]]:
+        """Yield (path, *entries) for all leaf array entries across this and optional other schemas.
+
+        Strictly validates that all schemas have matching field keys and compatible hierarchy
+        at every level.
+
+        Args:
+            *others: Additional Schema instances to traverse in parallel.
+            root: Base KeyPath prefix for relative path accumulation.
+
+        Raises:
+            ValueError: If field names do not match across schemas at any level.
+            TypeError: If a field is a nested branch in one schema but a leaf in another,
+                       or if a leaf entry is not an ArrayEntryBase.
+        """
+        for field_name, entries in _common_entries(
+            self.fields, *(other.fields for other in others)
+        ):
             path = root.append(field_name)
-            if entry.children is not None:
-                yield from entry.children.tree_iter(root=path)
-            elif isinstance(entry, ArrayEntryBase):
-                yield path, entry
+            has_children = [e.children is not None for e in entries]
 
+            if any(has_children):
+                if not all(has_children):
+                    raise TypeError(
+                        f"Structural mismatch at field '{field_name}': "
+                        f"some schemas define a nested branch while others define a leaf."
+                    )
+                
+                child_schema, *other_children = (e.children for e in entries)
+                assert child_schema is not None
 
-    def lookup_array(self, path: KeyPath) -> Optional[ArrayEntryBase]:
-        """Look up a leaf ArrayEntryBase in the schema hierarchy by KeyPath tuple."""
-        entry = self.lookup(path)
-        return entry if isinstance(entry, ArrayEntryBase) else None
+                yield from child_schema.tree_iter(
+                    *other_children, root=path
+                )
+
+            elif all(isinstance(e, ArrayEntryBase) for e in entries):
+                yield (path, *entries)
+
+            else:
+                raise TypeError(
+                    f"Structural mismatch at field '{field_name}': "
+                    f"expected ArrayEntryBase leaf nodes, got {[type(e).__name__ for e in entries]}."
+                )
 
     def print_tree(self, typename: Optional[str] = None) -> None:  # pragma: no cover
         """Print the schema in a hierarchical tree format."""
@@ -266,3 +304,24 @@ class Schema:
                     _print_node(entry.children, prefix + extension)
 
         _print_node(self)
+
+
+def _common_entries(*dicts: Dict[str, Any]) -> Iterator[Tuple[str, Tuple[Any, ...]]]:
+    if not dicts:
+        return
+
+    primary_dict, *other_dicts = dicts
+    primary_keys = set(primary_dict.keys())
+
+    for other_dict in other_dicts:
+        keys = other_dict.keys()
+
+        if primary_keys !=keys:
+            missing = primary_keys - keys
+            extra = keys - primary_keys
+            raise ValueError(
+                f"Schema field mismatch: missing fields {missing}, extra fields {extra}"
+            )
+        
+    for k in primary_dict:
+        yield (k, tuple(d[k] for d in dicts))

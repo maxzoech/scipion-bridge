@@ -1,9 +1,12 @@
+from typing import Any
+
 import pytest
 import numpy as np
 import pyarrow as pa
 
 import scipion_bridge as B
 from scipion_bridge.core.struct.schema import (
+    Entry,
     Schema,
     ArrayEntry,
     ArraySetEntry,
@@ -12,8 +15,8 @@ from scipion_bridge.core.struct.schema import (
     SchemaEntry,
     ArrayEntryBase,
 )
-from scipion_bridge.core.struct.key_path import Offset
-
+from scipion_bridge.core.struct.key_path import KeyPath
+from scipion_bridge.core.struct.storage import _BaseStorage
 
 class Data(B.Struct):
     pixels = B.Array[float](shape=(128, 128))
@@ -1072,3 +1075,31 @@ def test_set_clustering_filtering_workflow(as_engine):
     for i, orig_idx in enumerate(cls0_indices):
         assert np.allclose(classes[0][i].pixels, pixels[orig_idx])
         assert np.allclose(classes[0][i].embeddings, embeddings[orig_idx])
+
+
+class MockEngine(_BaseStorage):
+
+    def read(self, key: KeyPath, entry: Entry) -> Any:
+        print(f"Read key {key} for entry {entry}")
+
+    def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
+        print(f"Write key {key} for entry {entry}")
+
+
+def test_basic_set_assign():
+
+    class Foo(B.Struct):
+
+        pixels = B.Array[np.float32](shape=(128, 128))
+
+
+    ds = B.Set[Foo](capacity=10, storage=MockEngine())
+
+    ds[0] = Foo(
+        storage=MockEngine(),
+        pixels=np.random.uniform(size=[128, 128]),
+    )
+
+
+if __name__ == "__main__":
+    test_basic_set_assign()
