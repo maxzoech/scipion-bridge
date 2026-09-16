@@ -1088,9 +1088,15 @@ class MockEngine(_BaseStorage):
 
 def test_basic_set_assign():
 
+    class NestedData(B.Struct):
+        f_1: int
+        f_2: int
+
     class Metadata(B.Struct):
         a: int
         b: int
+
+        nested: NestedData
 
     class Foo(B.Struct):
         pixels = B.Array[np.float32](shape=(128, 128))
@@ -1123,7 +1129,16 @@ def test_basic_set_assign():
 
     el_bar = subset_ds[3]
     _ = el_bar.a
-    print(el_bar)
+
+    # Assign pixel buffer
+    ds["pixels"] = np.random.uniform(size=[10, 128, 128])
+
+    # Assign buffer to buffer
+    ds_1 = B.Set[Foo](capacity=10, storage=MockEngine())
+    ds_1.print_schema()
+
+    ds_1["metadata"] = B.Set[Metadata](capacity=10, storage=MockEngine())
+
 
 if __name__ == "__main__":
     test_basic_set_assign()

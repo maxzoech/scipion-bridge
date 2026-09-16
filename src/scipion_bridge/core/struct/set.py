@@ -91,9 +91,7 @@ class Set(Marker[T], SchemaConvertible):
 
         self._capacity = capacity
         self._storage = storage
-
-    def __set_name__(self, owner: type, name: str):
-        super().__set_name__(owner, name)
+        
 
     # def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
     #     if instance is None and owner is not None:
@@ -232,13 +230,27 @@ class Set(Marker[T], SchemaConvertible):
 
             case str(field_name):
                 fields = self.schema().fields
-                assert field_name in fields
+                if field_name not in fields:
+                    raise AttributeError
                 
                 schema_entry = fields[field_name]
                 if isinstance(schema_entry, ArrayEntryBase):
-                    raise NotImplementedError(
-                        f"Writing to Set field '{field_name}' with schema entry type '{type(schema_entry).__name__}' is not supported yet."
-                    )
+
+                    path = self._storage.root.append(field_name)
+                    self._storage.write(path, schema_entry, value)
+
+                elif isinstance(schema_entry, SchemaEntry):
+                    if not isinstance(value, Set):
+                        raise ValueError
+
+                    assert isinstance(value, Set)
+
+                    for path, target_entry, source_entry in schema_entry.schema.tree_iter(value.schema()):
+                        source_path = value._storage.root.extend(path)
+                        data = value._storage.read(source_path, source_entry)
+    
+                        target_path = value._storage.root.extend(path)
+                        value._storage.write(target_path, target_entry, data)
                 
                 else:
                     raise NotImplementedError(
