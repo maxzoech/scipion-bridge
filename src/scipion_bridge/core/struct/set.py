@@ -248,11 +248,11 @@ class Set(Marker[T], SchemaConvertible):
             case _:
                 raise TypeError(f"Invalid Set key type '{type(key).__name__}'. Expected int or str.")
 
-    # @overload
-    # def __getitem__(self, key: int) -> T: ...
+    @overload
+    def __getitem__(self, key: int) -> T: ...
 
-    # @overload
-    # def __getitem__(self, key: slice) -> Self: ...
+    @overload
+    def __getitem__(self, key: slice) -> Self: ...
 
     # @overload
     # def __getitem__(
@@ -264,8 +264,8 @@ class Set(Marker[T], SchemaConvertible):
     #     self, key: Union[Sequence[int], NDArray[np.integer], pa.IntegerArray]
     # ) -> Self: ...
 
-    # @overload
-    # def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
+    @overload
+    def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
 
     def __getitem__(
         self,
@@ -273,11 +273,10 @@ class Set(Marker[T], SchemaConvertible):
             int,
             slice,
             str,
-            Sequence[bool],
-            Sequence[int],
-            NDArray[np.bool_],
-            NDArray[np.integer],
-            pa.Array,
+            # Sequence[bool],
+            # Sequence[int],
+            # NDArray[np.bool_],
+            # NDArray[np.integer],
         ],
     ) -> Union[T, Self, NDArray, RaggedArrayView, "Set[Any]"]:
         match key:
@@ -298,57 +297,41 @@ class Set(Marker[T], SchemaConvertible):
 
                 raise NotImplementedError("Indexing with arrays is not supported yet")
 
-            case int(idx):
-                assert (isinstance(self.dtype, type) and issubclass(self.dtype, Struct))
+            case int(index):
+                _dt = self.dtype
+                assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
-                assert False
+                view = self._storage.narrow_index(index)
+                return cast(T, _dt(view))
 
-            case slice() as sl:
-                assert self.dtype is not None
+            case slice() as index:
+                _dt = self.dtype
+                assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
-                assert False
-
+                view = self._storage.narrow_slice(index)
+                # TODO: assign capacity correctly here
+                return Set[_dt](capacity=None, storage=view)
+                
             case str(field_name):
                 fields = self.schema().fields
                 if field_name not in fields:
                     raise ValueError(f"Field '{field_name}' not found in Set schema.")
 
                 entry = fields[field_name]
+
                 if isinstance(entry, ArrayEntryBase):
-                    raise NotImplementedError("Reading an entry is not supported yet")
-                    
-                elif isinstance(entry, SchemaSetEntry):
-                    assert entry.schema.dtype is not None
-                    
-                    new_path = (*self._storage.path, field_name)
-                    new_offset = self._storage.offset.descend()
-                    sliced_view = ArrayStorageView(
-                        entry.schema,
-                        parent=self._storage.root_storage,
-                        path=new_path,
-                        offset=new_offset,
-                    )
-                    sub_cls: Any = entry.schema.dtype
-                    return Set[sub_cls](
-                        capacity=entry.capacity,
-                        _storage_view=sliced_view,
-                    )
+                    path = self._storage.root.append(field_name)
+                    return self._storage.read(path, entry)
                 
                 elif isinstance(entry, SchemaEntry):
-                    assert entry.schema.dtype is not None
-                    
-                    new_path = (*self._storage.path, field_name)
-                    sliced_view = ArrayStorageView(
-                        entry.schema,
-                        parent=self._storage.root_storage,
-                        path=new_path,
-                        offset=self._storage.offset,
-                    )
-                    sub_cls = entry.schema.dtype
-                    return Set[sub_cls](
+                    _dt = entry.schema.dtype
+                    assert (isinstance(_dt, type) and issubclass(_dt, Struct))
+
+                    return Set[_dt](
                         capacity=self.capacity,
-                        _storage_view=sliced_view,
+                        storage=self._storage.append(field_name),
                     )
+
                 else:
                     raise NotImplementedError(
                         f"Reading Set field '{field_name}' with schema entry type '{type(entry).__name__}' is not supported yet."

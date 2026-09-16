@@ -1088,10 +1088,17 @@ class MockEngine(_BaseStorage):
 
 def test_basic_set_assign():
 
+    class Metadata(B.Struct):
+        a: int
+        b: int
+
     class Foo(B.Struct):
-
         pixels = B.Array[np.float32](shape=(128, 128))
+        metadata: Metadata
 
+    class Bar(B.Struct):
+        seed: int
+        foo: B.Set[Metadata]
 
     ds = B.Set[Foo](capacity=10, storage=MockEngine())
 
@@ -1100,6 +1107,23 @@ def test_basic_set_assign():
         pixels=np.random.uniform(size=[128, 128]),
     )
 
+    el = ds[0]
+    _ = el.pixels
+
+    subset = ds[5:10]
+    subset[2].pixels = np.random.uniform(size=[128, 128])
+
+    _ = ds["pixels"]
+    metadata: B.Set[Metadata] = ds["metadata"]
+
+    metadata[0].b = 42
+
+    ds_bar = B.Set[Bar](capacity=15, storage=MockEngine())
+    subset_ds = ds_bar["foo"][5:10]
+
+    el_bar = subset_ds[3]
+    _ = el_bar.a
+    print(el_bar)
 
 if __name__ == "__main__":
     test_basic_set_assign()
