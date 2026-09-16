@@ -91,79 +91,51 @@ class Set(Marker[T], SchemaConvertible):
 
         self._capacity = capacity
         self._storage = storage
+
+
+    def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
+        if instance is None:
+            return self
         
+        if isinstance(instance, Struct):
+            if self.name is None:
+                raise AttributeError("Descriptor name is not set.")
 
-    # def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
-    #     if instance is None and owner is not None:
-    #         if self.dtype is None:
-    #             raise TypeError("Cannot create BoundSetView without a defined dtype.")
-    #         return BoundSetView(
-    #             element_cls=self.dtype,
-    #             capacity_spec=self._capacity,
-    #             owner_cls=owner,
-    #         )
-    #     if isinstance(instance, Struct):
-    #         if self.name is None:
-    #             raise AttributeError("Descriptor name is not set.")
+            _schema = self.schema()
+            assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
 
-    #         _schema = self.schema()
-    #         assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
+            subview = self._storage.append(self.name)
+            return type(self)(storage=subview, capacity=self.capacity)
 
-    #         new_path = (*instance._storage.path, self.name)
-    #         new_offset = instance._storage.offset.descend()
-    #         subview = ArrayStorageView(
-    #             self.schema(),
-    #             parent=instance._storage.parent or instance._storage,
-    #             path=new_path,
-    #             offset=new_offset,
-    #         )
+        raise NotImplementedError
 
-    #         elem_cls: Any = _schema.dtype
-    #         assigned_cap = instance._storage._field_capacities.get(
-    #             self.name, self.capacity
-    #         )
-    #         return cast(Any, Set)[elem_cls](capacity=assigned_cap, _storage_view=subview)
-    #     return self
+    def __set__(self, instance: Any, value: Any) -> None:
+        if not isinstance(instance, Struct):
+            raise TypeError(f"Expected Struct instance, got '{type(instance).__name__}'.")
 
-    # def __set__(self, instance: Any, value: Any) -> None:
-    #     if not isinstance(instance, Struct):
-    #         raise TypeError(f"Expected Struct instance, got '{type(instance).__name__}'.")
-    #     if self.name is None:
-    #         raise AttributeError("Set descriptor name is not set.")
+        if not isinstance(value, Set):
+            raise TypeError(f"Expected Struct instance, got '{type(instance).__name__}'.")
+        
+        if self.name is None:
+            raise AttributeError("Set descriptor name is not set.")
 
-    #     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Set)):
-    #         elem_cls = self.dtype
-    #         if elem_cls is None:
-    #             raise TypeError(
-    #                 f"Cannot initialize Set field '{self.name}' with a sequence without a defined element type."
-    #             )
-    #         value = cast(Any, Set)[elem_cls](value)
+        if self.name not in instance.schema().fields:
+            raise AttributeError
 
-    #     if not isinstance(value, Set):
-    #         raise TypeError(
-    #             f"Expected Set or Sequence of Structs for field '{self.name}', got '{type(value).__name__}'."
-    #         )
+        field_entry = instance.schema().fields[self.name]
+        if not isinstance(field_entry, (SchemaEntry, SchemaSetEntry)):
+            raise AttributeError
 
-    #     if self.dtype is not None and value.dtype is not None:
-    #         if not (isinstance(value.dtype, type) and issubclass(value.dtype, self.dtype)):
-    #             raise TypeError(
-    #                 f"Cannot assign Set of '{value.dtype.__name__}' to field '{self.name}' "
-    #                 f"expecting elements of type '{self.dtype.__name__}'."
-    #             )
+        for path, target_entry, source_entry in field_entry.schema.tree_iter(value.schema()):
+            assert target_entry == source_entry
+            entry = target_entry = source_entry
 
-    #     if self.capacity is not None and value.capacity is not None:
-    #         if value.capacity > self.capacity:
-    #             raise ValueError(
-    #                 f"Assigned Set length {value.capacity} exceeds field '{self.name}' capacity {self.capacity}."
-    #             )
+            source_path = value._storage.root.extend(path)
+            data = value._storage.read(source_path, entry)
 
-    #     if hasattr(instance, "_storage"):
-    #         instance._storage._field_capacities[self.name] = value.capacity
+            target_path = instance._storage.root.append(self.name).extend(path)
+            instance._storage.write(target_path, entry, data)
 
-    #     for key, entry in value.schema().tree_iter():
-    #         target_entry = instance.schema().lookup_array((self.name, *key)) or entry
-    #         data = value._storage.read(key, entry)
-    #         instance._storage.write((self.name, *key), entry=target_entry, data=data)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -178,11 +150,6 @@ class Set(Marker[T], SchemaConvertible):
             raise TypeError(f"Element of a set has to be a Struct, got '{cls._dtype}'")
 
         cls._bridge_schema = cls._dtype._bridge_schema.to_set_schema()
-
-    @classmethod
-    def item_type(cls) -> Optional[Type[Any]]:
-        """Return the element Struct type of this Set class."""
-        return cls._dtype
 
     @classmethod
     def schema(cls) -> Schema:

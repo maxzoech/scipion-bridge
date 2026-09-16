@@ -1139,6 +1139,18 @@ def test_basic_set_assign():
 
     ds_1["metadata"] = B.Set[Metadata](capacity=10, storage=MockEngine())
 
+    # Sets used inside structs
+    class Group(B.Struct):
+
+        samples = B.Set[Foo](capacity=10)
+
+    # Read set on struct
+    group = Group(storage=MockEngine())
+    # print(group.samples["metadata"][2]._storage.root)
+
+    # Assign set on struct
+    group.samples = B.Set[Foo](capacity=10, storage=MockEngine())
+
 
 if __name__ == "__main__":
     test_basic_set_assign()
