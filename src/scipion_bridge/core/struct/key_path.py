@@ -1,6 +1,8 @@
-from typing import Any, Sequence, Tuple, Union, TypeAlias
+from typing import Any, Optional, Sequence, Tuple, Union, TypeAlias
+import numpy as np
+from numpy.typing import NDArray
 
-IndexType: TypeAlias = Union[slice, int]
+IndexType: TypeAlias = Union[slice, int, NDArray[np.int64]]
 
 
 class KeyPath(Sequence[Tuple[str, IndexType]]):
@@ -151,7 +153,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         index = int(index)
 
         match self.components:
-            case (*stem, (name, parent_index)) if parent_index == slice(None, None, None):
+            case (*stem, (name, slice() as parent_index)) if parent_index == slice(None, None, None):
                 return KeyPath([*stem, (name, index)])
             case (*stem, (name, slice() as parent_index)):
                 if (parent_index.step or 1) != 1:
@@ -183,9 +185,18 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 raise ValueError(
                     f"Cannot resolve index {index} on slice {parent_index} without knowing sequence length."
                 )
+
+            case (*stem, (name, np.ndarray() as parent_arr)):
+                span = len(parent_arr)
+                offset = span + index if index < 0 else index
                 
+                if not (0 <= offset < span):
+                    raise IndexError(f"Index {index} out of bounds for span {span}.")
+                
+                return KeyPath([*stem, (name, int(parent_arr[offset]))])
+
             case _:
-                raise ValueError
+                raise ValueError(f"Cannot narrow terminal component with index {index}.")
 
 
     def narrow_slice(self, index: slice) -> "KeyPath":
@@ -249,7 +260,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             raise ValueError("Only step=1 is supported.")
 
         match self.components:
-            case (*stem, (name, idx)) if idx == slice(None, None, None):
+            case (*stem, (name, slice() as idx)) if idx == slice(None, None, None):
                 return KeyPath([*stem, (name, index)])
             case (*stem, (name, slice() as parent)):
                 if (parent.step or 1) != 1:
@@ -275,9 +286,202 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                     new_stop = _add_bound(parent.stop, index.stop)
 
                 return KeyPath([*stem, (name, slice(new_start, new_stop, 1))])
-                
+
+            case (*stem, (name, np.ndarray() as parent_arr)):
+                return KeyPath([*stem, (name, parent_arr[index])])
+
             case _:
-                raise ValueError
+                raise ValueError(f"Cannot slice terminal component with {index}.")
+
+    def narrow_indices(
+        self,
+        indices: Union[Sequence[int], NDArray[np.integer]],
+        length: Optional[int] = None,
+    ) -> "KeyPath":
+        """Narrows the terminal component to an array of integer indices (gather/take).
+
+        Composes relative integer indices with the component currently held at the tail
+        of the key path, projecting sub-indices into the parent coordinate frame.
+
+        Resolution rules:
+            1. **Identity Slice (`[:]`)**:
+               - If `length` is given, negative indices are resolved (`length + idx`) and
+                 bounds `[-length, length - 1]` are validated.
+               - If `length` is None, only non-negative indices are supported; negative
+                 indices raise `ValueError`.
+            2. **Known Fixed Span (`[start:stop]`)**: When both `start` and `stop` are
+               non-negative, `span = stop - start`. Indices are bounds-checked (`-span <= idx < span`),
+               negative indices are resolved, and offsets are projected to absolute coordinates
+               (`start + offset`).
+            3. **Open Right Bound (`[start:]`)**: Positive indices are projected as `start + idx`.
+               Negative indices raise `ValueError`.
+            4. **Existing Index Array (`NDArray`)**: Composes relative indices over the existing
+               array via vectorized take (`parent_arr[offset]`).
+            5. **Scalar Index (`int`)**: Cannot be indexed; raises `ValueError`.
+
+        Args:
+            indices: Sequence or 1D integer array of relative indices to select.
+                Supports positive and negative indices where sequence length is known.
+            length: Optional known sequence length of the active dimension, used
+                for resolving negative indices and bounds-checking on unbounded slices.
+
+        Returns:
+            KeyPath: A new `KeyPath` instance whose terminal component has been
+                narrowed to a 1D `np.int64` array of absolute indices.
+
+        Raises:
+            IndexError: If any index falls outside valid bounds for a known span or length.
+            ValueError: In any of the following conditions:
+                - The terminal component cannot be indexed (e.g. already a scalar index).
+                - A negative index is provided on an open-ended slice without length.
+            NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
+
+        Examples:
+            >>> path = KeyPath().append("items")  # items[:]
+            >>> path.narrow_indices([0, 2], length=5).indices[-1]
+            array([0, 2])
+
+            >>> slice_path = path.narrow_slice(slice(3, 10))  # items[3:10], span=7
+            >>> slice_path.narrow_indices([0, -1, 2]).indices[-1]
+            array([3, 9, 5])
+        """
+        arr = np.asarray(indices, dtype=np.int64)
+
+        match self.components:
+            case (*stem, (name, slice() as parent_index)) if parent_index == slice(None, None, None):
+                if length is not None:
+                    if np.any(arr < -length) or np.any(arr >= length):
+                        raise IndexError(f"Index out of bounds for length {length}.")
+                    
+                    offset = np.where(arr < 0, length + arr, arr)
+                    return KeyPath([*stem, (name, offset)])
+
+                if np.any(arr < 0):
+                    raise ValueError("Cannot resolve negative index on unbounded slice without sequence length.")
+                
+                return KeyPath([*stem, (name, arr)])
+
+            case (*stem, (name, slice() as parent_slice)):
+                if (parent_slice.step or 1) != 1:
+                    raise NotImplementedError("Only step=1 is supported.")
+
+                p_start = parent_slice.start or 0
+                p_stop = parent_slice.stop
+
+                if p_start >= 0 and p_stop is not None and p_stop >= 0:
+                    span = max(0, p_stop - p_start)
+                    if np.any(arr < -span) or np.any(arr >= span):
+                        raise IndexError(f"Index out of bounds for span {span}.")
+                    offset = np.where(arr < 0, span + arr, arr)
+                    return KeyPath([*stem, (name, p_start + offset)])
+
+                if p_start >= 0 and p_stop is None:
+                    if np.any(arr < 0):
+                        raise ValueError(
+                            f"Cannot resolve negative index on slice {parent_slice} without sequence length."
+                        )
+                    return KeyPath([*stem, (name, p_start + arr)])
+
+                raise ValueError(
+                    f"Cannot narrow slice {parent_slice} with indices without knowing sequence length."
+                )
+
+            case (*stem, (name, np.ndarray() as parent_arr)):
+                span = len(parent_arr)
+                if np.any(arr < -span) or np.any(arr >= span):
+                    raise IndexError(f"Index out of bounds for span {span}.")
+                offset = np.where(arr < 0, span + arr, arr)
+                return KeyPath([*stem, (name, parent_arr[offset])])
+
+            case _:
+                raise ValueError("Cannot index into the terminal component.")
+
+    def narrow_mask(
+        self,
+        mask: Union[Sequence[bool], NDArray[np.bool_]],
+        length: Optional[int] = None,
+    ) -> "KeyPath":
+        """Narrows the terminal component using a boolean mask (filtering).
+
+        Converts the boolean mask to active integer indices via `np.flatnonzero`
+        and projects them into the parent coordinate frame.
+
+        Resolution rules:
+            1. **Identity Slice (`[:]`)**: If `length` is provided, validates `len(mask) == length`.
+               Returns `np.flatnonzero(mask)`.
+            2. **Known Fixed Span (`[start:stop]`)**: When both `start` and `stop` are
+               non-negative, `span = stop - start`. Validates `len(mask) == span` and
+               projects `start + np.flatnonzero(mask)`.
+            3. **Open Right Bound (`[start:]`)**: Projects `start + np.flatnonzero(mask)`.
+            4. **Existing Index Array (`NDArray`)**: Validates `len(mask) == len(parent_arr)`
+               and filters the array in-place via `parent_arr[mask]`.
+            5. **Scalar Index (`int`)**: Cannot be masked; raises `ValueError`.
+
+        Args:
+            mask: Sequence or 1D boolean array indicating elements to retain.
+            length: Optional known sequence length of the active dimension, used
+                for length validation when filtering unbounded slices.
+
+        Returns:
+            KeyPath: A new `KeyPath` instance whose terminal component has been
+                narrowed to a 1D `np.int64` array of absolute indices.
+
+        Raises:
+            IndexError: If `len(mask)` does not match the known span of the target component.
+            ValueError: In any of the following conditions:
+                - The terminal component cannot be masked (e.g. a scalar index).
+                - A mask is applied to a slice with negative bounds without sequence length.
+            NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
+
+        Examples:
+            >>> path = KeyPath().append("items")
+            >>> path.narrow_mask([True, False, True]).indices[-1]
+            array([0, 2])
+
+            >>> slice_path = path.narrow_slice(slice(2, 7))  # items[2:7], span=5
+            >>> slice_path.narrow_mask([True, False, False, True, False]).indices[-1]
+            array([2, 5])
+        """
+        bool_mask = np.asarray(mask, dtype=bool)
+        mask_len = len(bool_mask)
+
+        match self.components:
+            case (*stem, (name, slice() as parent_index)) if parent_index == slice(None, None, None):
+                if length is not None and mask_len != length:
+                    raise IndexError(f"Boolean mask length {mask_len} does not match container length {length}.")
+                
+                return KeyPath([*stem, (name, np.flatnonzero(bool_mask))])
+
+            case (*stem, (name, slice() as parent_slice)):
+                if (parent_slice.step or 1) != 1:
+                    raise NotImplementedError("Only step=1 is supported.")
+
+                p_start = parent_slice.start or 0
+                p_stop = parent_slice.stop
+
+                if p_start >= 0 and p_stop is not None and p_stop >= 0:
+                    span = max(0, p_stop - p_start)
+                    if mask_len != span:
+                        raise IndexError(f"Boolean mask length {mask_len} does not match span {span}.")
+                    
+                    return KeyPath([*stem, (name, p_start + np.flatnonzero(bool_mask))])
+
+                if p_start >= 0 and p_stop is None:
+                    return KeyPath([*stem, (name, p_start + np.flatnonzero(bool_mask))])
+
+                raise ValueError(
+                    f"Cannot apply boolean mask to slice {parent_slice} with negative bounds without knowing sequence length."
+                )
+
+            case (*stem, (name, np.ndarray() as parent_arr)):
+                span = len(parent_arr)
+                if mask_len != span:
+                    raise IndexError(f"Boolean mask length {mask_len} does not match span {span}.")
+                
+                return KeyPath([*stem, (name, parent_arr[bool_mask])])
+
+            case _:
+                raise ValueError("Cannot apply boolean mask to the terminal component.")
     
 
     def __getitem__(self, index):
@@ -293,12 +497,48 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         return f"KeyPath('{self}')"
 
     def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, KeyPath):
+        # Combine early exit type and length checks
+        if not isinstance(other, KeyPath) or len(self.components) != len(other.components):
             return False
-        return tuple(self.components) == tuple(other.components)
+        
+        for (n1, i1), (n2, i2) in zip(self.components, other.components):
+            if n1 != n2:
+                return False
+            
+            match i1, i2:
+                # Both are arrays
+                case np.ndarray(), np.ndarray():
+                    if not np.array_equal(i1, i2):
+                        return False
+                
+                # Only one is an array (mismatched types)
+                case (np.ndarray(), _) | (_, np.ndarray()):
+                    return False
+                
+                # Neither are arrays, rely on standard equality
+                case _ if i1 != i2:
+                    return False
+                    
+        return True
+    
 
     def __hash__(self) -> int:
-        return hash(tuple(self.components))
+        hashed_components = []
+        
+        for name, idx in self.components:
+            match idx:
+                case np.ndarray():
+                    raise TypeError("unhashable type: 'KeyPath' containing numpy array index")
+                
+                # Unpack slice attributes directly in the pattern match
+                case slice(start=start, stop=stop, step=step):
+                    hashed_components.append((name, (start, stop, step)))
+                
+                case _:
+                    hashed_components.append((name, idx))
+
+                    
+        return hash(tuple(hashed_components))
 
 
 
@@ -315,9 +555,15 @@ def _add_bound(base: int | None, delta: int | None) -> int | None:
     return base + delta
 
 def _format_index(index: IndexType) -> str:
-    if isinstance(index, slice):
-        start = "" if index.start is None else str(index.start)
-        stop = "" if index.stop is None else str(index.stop)
-        step = f":{index.step}" if index.step not in (None, 1) else ""
-        return f"[{start}:{stop}{step}]"
-    return f"[{index}]"
+    match index:
+        case slice(start=start, stop=stop, step=step):
+            start_str = "" if start is None else str(start)
+            stop_str = "" if stop is None else str(stop)
+            step_str = f":{step}" if step not in (None, 1) else ""
+            return f"[{start_str}:{stop_str}{step_str}]"
+            
+        case np.ndarray():
+            return f"[{index.tolist()}]"
+            
+        case _:
+            return f"[{index}]"
