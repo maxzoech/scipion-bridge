@@ -180,8 +180,19 @@ class Set(Marker[T], SchemaConvertible):
             )
         return cls()
 
-    def __setitem__(self, key: Union[int, str], value: Any) -> None:
-
+    def __setitem__(
+        self,
+        key: Union[
+            int,
+            slice,
+            str,
+            Sequence[bool],
+            Sequence[int],
+            NDArray[np.bool_],
+            NDArray[np.integer],
+        ],
+        value: Any,
+    ) -> None:
         match key:
             case int(index):
                 if not isinstance(value, Struct):
@@ -193,7 +204,39 @@ class Set(Marker[T], SchemaConvertible):
 
                     target_path = self._storage.root.narrow_index(index).extend(path)
                     self._storage.write(target_path, target_entry, data)
-                    
+
+            case slice() as index:
+                if not isinstance(value, Set):
+                    raise ValueError(f"Expected value to be of subclass Set, got {type(value).__name__}")
+
+                for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
+                    source_path = value._storage.root.extend(path)
+                    data = value._storage.read(source_path, source_entry)
+
+                    target_path = self._storage.root.narrow_slice(index).extend(path)
+                    self._storage.write(target_path, target_entry, data)
+
+            case _ if _is_bool_sequence(key):
+                if not isinstance(value, Set):
+                    raise ValueError(f"Expected value to be of subclass Set, got {type(value).__name__}")
+
+                for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
+                    source_path = value._storage.root.extend(path)
+                    data = value._storage.read(source_path, source_entry)
+
+                    target_path = self._storage.root.narrow_mask(key, length=self.capacity).extend(path)
+                    self._storage.write(target_path, target_entry, data)
+
+            case _ if _is_int_sequence(key):
+                if not isinstance(value, Set):
+                    raise ValueError(f"Expected value to be of subclass Set, got {type(value).__name__}")
+
+                for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
+                    source_path = value._storage.root.extend(path)
+                    data = value._storage.read(source_path, source_entry)
+
+                    target_path = self._storage.root.narrow_indices(key, length=self.capacity).extend(path)
+                    self._storage.write(target_path, target_entry, data)
 
             case str(field_name):
                 fields = self.schema().fields
@@ -202,7 +245,6 @@ class Set(Marker[T], SchemaConvertible):
                 
                 schema_entry = fields[field_name]
                 if isinstance(schema_entry, ArrayEntryBase):
-
                     path = self._storage.root.append(field_name)
                     self._storage.write(path, schema_entry, value)
 
@@ -225,7 +267,7 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
             case _:
-                raise TypeError(f"Invalid Set key type '{type(key).__name__}'. Expected int or str.")
+                raise TypeError(f"Invalid Set key type '{type(key).__name__}'. Expected int, slice, str, or integer/boolean sequence.")
 
     @overload
     def __getitem__(self, key: int) -> T: ...
@@ -233,15 +275,15 @@ class Set(Marker[T], SchemaConvertible):
     @overload
     def __getitem__(self, key: slice) -> Self: ...
 
-    # @overload
-    # def __getitem__(
-    #     self, key: Union[Sequence[bool], NDArray[np.bool_], pa.BooleanArray]
-    # ) -> Self: ...
+    @overload
+    def __getitem__(
+        self, key: Union[Sequence[bool], NDArray[np.bool_], pa.BooleanArray]
+    ) -> Self: ...
 
-    # @overload
-    # def __getitem__(
-    #     self, key: Union[Sequence[int], NDArray[np.integer], pa.IntegerArray]
-    # ) -> Self: ...
+    @overload
+    def __getitem__(
+        self, key: Union[Sequence[int], NDArray[np.integer], pa.IntegerArray]
+    ) -> Self: ...
 
     @overload
     def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
@@ -252,10 +294,10 @@ class Set(Marker[T], SchemaConvertible):
             int,
             slice,
             str,
-            # Sequence[bool],
-            # Sequence[int],
-            # NDArray[np.bool_],
-            # NDArray[np.integer],
+            Sequence[bool],
+            Sequence[int],
+            NDArray[np.bool_],
+            NDArray[np.integer],
         ],
     ) -> Union[T, Self, NDArray, RaggedArrayView, "Set[Any]"]:
         match key:
@@ -268,13 +310,21 @@ class Set(Marker[T], SchemaConvertible):
                 if self.dtype is None:
                     raise TypeError("Cannot index Set with unspecified element type.")
 
-                raise NotImplementedError("Boolean masking is not supported yet")
+                _dt = self.dtype
+                assert (isinstance(_dt, type) and issubclass(_dt, Struct))
+
+                view = self._storage.narrow_mask(key, length=self.capacity)
+                return Set[_dt](capacity=int(np.sum(key)), storage=view)
 
             case _ if _is_int_sequence(key):
                 if self.dtype is None:
                     raise TypeError("Cannot index Set with unspecified element type.")
 
-                raise NotImplementedError("Indexing with arrays is not supported yet")
+                _dt = self.dtype
+                assert (isinstance(_dt, type) and issubclass(_dt, Struct))
+
+                view = self._storage.narrow_indices(key, length=self.capacity)
+                return Set[_dt](capacity=len(key), storage=view)
 
             case int(index):
                 _dt = self.dtype
