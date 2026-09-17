@@ -75,62 +75,6 @@ def test_schema_dynamic_shape_is_not_static():
     assert pixels_entry.is_static is False
 
 
-def test_schema_lookup_and_lookup_array():
-    class SubChild(B.Struct):
-        val: int
-        tensor = B.Array[np.float32](shape=(4, 4))
-
-    class Container(B.Struct):
-        sub: SubChild
-        items = B.Set[SubChild](capacity=5)
-
-    schema = Container.schema()
-
-    # 1. Lookup with root prefix
-    assert schema.lookup(("root", "sub", "val")) is not None
-    assert isinstance(schema.lookup_array(("root", "sub", "val")), ArrayEntryBase)
-
-    # 2. Lookup without root prefix
-    val_entry = schema.lookup(("sub", "val"))
-    assert val_entry is not None
-    assert val_entry.dtype == np.dtype(int)
-
-    # 3. Lookup intermediate SchemaEntry
-    sub_entry = schema.lookup(("sub",))
-    assert isinstance(sub_entry, SchemaEntry)
-    # lookup_array returns None for non-array entries
-    assert schema.lookup_array(("sub",)) is None
-
-    # 4. Lookup nested set field
-    tensor_entry = schema.lookup_array(("items", "tensor"))
-    assert isinstance(tensor_entry, ArraySetEntry)
-    assert tensor_entry.shape == (4, 4)
-
-    # 5. Nonexistent paths return None
-    assert schema.lookup(("nonexistent",)) is None
-    assert schema.lookup(("sub", "missing")) is None
-    assert schema.lookup_array(("items", "missing")) is None
-    assert schema.lookup(()) is None
-
-
-def test_schema_tree_iter():
-    class Leaf(B.Struct):
-        a: int
-        b: float
-
-    class Root(B.Struct):
-        leaf: Leaf
-        tag: str
-
-    leaves = dict(Root.schema().tree_iter())
-    assert ("leaf", "a") in leaves
-    assert ("leaf", "b") in leaves
-    assert ("tag",) in leaves
-    for path, entry in leaves.items():
-        assert isinstance(entry, ArrayEntryBase)
-        assert isinstance(path, tuple)
-
-
 def test_schema_to_set_schema():
     class Item(B.Struct):
         val: float

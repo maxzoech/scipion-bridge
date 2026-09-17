@@ -144,8 +144,7 @@ class AccumulateOp(Op, Generic[E, S]):
                 return cast(S, new_val), [new_val]
 
             case (_, FlushSignal()):
-                _, final_val = self.func(state, new_val)
-                return self.start, [FLUSH, final_val]
+                return self.start, [FLUSH]
 
             case (state, new_val):
                 next_state, next_val = self.func(state, new_val)

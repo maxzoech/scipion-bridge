@@ -270,10 +270,14 @@ class Array(Marker[T], SchemaConvertible):
             raise AttributeError("Array descriptor name is not set.")
 
         path = instance.storage.root.append(self.name)
-        return instance.storage.read(
+        val = instance.storage.read(
             path,
             self.entry,
         )
+        if self.is_scalar:
+            return val.item()
+        
+        return val
 
     def __set__(self, instance: Struct, value: Any) -> None:
         if not isinstance(instance, Struct):

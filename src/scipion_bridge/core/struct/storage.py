@@ -343,7 +343,7 @@ class StagingEngine(_BaseStorage):
         if data_dtype is None:
             data_dtype = np.asarray(data).dtype
             
-        if data_dtype != object and not np.can_cast(data_dtype, target_dtype, casting="safe"):
+        if data_dtype != object and not np.can_cast(data_dtype, target_dtype, casting="same_kind"):
             raise TypeError(
                 f"Cannot cast data of dtype '{data_dtype}' to field '{key}' dtype '{target_dtype}'."
             )
@@ -358,7 +358,12 @@ class StagingEngine(_BaseStorage):
                 if arr.dtype != object:
                     if is_static:
                         entry_shape = entry.shape
-                        if entry_shape == (1,) and len(arr.shape) == 1:
+                        if arr.ndim == 0:
+                            if entry_shape == (1,):
+                                arr = arr.reshape(1)
+                            elif entry_shape == ():
+                                arr = arr.reshape(())
+                        elif entry_shape == (1,) and len(arr.shape) == 1 and arr.shape != (1,):
                             arr = arr.reshape(-1, 1)
                         elif len(arr.shape) < len(entry_shape) or arr.shape[len(arr.shape)-len(entry_shape):] != entry_shape:
                             raise ValueError(f"Shape mismatch for static field '{key}': expected {entry_shape} for element.")

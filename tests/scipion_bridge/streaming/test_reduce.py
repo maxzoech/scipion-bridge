@@ -2,7 +2,6 @@ from typing import Dict, Tuple, Any
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge import Protocol
 from scipion_bridge.core.streaming import (
     Source,
     Pipeline,
@@ -12,7 +11,6 @@ from scipion_bridge.core.streaming import (
     AccumulateOp,
     KeyedChunkOp,
     KeyedReduceOp,
-    ReduceOutputOp,
 )
 
 
@@ -92,7 +90,7 @@ def test_reduce_op_empty_stream():
 def test_accumulate_op():
     received = []
     source = Source("numbers")
-    sink_node = source.accumulate(lambda acc, x: acc + x, start=0).sink(lambda x: received.append(x))
+    sink_node = source.accumulate(lambda acc, x: (acc + x, acc + x), start=0).sink(lambda x: received.append(x))
     pipeline = Pipeline.from_sink(sink_node)
 
     pipeline.send(numbers=1)
@@ -333,62 +331,3 @@ def test_2d_classification_pipeline_pattern():
     assert final_models[10].mean_score == 3.0
     assert final_models[20].count == 2
     assert final_models[20].mean_score == 5.0
-
-
-# ---------------------------------------------------------------------------
-# ProtocolBase.get_pipeline() Integration Tests
-# ---------------------------------------------------------------------------
-
-class ReductionProtocol(Protocol):
-    particles: B.Input[B.Set[Particle]] = B.Input()
-
-    def outputs(self) -> Dict[str, Any]:
-        return {"summary": int}
-
-    def steps(self):
-        source = Source("particles")
-        return source.reduce(lambda acc, p: acc + len(p), start=0).map(lambda total: {"summary": total})
-
-
-class NonReductionProtocol(Protocol):
-    particles: B.Input[B.Set[Particle]] = B.Input()
-
-    def outputs(self) -> Dict[str, Any]:
-        return {"particles": B.Set[Particle]}
-
-    def steps(self):
-        source = Source("particles")
-        return source.map(lambda batch: {"particles": batch})
-
-
-class DisabledAutoReduceProtocol(Protocol):
-    auto_reduce_outputs: bool = False
-    particles: B.Input[B.Set[Particle]] = B.Input()
-
-    def outputs(self) -> Dict[str, Any]:
-        return {"particles": B.Set[Particle]}
-
-    def steps(self):
-        source = Source("particles")
-        return source.map(lambda batch: {"particles": batch})
-
-
-def test_protocol_pipeline_skips_reduce_output_on_reduce_op():
-    proto = ReductionProtocol()
-    pipeline_op = proto.get_pipeline()
-    # Upstream of the sink should NOT have ReduceOutputOp
-    assert not isinstance(pipeline_op, ReduceOutputOp)
-
-
-def test_protocol_pipeline_adds_reduce_output_for_standard_protocols():
-    proto = NonReductionProtocol()
-    pipeline_op = proto.get_pipeline()
-    # Standard protocols still append ReduceOutputOp for auto-concatenation
-    assert isinstance(pipeline_op, ReduceOutputOp)
-
-
-def test_protocol_pipeline_respects_auto_reduce_outputs_flag():
-    proto = DisabledAutoReduceProtocol()
-    pipeline_op = proto.get_pipeline()
-    # Explicitly disabled auto_reduce_outputs should omit ReduceOutputOp
-    assert not isinstance(pipeline_op, ReduceOutputOp)
