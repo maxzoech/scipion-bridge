@@ -117,31 +117,34 @@ class _BaseStorage(abc.ABC):
             self.root.append(name)
         )
 
-    def narrow_index(self, index: int) -> StorageView:
+    def narrow_index(self, index: int, length: Optional[int] = None) -> StorageView:
         """Create a child storage view focused on a single scalar item along the active dimension.
 
         Args:
             index: Relative integer index along the terminal dimension.
+            length: Optional sequence length. If omitted, defaults to self.get_length().
 
         Returns:
             StorageView: A view focused on the indexed element.
         """
+        effective_len = length if length is not None else self.get_length()
         return self.view(
-            self.root.narrow_index(index)
+            self.root.narrow_index(index, length=effective_len)
         )
 
-    def narrow_slice(self, index: slice) -> StorageView:
+    def narrow_slice(self, index: slice, length: Optional[int] = None) -> StorageView:
         """Create a child storage view restricted to a sub-slice along the active dimension.
 
         Args:
             index: Relative slice to compose with the current terminal slice.
+            length: Optional sequence length. If omitted, defaults to self.get_length().
 
         Returns:
             StorageView: A view restricted to the sub-sliced window.
         """
-
+        effective_len = length if length is not None else self.get_length()
         return self.view(
-            self.root.narrow_slice(index)
+            self.root.narrow_slice(index, length=effective_len)
         )
 
     def narrow_indices(
@@ -150,8 +153,9 @@ class _BaseStorage(abc.ABC):
         length: Optional[int] = None,
     ) -> StorageView:
         """Create a child storage view restricted to specified integer indices along the active dimension."""
+        effective_len = length if length is not None else self.get_length()
         return self.view(
-            self.root.narrow_indices(indices, length=length)
+            self.root.narrow_indices(indices, length=effective_len)
         )
 
     def narrow_mask(
@@ -160,8 +164,9 @@ class _BaseStorage(abc.ABC):
         length: Optional[int] = None,
     ) -> StorageView:
         """Create a child storage view filtered by a boolean mask along the active dimension."""
+        effective_len = length if length is not None else self.get_length()
         return self.view(
-            self.root.narrow_mask(mask, length=length)
+            self.root.narrow_mask(mask, length=effective_len)
         )
 
     @property
@@ -299,7 +304,7 @@ class StagingEngine(_BaseStorage):
                 if entry.capacity is None and __debug__ == True:
                     container_prefix = field_key[:-1]
                     for other_key, other_buffer in self._data.items():
-                        
+
                         if other_key[:-1] == container_prefix and len(other_key) == len(field_key):
                             if data_len != len(other_buffer):
                                 raise ValueError(

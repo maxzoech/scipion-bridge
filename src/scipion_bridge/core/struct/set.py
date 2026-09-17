@@ -216,44 +216,48 @@ class Set(Marker[T], SchemaConvertible):
                 if not isinstance(value, Struct):
                     raise ValueError(f"Expected value to be of subclass Struct, got {type(value).__name__}")
 
+                active_len = self._get_length()
                 for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
                     source_path = value.storage.root.extend(path)
                     data = value.storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_index(index).extend(path)
+                    target_path = self._storage.root.narrow_index(index, length=active_len).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
             case slice() as index:
                 if not isinstance(value, Set):
                     raise ValueError(f"Expected value to be of subclass Set, got {type(value).__name__}")
 
+                active_len = self._get_length()
                 for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
                     source_path = value._storage.root.extend(path)
                     data = value._storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_slice(index).extend(path)
+                    target_path = self._storage.root.narrow_slice(index, length=active_len).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
             case _ if _is_bool_sequence(key):
                 if not isinstance(value, Set):
                     raise ValueError(f"Expected value to be of subclass Set, got {type(value).__name__}")
 
+                active_len = self._get_length()
                 for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
                     source_path = value._storage.root.extend(path)
                     data = value._storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_mask(key, length=self.capacity).extend(path)
+                    target_path = self._storage.root.narrow_mask(key, length=active_len).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
             case _ if _is_int_sequence(key):
                 if not isinstance(value, Set):
                     raise ValueError(f"Expected value to be of subclass Set, got {type(value).__name__}")
 
+                active_len = self._get_length()
                 for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
                     source_path = value._storage.root.extend(path)
                     data = value._storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_indices(key, length=self.capacity).extend(path)
+                    target_path = self._storage.root.narrow_indices(key, length=active_len).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
             case str(field_name):
@@ -365,20 +369,19 @@ class Set(Marker[T], SchemaConvertible):
                 _dt = self.dtype
                 assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
-                view = self._storage.narrow_index(index)
+                view = self._storage.narrow_index(index, length=active_len)
                 return cast(T, _dt(view))
 
             case slice() as index:
-                active_len = self._get_length()
-                if active_len is None:
-                    raise IndexError("Cannot slice a Set with dynamic capacity before data is populated.")
+                if (index.step or 1) != 1:
+                    raise ValueError("Only step=1 is supported.")
 
                 _dt = self.dtype
                 assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
-                view = self._storage.narrow_slice(index)
-                start, stop, step = index.indices(active_len)
-                new_cap = max(0, (stop - start + (step - 1 if step > 0 else step + 1)) // step)
+                active_len = self._get_length()
+                new_cap = len(range(*index.indices(active_len))) if active_len is not None else None
+                view = self._storage.narrow_slice(index, length=active_len)
                 return Set[_dt](capacity=new_cap, storage=view)
                 
             case str(field_name):

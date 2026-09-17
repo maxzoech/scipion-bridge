@@ -243,5 +243,64 @@ def test_keypath_eq_and_hash():
     assert isinstance(hash(key), int)
 
 
+def test_narrow_slice_by_int_with_length():
+    key = KeyPath().append("items")
+
+    # Parent slice [4:] with view length 6 (e.g. underlying buffer of 10)
+    open_key = key.narrow_slice(slice(4, None))
+    assert open_key.narrow_index(0, length=6).indices[-1] == 4
+    assert open_key.narrow_index(2, length=6).indices[-1] == 6
+    assert open_key.narrow_index(-1, length=6).indices[-1] == 9
+    assert open_key.narrow_index(-6, length=6).indices[-1] == 4
+
+    # Out of bounds with length
+    with pytest.raises(IndexError):
+        open_key.narrow_index(6, length=6)
+    with pytest.raises(IndexError):
+        open_key.narrow_index(-7, length=6)
+
+
+def test_narrow_by_slice_with_length_mixed_signs():
+    key = KeyPath().append("items")
+
+    # Parent slice [4:] with view length 6
+    open_key = key.narrow_slice(slice(4, None))
+
+    # Mixed-sign: open parent with negative child slice [-2:]
+    k_mixed = open_key.narrow_slice(slice(-2, None), length=6)
+    assert k_mixed.components[-1][1] == slice(8, 10, 1)
+
+    # Sub-slice with positive start and stop
+    k_sub = open_key.narrow_slice(slice(1, 4), length=6)
+    assert k_sub.components[-1][1] == slice(5, 8, 1)
+
+
+def test_narrow_indices_with_length_open_slice():
+    import numpy as np
+    key = KeyPath().append("items")
+
+    # Parent slice [4:] with view length 6
+    open_key = key.narrow_slice(slice(4, None))
+    k = open_key.narrow_indices([0, -1, 2], length=6)
+    np.testing.assert_array_equal(k.indices[-1], np.array([4, 9, 6]))
+
+    with pytest.raises(IndexError):
+        open_key.narrow_indices([6], length=6)
+    with pytest.raises(IndexError):
+        open_key.narrow_indices([-7], length=6)
+
+
+def test_narrow_mask_with_length_open_slice():
+    import numpy as np
+    key = KeyPath().append("items")
+
+    open_key = key.narrow_slice(slice(4, None))
+    k = open_key.narrow_mask([True, False, True, False, False, True], length=6)
+    np.testing.assert_array_equal(k.indices[-1], np.array([4, 6, 9]))
+
+    with pytest.raises(IndexError):
+        open_key.narrow_mask([True, False], length=6)
+
+
 if __name__ == "__main__":
     test_narrow_by_slice_invalid_anchors()

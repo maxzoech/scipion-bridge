@@ -365,7 +365,6 @@ def test_basic_set_slicing(as_engine):
     assert np.allclose(buffer[5:]["foo"], data_foo[5:]) # type: ignore
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_set_double_slicing(as_engine):
     data_pixels = np.random.uniform(size=[32, 128, 128])
 
@@ -384,6 +383,15 @@ def test_set_double_slicing(as_engine):
     assert buffer_subslice.capacity == 5
     assert buffer_subslice["pixels"].shape == (5, 128, 128) # type: ignore
     assert np.allclose(buffer_subslice["pixels"], data_pixels[20:25]) # type: ignore
+
+    # Negative indexing on open slice: buffer_slice[-1] -> absolute index 31
+    last_item = buffer_slice[-1]
+    assert np.allclose(last_item.pixels, data_pixels[31])
+
+    # Mixed-sign sub-slicing on open slice: buffer_slice[-5:] -> root indices [27:32]
+    neg_subslice = buffer_slice[-5:]
+    assert neg_subslice.capacity == 5
+    assert np.allclose(neg_subslice["pixels"], data_pixels[27:32]) # type: ignore
 
 
 def test_set_index_reading(as_engine):
@@ -701,9 +709,14 @@ def test_dynamic_set_len_and_indexing():
     with pytest.raises(IndexError, match="Cannot index into a Set with dynamic capacity"):
         _ = dyn_set[0]
 
-    # Slicing unpopulated dynamic set raises IndexError
-    with pytest.raises(IndexError, match="Cannot slice a Set with dynamic capacity"):
-        _ = dyn_set[:5]
+    # Slicing unpopulated dynamic set succeeds symbolically (JIT / tracing mode)
+    pre_slice = dyn_set[:5]
+    assert pre_slice.capacity is None
+    assert bool(pre_slice) is False
+
+    # Chained symbolic slice without concrete length
+    sub_pre = dyn_set[1:][:2]
+    assert sub_pre.capacity is None
 
     # Populating dynamic set
     dyn_set["val"] = np.array([1.0, 2.0, 3.0])
@@ -711,6 +724,13 @@ def test_dynamic_set_len_and_indexing():
     assert len(dyn_set) == 3
     assert dyn_set.__length_hint__() == 3
     assert dyn_set[0].val == 1.0
+
+    # Previously sliced symbolic views now resolve concrete length and data
+    assert len(pre_slice) == 3
+    assert np.allclose(pre_slice["val"].squeeze(), [1.0, 2.0, 3.0])
+
+    assert len(sub_pre) == 2
+    assert np.allclose(sub_pre["val"].squeeze(), [2.0, 3.0])
 
     sliced = dyn_set[1:3]
     assert len(sliced) == 2
