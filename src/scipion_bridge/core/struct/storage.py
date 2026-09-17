@@ -17,6 +17,7 @@ from .exceptions import UninitializedFieldError
 from .schema import (
     Schema,
     Entry,
+    SetEntryBase,
     ArrayEntryBase,
     ArrayEntry,
     ArraySetEntry,
@@ -175,6 +176,10 @@ class _BaseStorage(abc.ABC):
         return self.parent.root_storage
 
 
+    def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
+        """Return active sequence length under key/root, or None if uninitialized."""
+        return None
+
     @abc.abstractmethod
     def read(
         self,
@@ -204,6 +209,10 @@ class StorageView(_BaseStorage):
     storage (e.g. numpy or Arrow).
     
     """
+
+    def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
+        target_key = key if key is not None else self.root
+        return self.root_storage.get_length(target_key)
 
     def read(self, key: KeyPath, entry: Entry) -> Any:
         return self.root_storage.read(key, entry)
@@ -243,6 +252,20 @@ class StagingEngine(_BaseStorage):
             case _:
                 return index_tuple
 
+    def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
+        """Return the active sequence length of data stored under key or root."""
+        target_key = key if key is not None else self.root
+        prefix_fields, index_tuple = self._decompose(target_key)
+        effective_idx = self._compute_index(index_tuple)
+
+        for field_key, buffer in self._data.items():
+            if field_key[:len(prefix_fields)] == prefix_fields:
+                if not effective_idx:
+                    return len(buffer)
+                return len(buffer[effective_idx])
+
+        return None
+
     def read(self, key: KeyPath, entry: Entry) -> Any:
         field_key, index_tuple = self._decompose(key)
         if field_key not in self._data:
@@ -259,11 +282,31 @@ class StagingEngine(_BaseStorage):
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         assert isinstance(entry, ArrayEntryBase)
 
+        self._validate_dtype(data, entry.dtype, key)
+
         field_key, index_tuple = self._decompose(key)
         effective_idx = self._compute_index(index_tuple)
 
         # 1. Full-column write (unbounded)
         if not effective_idx:
+            if isinstance(entry, SetEntryBase):
+                data_len = len(data) if hasattr(data, "__len__") else 1
+                if entry.capacity is not None and data_len > entry.capacity:
+                    raise ValueError(
+                        f"Shape mismatch for key '{key}': length {data_len} exceeds capacity {entry.capacity}."
+                    )
+
+                if entry.capacity is None and __debug__ == True:
+                    container_prefix = field_key[:-1]
+                    for other_key, other_buffer in self._data.items():
+                        
+                        if other_key[:-1] == container_prefix and len(other_key) == len(field_key):
+                            if data_len != len(other_buffer):
+                                raise ValueError(
+                                    f"Length mismatch for key '{key}': data length {data_len} does not match existing column '{other_key[-1]}' length {len(other_buffer)}."
+                                )
+                            break
+
             self._data[field_key] = self._allocate_buffer(data, entry, key)
             return
 
@@ -274,7 +317,6 @@ class StagingEngine(_BaseStorage):
             )
 
         buffer = self._data[field_key]
-        self._validate_dtype(data, entry.dtype, key)
 
         if isinstance(buffer, np.ndarray):
             if self._fits_numpy_buffer(buffer, effective_idx, data):
@@ -311,7 +353,9 @@ class StagingEngine(_BaseStorage):
                 if arr.dtype != object:
                     if is_static:
                         entry_shape = entry.shape
-                        if len(arr.shape) < len(entry_shape) or arr.shape[len(arr.shape)-len(entry_shape):] != entry_shape:
+                        if entry_shape == (1,) and len(arr.shape) == 1:
+                            arr = arr.reshape(-1, 1)
+                        elif len(arr.shape) < len(entry_shape) or arr.shape[len(arr.shape)-len(entry_shape):] != entry_shape:
                             raise ValueError(f"Shape mismatch for static field '{key}': expected {entry_shape} for element.")
                     return arr
             except (ValueError, TypeError):

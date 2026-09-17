@@ -642,21 +642,18 @@ def test_multidimensional_2d_slice_both_axes_ragged(as_engine):
             assert np.allclose(extracted_pixels[i][j], expected)
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_set_storage_shape_mismatch_raises():
     data = B.Set[Data](capacity=64)
     with pytest.raises(ValueError, match="Shape mismatch"):
         data["pixels"] = np.random.uniform(size=[5, 64, 64])
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_set_storage_capacity_exceeded_raises():
     data = B.Set[Data](capacity=64)
     with pytest.raises(ValueError, match="exceeds capacity 64"):
         data["pixels"] = np.random.uniform(size=[100, 128, 128])
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_set_storage_incompatible_dtype_raises():
     data = B.Set[Data](capacity=64)
     with pytest.raises(TypeError, match="Cannot cast data of dtype"):
@@ -693,15 +690,32 @@ def test_dynamic_set_len_and_indexing():
 
     dyn_set = B.Set[Item]()
     assert dyn_set.capacity is None
-    assert bool(dyn_set) is True
+    assert bool(dyn_set) is False
+    assert dyn_set.__length_hint__() == 0
 
-    # Calling len() on dynamic set raises TypeError
+    # Calling len() on unpopulated dynamic set raises TypeError
     with pytest.raises(TypeError, match="dynamic capacity has no defined length"):
         len(dyn_set)
 
-    # Indexing into dynamic set without a prior bound/slice raises IndexError
+    # Indexing into unpopulated dynamic set raises IndexError
     with pytest.raises(IndexError, match="Cannot index into a Set with dynamic capacity"):
         _ = dyn_set[0]
+
+    # Slicing unpopulated dynamic set raises IndexError
+    with pytest.raises(IndexError, match="Cannot slice a Set with dynamic capacity"):
+        _ = dyn_set[:5]
+
+    # Populating dynamic set
+    dyn_set["val"] = np.array([1.0, 2.0, 3.0])
+    assert bool(dyn_set) is True
+    assert len(dyn_set) == 3
+    assert dyn_set.__length_hint__() == 3
+    assert dyn_set[0].val == 1.0
+
+    sliced = dyn_set[1:3]
+    assert len(sliced) == 2
+    assert sliced.capacity == 2
+    assert sliced[0].val == 2.0
 
 
 @pytest.mark.skip(reason="Pending storage engine implementation")
@@ -1092,10 +1106,10 @@ def test_set_clustering_filtering_workflow(as_engine):
     # User's target workflow:
     classes = [p_set[labels == k] for k in range(num_classes)]
 
-    # assert len(classes) == 3
-    # assert len(classes[0]) == 4
-    # assert len(classes[1]) == 4
-    # assert len(classes[2]) == 4
+    assert len(classes) == 3
+    assert len(classes[0]) == 4
+    assert len(classes[1]) == 4
+    assert len(classes[2]) == 4
 
     # Verify elements in class 0
     cls0_indices = [0, 3, 6, 7]
@@ -1277,6 +1291,34 @@ def test_basic_set_assign():
 
     # Assign set on struct
     group.samples = B.Set[Foo](capacity=10, storage=MockEngine())
+
+
+def test_empty_set_truthiness_and_len():
+    class Item(B.Struct):
+        val: float
+
+    empty_set = B.Set[Item](capacity=0)
+    assert bool(empty_set) is False
+    assert len(empty_set) == 0
+    assert empty_set.__length_hint__() == 0
+
+
+def test_dynamic_set_cross_field_validation(as_engine):
+    class Particle(B.Struct):
+        pixels: B.Array[float] = B.Array(shape=(2, 2))
+        embeddings: B.Array[float] = B.Array(shape=(4,))
+
+    dyn_set = B.Set[Particle]()
+    dyn_set["pixels"] = np.zeros((3, 2, 2), dtype=np.float32)
+    
+    # Conflicting length 2 != 3
+    with pytest.raises(ValueError, match="Length mismatch"):
+        dyn_set["embeddings"] = np.zeros((2, 4), dtype=np.float32)
+
+    # Matching length succeeds
+    dyn_set["embeddings"] = np.ones((3, 4), dtype=np.float32)
+    dyn_set = as_engine(dyn_set)
+    assert len(dyn_set) == 3
 
 
 if __name__ == "__main__":

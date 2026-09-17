@@ -155,8 +155,26 @@ class Set(Marker[T], SchemaConvertible):
     def schema(cls) -> Schema:
         return cls._bridge_schema
 
+    def _get_length(self) -> Optional[int]:
+        """Return the resolved capacity or staged storage length, or None if unknown."""
+        if self._capacity is not None:
+            return self._capacity
+        
+        return self._storage.get_length()
+
+    def __bool__(self) -> bool:
+        length = self._get_length()
+        return length is not None and length > 0
+
     def __len__(self) -> int:
-        raise NotImplementedError
+        length = self._get_length()
+        if length is not None:
+            return length
+        raise TypeError("A Set with dynamic capacity has no defined length.")
+
+    def __length_hint__(self) -> int:
+        length = self._get_length()
+        return length if length is not None else 0
     
     @property
     def capacity(self) -> Optional[int]:
@@ -245,6 +263,11 @@ class Set(Marker[T], SchemaConvertible):
                 
                 schema_entry = fields[field_name]
                 if isinstance(schema_entry, ArrayEntryBase):
+                    if self.capacity is not None and len(value) > self.capacity:
+                        raise ValueError(
+                            f"Writing data of length {len(value)} exceeds capacity {self.capacity} for Set field '{field_name}'."
+                        )
+                    
                     path = self._storage.root.append(field_name)
                     self._storage.write(path, schema_entry, value)
 
@@ -286,7 +309,7 @@ class Set(Marker[T], SchemaConvertible):
     ) -> Self: ...
 
     @overload
-    def __getitem__(self, key: str) -> Union[NDArray, RaggedArrayView, "Set[Any]"]: ...
+    def __getitem__(self, key: str) -> Union[NDArray, "Set[Any]"]: ...
 
     def __getitem__(
         self,
@@ -299,7 +322,7 @@ class Set(Marker[T], SchemaConvertible):
             NDArray[np.bool_],
             NDArray[np.integer],
         ],
-    ) -> Union[T, Self, NDArray, RaggedArrayView, "Set[Any]"]:
+    ) -> Union[T, Self, NDArray, "Set[Any]"]:
         match key:
             case bool():
                 raise TypeError(
@@ -310,23 +333,35 @@ class Set(Marker[T], SchemaConvertible):
                 if self.dtype is None:
                     raise TypeError("Cannot index Set with unspecified element type.")
 
+                active_len = self._get_length()
+                if active_len is None:
+                    raise IndexError("Cannot index into a Set with dynamic capacity.")
+
                 _dt = self.dtype
                 assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
-                view = self._storage.narrow_mask(key, length=self.capacity)
+                view = self._storage.narrow_mask(key, length=active_len)
                 return Set[_dt](capacity=int(np.sum(key)), storage=view)
 
             case _ if _is_int_sequence(key):
                 if self.dtype is None:
                     raise TypeError("Cannot index Set with unspecified element type.")
 
+                active_len = self._get_length()
+                if active_len is None:
+                    raise IndexError("Cannot index into a Set with dynamic capacity.")
+
                 _dt = self.dtype
                 assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
-                view = self._storage.narrow_indices(key, length=self.capacity)
+                view = self._storage.narrow_indices(key, length=active_len)
                 return Set[_dt](capacity=len(key), storage=view)
 
             case int(index):
+                active_len = self._get_length()
+                if active_len is None:
+                    raise IndexError("Cannot index into a Set with dynamic capacity.")
+
                 _dt = self.dtype
                 assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
@@ -334,12 +369,17 @@ class Set(Marker[T], SchemaConvertible):
                 return cast(T, _dt(view))
 
             case slice() as index:
+                active_len = self._get_length()
+                if active_len is None:
+                    raise IndexError("Cannot slice a Set with dynamic capacity before data is populated.")
+
                 _dt = self.dtype
                 assert (isinstance(_dt, type) and issubclass(_dt, Struct))
 
                 view = self._storage.narrow_slice(index)
-                # TODO: assign capacity correctly here
-                return Set[_dt](capacity=None, storage=view)
+                start, stop, step = index.indices(active_len)
+                new_cap = max(0, (stop - start + (step - 1 if step > 0 else step + 1)) // step)
+                return Set[_dt](capacity=new_cap, storage=view)
                 
             case str(field_name):
                 fields = self.schema().fields
