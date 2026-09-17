@@ -50,20 +50,48 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
     """
 
     def __init__(self, root: Sequence[Tuple[str, IndexType]] = (("root", slice(None)),)) -> None:
+        """Initializes a KeyPath with an initial sequence of components.
+
+        Args:
+            root: Initial sequence of `(name, index)` component pairs.
+                Defaults to `(('root', slice(None)),)`.
+        """
         super().__init__()
 
         self.components = root
 
     @property
     def path(self) -> Tuple[str, ...]:
+        """Returns the ordered tuple of component names traversed by the path."""
         return tuple([n for (n, _) in self.components])
 
     @property
     def indices(self) -> Tuple[IndexType, ...]:
+        """Returns the tuple of active index/slice components along the path."""
         return tuple([i for (_, i) in self.components])
 
 
     def extend(self, path: "KeyPath") -> "KeyPath":
+        """Concatenates another `KeyPath` onto this key path.
+
+        Appends all components from `path` to the end of `self.components`,
+        returning a new `KeyPath` instance.
+
+        Args:
+            path: The `KeyPath` whose components should be concatenated.
+
+        Returns:
+            KeyPath: A new `KeyPath` instance containing the combined components.
+
+        Examples:
+            >>> p1 = KeyPath().append("users")
+            >>> p2 = KeyPath((("orders", slice(0, 5)),))
+            >>> combined = p1.extend(p2)
+            >>> combined.path
+            ('root', 'users', 'orders')
+            >>> combined.indices[-1]
+            slice(0, 5, None)
+        """
         return KeyPath([*self.components, *path.components])
 
 
@@ -95,15 +123,36 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
 
     def narrow_index(self, index: int, length: Optional[int] = None) -> "KeyPath":
-        """Narrows the terminal component's slice down to a concrete integer index.
+        """Narrows the terminal component's slice or index array to a concrete integer index.
 
-        Composes a relative scalar index with the slice currently held at the tail
+        Composes a relative scalar index with the component currently held at the tail
         of the key path, projecting the sub-index into the parent's coordinate frame.
 
+        Resolution rules:
+            1. **Slice with Known Span or Sequence Length**: When the parent slice has
+               non-negative bounds (`[start:stop]`), `span = max(0, stop - start)`.
+               Alternatively, if `length` is provided, `span` is resolved from `length`.
+               Bounds-checks `index` against `[-span, span - 1]` (`IndexError`), normalizes
+               negative indices (`offset = span + index if index < 0 else index`), and
+               projects `start + offset`.
+            2. **Open-Ended Slice (`[start:]`) without Length**: If `start >= 0`,
+               `stop is None`, and `index >= 0`, projects to `start + index`. Negative
+               indices cannot be resolved without sequence length and raise `ValueError`.
+            3. **Right-Anchored Slice (`[:stop]`) without Length**: If `start is None`,
+               `stop < 0`, and `index < 0`, projects relative to the negative right edge
+               as `stop + index`. Positive indices cannot be resolved without sequence
+               length and raise `ValueError`.
+            4. **Existing Index Array (`NDArray`)**: When the terminal component is already
+               an index array, performs a scalar take: bounds-checks `index` against
+               `len(parent_arr)` (handling negative indices) and yields `int(parent_arr[offset])`.
+               Raises `IndexError` if out of bounds.
+            5. **Scalar Index (`int`)**: Cannot be narrowed further; raises `ValueError`.
+
         Args:
-            index: The relative integer index to select from the existing slice.
+            index: The relative integer index to select from the existing component.
                 Accepts both positive and negative values where determinable.
-            length: Optional known sequence length of the active dimension.
+            length: Optional known sequence length of the active dimension, used
+                for span resolution and bounds checking.
 
         Returns:
             KeyPath: A new `KeyPath` instance whose terminal component has been
@@ -112,11 +161,24 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         Raises:
             IndexError: If `index` falls outside valid bounds for a known span or length.
             ValueError: In any of the following conditions:
-                - The final component is already an integer index (cannot be narrowed).
-                - The final component cannot be indexed.
+                - The terminal component cannot be indexed (e.g. already an integer index).
                 - The combination of slice anchors and `index` sign cannot be
-                  resolved statically without the concrete sequence length.
+                  resolved statically without knowing the sequence length.
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
+
+        Examples:
+            >>> path = KeyPath().append("users")  # root.users[:]
+            >>> path.narrow_index(3).indices[-1]
+            3
+
+            >>> path.narrow_slice(slice(10, 20)).narrow_index(2).indices[-1]
+            12
+
+            >>> path.narrow_slice(slice(10, 20)).narrow_index(-1).indices[-1]
+            19
+
+            >>> path.narrow_indices([10, 20, 30]).narrow_index(1).indices[-1]
+            20
         """
         index = int(index)
 
@@ -164,24 +226,57 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
 
     def narrow_slice(self, index: slice, length: Optional[int] = None) -> "KeyPath":
-        """Narrows the terminal component's slice by composing it with a subslice.
+        """Narrows the terminal component by composing it with a subslice.
 
-        Projects a relative `slice` into the coordinate frame of the parent slice 
+        Projects a relative `slice` into the coordinate frame of the component 
         currently held at the tail of the key path. Only slices with a step of 1 
         are supported.
 
+        Resolution rules:
+            1. **Slice with Known Span or Sequence Length**: When the parent slice has
+               non-negative bounds (`[start:stop]`), `span = max(0, stop - start)`.
+               Alternatively, if `length` is provided, `span` is resolved from `length`.
+               Composes the subslice via `index.indices(span)` and produces a canonical
+               slice `slice(start + rel_start, start + rel_stop, 1)`. Clamps and normalizes
+               negative or out-of-bounds indices automatically.
+            2. **Unbounded / Symbolic Composition (without Length)**:
+               - The new start is composed algebraically via `_add_bound(parent.start, index.start)`.
+               - If `index.stop is None`, the new stop remains `parent.stop`.
+               - If `index.stop >= 0`, the new stop is anchored to start: `_add_bound(parent.start, index.stop)`.
+               - If `index.stop < 0`, the new stop is anchored to stop: `_add_bound(parent.stop, index.stop)`.
+               - Mixed-sign composition (e.g. adding a negative offset to a non-negative anchor)
+                 raises `ValueError` when sequence length is unknown.
+            3. **Existing Index Array (`NDArray`)**: Slices the index array in-place
+               via `parent_arr[index]`.
+            4. **Scalar Index (`int`)**: Cannot be sliced; raises `ValueError`.
+
         Args:
-            index: The relative subslice to compose with the existing slice.
+            index: The relative subslice to compose with the existing slice or array.
                 Must have `step=1` (or `None`).
-            length: Optional known sequence length of the active dimension.
+            length: Optional known sequence length of the active dimension, used
+                for span resolution and concrete slice computation.
 
         Returns:
-            KeyPath: A new `KeyPath` instance with the narrowed terminal slice.
+            KeyPath: A new `KeyPath` instance with the narrowed terminal component.
 
         Raises:
             ValueError: If `index.step != 1`, terminal component cannot be sliced,
                 or mixed-sign composition cannot be resolved without sequence length.
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
+
+        Examples:
+            >>> path = KeyPath().append("items")  # items[:]
+            >>> path.narrow_slice(slice(2, 8)).indices[-1]
+            slice(2, 8, 1)
+
+            >>> path.narrow_slice(slice(2, 8)).narrow_slice(slice(1, 4)).indices[-1]
+            slice(3, 6, 1)
+
+            >>> path.narrow_slice(slice(5, None)).narrow_slice(slice(2, None)).indices[-1]
+            slice(7, None, 1)
+
+            >>> path.narrow_indices([10, 20, 30, 40, 50]).narrow_slice(slice(1, 4)).indices[-1]
+            array([20, 30, 40])
         """
         if (index.step or 1) != 1:
             raise ValueError("Only step=1 is supported.")
@@ -231,9 +326,28 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         Composes relative integer indices with the component currently held at the tail
         of the key path, projecting sub-indices into the parent coordinate frame.
 
+        Resolution rules:
+            1. **Slice with Known Span or Sequence Length**: When the parent slice has
+               non-negative bounds (`[start:stop]`), `span = max(0, stop - start)`.
+               Alternatively, if `length` is provided, `span` is resolved from `length`.
+               Checks all indices against `[-span, span - 1]` (`IndexError`), normalizes
+               negative indices (`span + arr`), and projects `start + offset`.
+            2. **Open-Ended Slice (`[start:]`) without Length**: When `start >= 0` and
+               `stop is None`, non-negative indices are projected as `start + arr`. Any
+               negative index raises `ValueError` because sequence length is required to
+               compute negative offsets.
+            3. **Slice with Negative Bounds without Length**: Cannot be resolved without
+               sequence length; raises `ValueError`.
+            4. **Existing Index Array (`NDArray`)**: Vectorized take/gather operation. Checks
+               all indices against `[-len(parent_arr), len(parent_arr) - 1]` (`IndexError`),
+               normalizes negative indices, and gathers from the parent array via
+               `parent_arr[offset]`.
+            5. **Scalar Index (`int`)**: Cannot be indexed into; raises `ValueError`.
+
         Args:
             indices: Sequence or 1D integer array of relative indices to select.
-            length: Optional known sequence length of the active dimension.
+            length: Optional known sequence length of the active dimension, used
+                for span resolution and bounds checking.
 
         Returns:
             KeyPath: A new `KeyPath` instance whose terminal component has been
@@ -241,8 +355,23 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
         Raises:
             IndexError: If any index falls outside valid bounds for a known span or length.
-            ValueError: If terminal component cannot be indexed, or negative index without length.
+            ValueError: In any of the following conditions:
+                - The terminal component cannot be indexed (e.g. already a scalar index).
+                - A negative index is provided for an open-ended slice when sequence
+                  length is unknown.
+                - Slicing with negative bounds when sequence length is unknown.
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
+
+        Examples:
+            >>> path = KeyPath().append("values")  # values[:]
+            >>> path.narrow_indices([0, 2, 4], length=5).indices[-1]
+            array([0, 2, 4])
+
+            >>> path.narrow_slice(slice(10, 20)).narrow_indices([0, -1, 2]).indices[-1]
+            array([10, 19, 12])
+
+            >>> path.narrow_indices([10, 20, 30, 40]).narrow_indices([3, 1]).indices[-1]
+            array([40, 20])
         """
         arr = np.asarray(indices, dtype=np.int64)
 
@@ -293,35 +422,45 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         length: Optional[int] = None,
     ) -> "KeyPath":
         """Narrows the terminal component using a boolean mask (filtering).
-
+        
         Converts the boolean mask to active integer indices via `np.flatnonzero`
         and projects them into the parent coordinate frame.
 
         Resolution rules:
-            1. **Identity Slice (`[:]`)**: If `length` is provided, validates `len(mask) == length`.
-               Returns `np.flatnonzero(mask)`.
+            1. **Identity Slice (`[:]`)**: If `length` is provided, validates
+               `len(mask) == length` (raising `IndexError` on mismatch). Returns
+               `np.flatnonzero(mask)`. If `length is None`, projects without length validation.
             2. **Known Fixed Span (`[start:stop]`)**: When both `start` and `stop` are
-               non-negative, `span = stop - start`. Validates `len(mask) == span` and
-               projects `start + np.flatnonzero(mask)`.
-            3. **Open Right Bound (`[start:]`)**: Projects `start + np.flatnonzero(mask)`.
-            4. **Existing Index Array (`NDArray`)**: Validates `len(mask) == len(parent_arr)`
-               and filters the array in-place via `parent_arr[mask]`.
-            5. **Scalar Index (`int`)**: Cannot be masked; raises `ValueError`.
+               non-negative, `span = max(0, stop - start)`. Validates `len(mask) == span`
+               (`IndexError`) and projects `start + np.flatnonzero(mask)`.
+            3. **Slice with Known Sequence Length**: When `length` is provided for an
+               open-ended (`[start:]`) or negative-bound slice (e.g. `[:-2]`, `[-5:]`),
+               `span` is resolved to `length`. Validates `len(mask) == span` (`IndexError`)
+               and projects `start + np.flatnonzero(mask)`.
+            4. **Open Right Bound (`[start:]`) without Length**: If `start >= 0` and
+               `stop is None`, projects `start + np.flatnonzero(mask)` without length validation.
+            5. **Negative Bounds without Length**: Raises `ValueError` because the span
+               cannot be determined.
+            6. **Existing Index Array (`NDArray`)**: Validates `len(mask) == len(parent_arr)`
+               (`IndexError`) and filters the array in-place via `parent_arr[bool_mask]`.
+            7. **Scalar Index (`int`)**: Cannot be masked; raises `ValueError`.
 
         Args:
             mask: Sequence or 1D boolean array indicating elements to retain.
             length: Optional known sequence length of the active dimension, used
-                for length validation when filtering unbounded slices.
+                for span resolution and length validation.
 
         Returns:
             KeyPath: A new `KeyPath` instance whose terminal component has been
                 narrowed to a 1D `np.int64` array of absolute indices.
 
         Raises:
-            IndexError: If `len(mask)` does not match the known span of the target component.
+            IndexError: If `len(mask)` does not match the known span or container
+                length of the target component.
             ValueError: In any of the following conditions:
                 - The terminal component cannot be masked (e.g. a scalar index).
-                - A mask is applied to a slice with negative bounds without sequence length.
+                - A mask is applied to a slice with negative bounds when sequence
+                  length is unknown.
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
 
         Examples:
@@ -332,6 +471,10 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             >>> slice_path = path.narrow_slice(slice(2, 7))  # items[2:7], span=5
             >>> slice_path.narrow_mask([True, False, False, True, False]).indices[-1]
             array([2, 5])
+
+            >>> array_path = path.narrow_indices([10, 20, 30])
+            >>> array_path.narrow_mask([True, False, True]).indices[-1]
+            array([10, 30])
         """
         bool_mask = np.asarray(mask, dtype=bool)
         mask_len = len(bool_mask)
@@ -379,19 +522,27 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 raise ValueError("Cannot apply boolean mask to the terminal component.")
     
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: Any) -> Any:
+        """Returns the component or slice of components at the given index."""
         return tuple(self.components[index])
 
     def __len__(self) -> int:
+        """Returns the number of components in the key path."""
         return len(self.components)
 
     def __str__(self) -> str:
+        """Returns the string representation of the key path (e.g. 'root[:].users[0]')."""
         return ".".join(f"{name}{_format_index(idx)}" for name, idx in self.components)
 
     def __repr__(self) -> str:
+        """Returns the formal representation of the KeyPath instance."""
         return f"KeyPath('{self}')"
 
     def __eq__(self, other: Any) -> bool:
+        """Checks equality with another KeyPath or sequence of components.
+
+        Handles array index components using `np.array_equal`.
+        """
         # Combine early exit type and length checks
         if not isinstance(other, KeyPath) or len(self.components) != len(other.components):
             return False
@@ -418,6 +569,18 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
     
 
     def __hash__(self) -> int:
+        """Computes the hash of the key path.
+
+        A `KeyPath` is hashable as long as none of its components contain an
+        `NDArray` index.
+
+        Returns:
+            int: The hash value of the key path components.
+
+        Raises:
+            TypeError: If any component contains a NumPy array index, since NumPy
+                arrays are mutable and unhashable.
+        """
         hashed_components = []
         
         for name, idx in self.components:
@@ -438,6 +601,21 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
 
 def _add_bound(base: int | None, delta: int | None) -> int | None:
+    """Adds a relative index bound delta to an existing base bound.
+
+    Used for algebraic slice composition when sequence length is unknown.
+    Both bounds must share the same sign (both non-negative or both negative).
+
+    Args:
+        base: The base bound (start or stop) from the parent slice.
+        delta: The relative bound offset to add.
+
+    Returns:
+        The composed bound, or None if both bounds are None.
+
+    Raises:
+        ValueError: If base and delta have mixed signs and sequence length is unknown.
+    """
     if delta is None:
         return base
     
@@ -450,6 +628,7 @@ def _add_bound(base: int | None, delta: int | None) -> int | None:
     return base + delta
 
 def _format_index(index: IndexType) -> str:
+    """Formats an index component (slice, integer, or array) for string display."""
     match index:
         case slice(start=start, stop=stop, step=step):
             start_str = "" if start is None else str(start)

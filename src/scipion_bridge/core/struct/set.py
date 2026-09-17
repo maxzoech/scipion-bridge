@@ -45,7 +45,7 @@ T = TypeVar("T", bound=Struct)
 
 def _is_bool_sequence(
     key: Any,
-) -> TypeGuard[Union[Sequence[bool], NDArray[np.bool_], pa.BooleanArray]]:
+) -> TypeGuard[Union[Sequence[bool], NDArray[np.bool_]]]:
     if isinstance(key, np.ndarray):
         return key.ndim == 1 and (key.dtype == bool or np.issubdtype(key.dtype, np.bool_))
     if isinstance(key, (pa.Array, pa.ChunkedArray)) and pa.types.is_boolean(key.type):
@@ -57,7 +57,7 @@ def _is_bool_sequence(
 
 def _is_int_sequence(
     key: Any,
-) -> TypeGuard[Union[Sequence[int], NDArray[np.integer], pa.Array]]:
+) -> TypeGuard[Union[Sequence[int], NDArray[np.integer]]]:
     if isinstance(key, np.ndarray):
         return key.ndim == 1 and np.issubdtype(key.dtype, np.integer)
     if isinstance(key, (pa.Array, pa.ChunkedArray)) and pa.types.is_integer(key.type):
@@ -304,12 +304,12 @@ class Set(Marker[T], SchemaConvertible):
 
     @overload
     def __getitem__(
-        self, key: Union[Sequence[bool], NDArray[np.bool_], pa.BooleanArray]
+        self, key: Union[Sequence[bool], NDArray[np.bool_]]
     ) -> Self: ...
 
     @overload
     def __getitem__(
-        self, key: Union[Sequence[int], NDArray[np.integer], pa.IntegerArray]
+        self, key: Union[Sequence[int], NDArray[np.integer]]
     ) -> Self: ...
 
     @overload
