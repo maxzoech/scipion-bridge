@@ -403,7 +403,8 @@ class Struct(Trait, SchemaConvertible):
         return cls._bridge_schema
 
     @property
-    def storage(self):
+    def storage(self) -> _BaseStorage:
+        assert self._storage is not None
         return self._storage
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -423,7 +424,7 @@ class Struct(Trait, SchemaConvertible):
 
     def __init__(
         self,
-        storage: _BaseStorage = StagingEngine(),
+        storage: Optional[_BaseStorage] = None,
         **kwargs: Any,
     ) -> None:
 
@@ -433,6 +434,7 @@ class Struct(Trait, SchemaConvertible):
             )
 
         self._storage = storage
+        self._storage = storage if storage is not None else StagingEngine()
 
         for k, v in kwargs.items():
             setattr(self, k, v)

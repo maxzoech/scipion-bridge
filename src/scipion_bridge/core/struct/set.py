@@ -84,13 +84,13 @@ class Set(Marker[T], SchemaConvertible):
     def __init__(
         self,
         capacity: Optional[int] = None,
-        storage: _BaseStorage = StagingEngine(),
+        storage: Optional[_BaseStorage] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
         self._capacity = capacity
-        self._storage = storage
+        self._storage = storage if storage is not None else StagingEngine()
 
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
@@ -104,7 +104,7 @@ class Set(Marker[T], SchemaConvertible):
             _schema = self.schema()
             assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
 
-            subview = self._storage.append(self.name)
+            subview = instance.storage.append(self.name)
             return type(self)(storage=subview, capacity=self.capacity)
 
         raise NotImplementedError
@@ -133,8 +133,8 @@ class Set(Marker[T], SchemaConvertible):
             source_path = value._storage.root.extend(path)
             data = value._storage.read(source_path, entry)
 
-            target_path = instance._storage.root.append(self.name).extend(path)
-            instance._storage.write(target_path, entry, data)
+            target_path = instance.storage.root.append(self.name).extend(path)
+            instance.storage.write(target_path, entry, data)
 
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -188,11 +188,11 @@ class Set(Marker[T], SchemaConvertible):
                     raise ValueError(f"Expected value to be of subclass Struct, got {type(value).__name__}")
 
                 for path, target_entry, source_entry in self.schema().tree_iter(value.schema()):
-                    source_path = value._storage.root.extend(path)
-                    data = value._storage.read(source_path, source_entry)
+                    source_path = value.storage.root.extend(path)
+                    data = value.storage.read(source_path, source_entry)
 
-                    target_path = value._storage.root.narrow_index(index).extend(path)
-                    value._storage.write(target_path, target_entry, data)
+                    target_path = self._storage.root.narrow_index(index).extend(path)
+                    self._storage.write(target_path, target_entry, data)
                     
 
             case str(field_name):
@@ -216,8 +216,8 @@ class Set(Marker[T], SchemaConvertible):
                         source_path = value._storage.root.extend(path)
                         data = value._storage.read(source_path, source_entry)
     
-                        target_path = value._storage.root.extend(path)
-                        value._storage.write(target_path, target_entry, data)
+                        target_path = self._storage.root.append(field_name).extend(path)
+                        self._storage.write(target_path, target_entry, data)
                 
                 else:
                     raise NotImplementedError(

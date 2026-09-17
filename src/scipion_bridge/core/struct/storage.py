@@ -193,12 +193,151 @@ class StorageView(_BaseStorage):
 
 
 class StagingEngine(_BaseStorage):
+    """Mutable in-memory storage engine backed by NumPy and Awkward Arrays."""
+
+    def __init__(
+        self,
+        root: KeyPath = KeyPath(),
+        parent: Optional[_BaseStorage] = None,
+    ) -> None:
+        super().__init__(root=root, parent=parent)
+        self._data: Dict[Tuple[str, ...], Union[np.ndarray, ak.Array]] = {}
+
+    @staticmethod
+    def _decompose(key: KeyPath) -> Tuple[Tuple[str, ...], Tuple[IndexType, ...]]:
+        """Extracts field tuple (excluding 'root') and corresponding index tuple."""
+        path = key.path
+        if not path or path[0] != "root":
+            raise ValueError("KeyPath must start with a 'root' component")
+            
+        return path[1:], key.indices
+
+    @staticmethod
+    def _compute_index(index_tuple: Tuple[IndexType, ...]) -> Tuple[IndexType, ...]:
+        """Strip trailing slice(None) no-ops to form a clean index tuple."""
+        match index_tuple:
+            case (*rest, trailing_slice) if trailing_slice == slice(None):
+                return StagingEngine._compute_index(tuple(rest))
+            
+            case _:
+                return index_tuple
 
     def read(self, key: KeyPath, entry: Entry) -> Any:
-        raise NotImplementedError
+        field_key, index_tuple = self._decompose(key)
+        if field_key not in self._data:
+            raise UninitializedFieldError(f"Field '{key}' has not been initialized.")
+            
+        buffer = self._data[field_key]
+        effective_idx = self._compute_index(index_tuple)
+        
+        if not effective_idx:
+            return buffer
+            
+        return buffer[effective_idx]
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
-        raise NotImplementedError
+        assert isinstance(entry, ArrayEntryBase)
+
+        field_key, index_tuple = self._decompose(key)
+        effective_idx = self._compute_index(index_tuple)
+
+        # 1. Full-column write (unbounded)
+        if not effective_idx:
+            self._data[field_key] = self._allocate_buffer(data, entry, key)
+            return
+
+        # 2. Indexed write
+        if field_key not in self._data:
+            raise UninitializedFieldError(
+                f"Cannot perform indexed write on uninitialized field '{key}'."
+            )
+
+        buffer = self._data[field_key]
+        self._validate_dtype(data, entry.dtype, key)
+
+        if isinstance(buffer, np.ndarray):
+            if self._fits_numpy_buffer(buffer, effective_idx, data):
+                buffer[effective_idx] = data
+            elif not entry.is_static:
+                self._data[field_key] = self._promote_and_update(buffer, effective_idx, data)
+            else:
+                raise ValueError(f"Shape mismatch writing to static field '{key}'.")
+        else:
+            if entry.is_static:
+                raise ValueError(f"Shape mismatch writing to static field '{key}'.")
+            self._data[field_key] = self._update_ak_array(buffer, effective_idx, data)
+
+    def _validate_dtype(self, data: Any, target_dtype: Any, key: KeyPath) -> None:
+        if isinstance(data, ak.Array):
+            return
+            
+        data_dtype = getattr(data, "dtype", None)
+        if data_dtype is None:
+            data_dtype = np.asarray(data).dtype
+            
+        if data_dtype != object and not np.can_cast(data_dtype, target_dtype, casting="safe"):
+            raise TypeError(
+                f"Cannot cast data of dtype '{data_dtype}' to field '{key}' dtype '{target_dtype}'."
+            )
+        
+    def _allocate_buffer(self, data: Any, entry: Entry, key: KeyPath) -> Union[np.ndarray, ak.Array]:
+        assert isinstance(entry, ArrayEntryBase)
+        is_static = entry.is_static
+        
+        if not isinstance(data, ak.Array):
+            try:
+                arr = np.asarray(data, dtype=entry.dtype)
+                if arr.dtype != object:
+                    if is_static:
+                        entry_shape = entry.shape
+                        if len(arr.shape) < len(entry_shape) or arr.shape[len(arr.shape)-len(entry_shape):] != entry_shape:
+                            raise ValueError(f"Shape mismatch for static field '{key}': expected {entry_shape} for element.")
+                    return arr
+            except (ValueError, TypeError):
+                pass
+                
+        if is_static:
+            raise ValueError(f"Shape mismatch for static field '{key}'.")
+            
+        return data if isinstance(data, ak.Array) else ak.Array(data)
+
+    def _fits_numpy_buffer(self, buffer: np.ndarray, effective_idx: Tuple[IndexType, ...], data: Any) -> bool:
+        try:
+            arr_data = np.asarray(data, dtype=buffer.dtype)
+            if arr_data.dtype == object:
+                return False
+            
+            target_shape = buffer[effective_idx].shape
+            np.broadcast_shapes(target_shape, arr_data.shape)
+            return True
+        except (ValueError, TypeError, IndexError):
+            return False
+
+    def _promote_and_update(self, buffer: np.ndarray, effective_idx: Tuple[IndexType, ...], data: Any) -> ak.Array:
+        if len(effective_idx) == 1:
+            lst = list(buffer)
+        else:
+            lst = buffer.tolist()
+            
+        self._traverse_list_update(lst, effective_idx, data)
+        return ak.Array(lst)
+
+    def _update_ak_array(self, buffer: ak.Array, effective_idx: Tuple[IndexType, ...], data: Any) -> ak.Array:
+        lst = cast(list, ak.to_list(buffer))
+        self._traverse_list_update(lst, effective_idx, data)
+        return ak.Array(lst)
+
+    def _traverse_list_update(self, lst: list, effective_idx: Tuple[IndexType, ...], data: Any) -> None:
+        if len(effective_idx) == 1:
+            lst[effective_idx[0]] = data
+        else:
+            idx = effective_idx[0]
+            if isinstance(idx, slice):
+                indices = range(*idx.indices(len(lst)))
+                for i, d in zip(indices, data):
+                    self._traverse_list_update(lst[i], effective_idx[1:], d)
+            else:
+                self._traverse_list_update(lst[idx], effective_idx[1:], data)
 
 
 # class _StagingEngine(_StorageEngine):
