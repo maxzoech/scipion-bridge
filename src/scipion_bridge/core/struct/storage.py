@@ -709,31 +709,53 @@ class StagingEngine(_BaseStorage):
         key: KeyPath,
     ) -> Union[np.ndarray, ak.Array]:
         """Allocate a buffer from a scalar, ndarray, or Awkward Array."""
-        is_static = entry.is_static
+        if isinstance(data, ak.Array):
+            if entry.is_static:
+                raise ValueError(f"Shape mismatch for static field '{key}'.")
+            return data
 
-        if not isinstance(data, ak.Array):
-            try:
-                arr = np.asarray(data, dtype=entry.dtype)
-                if arr.dtype != object:
-                    if is_static:
-                        entry_shape = entry.shape
-                        if arr.ndim == 0:
-                            if entry_shape == (1,):
-                                arr = arr.reshape(1)
-                            elif entry_shape == ():
-                                arr = arr.reshape(())
-                        elif entry_shape == (1,) and len(arr.shape) == 1 and arr.shape != (1,):
-                            arr = arr.reshape(-1, 1)
-                        elif len(arr.shape) < len(entry_shape) or arr.shape[len(arr.shape)-len(entry_shape):] != entry_shape:
-                            raise ValueError(f"Shape mismatch for static field '{key}': expected {entry_shape} for element.")
-                    return arr
-            except (ValueError, TypeError):
-                pass
+        try:
+            arr = np.asarray(data, dtype=entry.dtype)
+        except (ValueError, TypeError):
+            arr = None
 
-        if is_static:
+        if arr is not None and arr.dtype != object:
+            if entry.is_static:
+                return self._coerce_static_shape(arr, entry.shape, key)
+            return arr
+
+        if entry.is_static:
             raise ValueError(f"Shape mismatch for static field '{key}'.")
 
-        return data if isinstance(data, ak.Array) else ak.Array(data)
+        return ak.Array(data)
+
+    @staticmethod
+    def _coerce_static_shape(
+        arr: np.ndarray,
+        entry_shape: Tuple[Optional[int], ...],
+        key: KeyPath,
+    ) -> np.ndarray:
+        """Validate and adjust array shape to match static entry dimensions."""
+        match (arr.shape, entry_shape):
+            case ((), (1,)):
+                return arr.reshape(1)
+
+            case ((), ()):
+                return arr.reshape(())
+
+            case ((n,), (1,)) if n != 1:
+                return arr.reshape(-1, 1)
+
+            case (shape, target) if (
+                len(shape) >= len(target)
+                and shape[len(shape) - len(target):] == target
+            ):
+                return arr
+
+            case _:
+                raise ValueError(
+                    f"Shape mismatch for static field '{key}': expected {entry_shape} for element.",
+                )
 
     def _fits_numpy_buffer(self, buffer: np.ndarray, effective_idx: Tuple[IndexType, ...], data: Any) -> bool:
         try:
