@@ -74,12 +74,6 @@ class Set(Marker[T], SchemaConvertible):
 
     _bridge_schema: Schema
 
-    # @overload
-    # def __init__(self, capacity: Sequence[T], **kwargs: Any) -> None: ...
-
-    # @overload
-    # def __init__(self, capacity: Optional[Union[int, Arg]] = None, **kwargs: Any) -> None: ...
-
     def __init__(
         self,
         items: Sequence[T] = (),
@@ -145,7 +139,7 @@ class Set(Marker[T], SchemaConvertible):
                         (self._capacity, *stacked.shape[1:]),
                         dtype=entry.dtype,
                     )
-                    
+
                     buffer[: len(items)] = stacked
                     col_data = buffer
                 else:
@@ -196,11 +190,7 @@ class Set(Marker[T], SchemaConvertible):
         if not isinstance(field_entry, (SchemaEntry, SchemaSetEntry)):
             raise AttributeError
 
-        for path, target_entry, source_entry in field_entry.schema.tree_iter(
-            value.schema()
-        ):
-            assert target_entry == source_entry
-            entry = target_entry = source_entry
+        for path, entry in field_entry.schema.tree_iter():
 
             source_path = value._storage.root.extend(path)
             data = value._storage.read(source_path, entry)
@@ -254,7 +244,7 @@ class Set(Marker[T], SchemaConvertible):
             raise TypeError("Cannot convert unsubscripted Set to schema entry.")
 
         return SchemaSetEntry(
-            schema=self.schema(),
+            schema=self.schema().to_set_schema(capacity=self.capacity),
             capacity=self.capacity,
         )
 
@@ -288,7 +278,9 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 active_len = self._get_length()
-                for path, target_entry, source_entry in self.schema().tree_iter(
+                entry = self.entry
+                assert isinstance(entry, SchemaEntry)
+                for path, target_entry, source_entry in entry.schema.tree_iter(
                     value.schema()
                 ):
                     source_path = value.storage.root.extend(path)
@@ -306,7 +298,9 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 active_len = self._get_length()
-                for path, target_entry, source_entry in self.schema().tree_iter(
+                entry = self.entry
+                assert isinstance(entry, SchemaEntry)
+                for path, target_entry, source_entry in entry.schema.tree_iter(
                     value.schema()
                 ):
                     source_path = value._storage.root.extend(path)
@@ -324,7 +318,9 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 active_len = self._get_length()
-                for path, target_entry, source_entry in self.schema().tree_iter(
+                entry = self.entry
+                assert isinstance(entry, SchemaEntry)
+                for path, target_entry, source_entry in entry.schema.tree_iter(
                     value.schema()
                 ):
                     source_path = value._storage.root.extend(path)
@@ -342,7 +338,9 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 active_len = self._get_length()
-                for path, target_entry, source_entry in self.schema().tree_iter(
+                entry = self.entry
+                assert isinstance(entry, SchemaEntry)
+                for path, target_entry, source_entry in entry.schema.tree_iter(
                     value.schema()
                 ):
                     source_path = value._storage.root.extend(path)

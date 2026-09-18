@@ -274,15 +274,28 @@ class StagingEngine(_BaseStorage):
     def read(self, key: KeyPath, entry: Entry) -> Any:
         field_key, index_tuple = self._decompose(key)
         if field_key not in self._data:
-            raise UninitializedFieldError(f"Field '{key}' has not been initialized.")
-            
+            raise UninitializedFieldError(
+                f"Field '{key}' has not been initialized.",
+            )
+
         buffer = self._data[field_key]
         effective_idx = self._compute_index(index_tuple)
-        
+
         if not effective_idx:
             return buffer
-            
-        return buffer[effective_idx]
+
+        val = buffer[effective_idx]
+        match val:
+            case None:
+                raise UninitializedFieldError(
+                    f"Element at '{key}' has not been initialized.",
+                )
+            case _ if isinstance(val, ak.Array) and len(val) == 0 and ak.is_none(val):
+                raise UninitializedFieldError(
+                    f"Element at '{key}' has not been initialized.",
+                )
+            case _:
+                return val
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         assert isinstance(entry, ArrayEntryBase)
@@ -315,25 +328,47 @@ class StagingEngine(_BaseStorage):
             self._data[field_key] = self._allocate_buffer(data, entry, key)
             return
 
-        # 2. Indexed write
+        # 2. Indexed write on uninitialized field -> auto-allocate
         if field_key not in self._data:
-            raise UninitializedFieldError(
-                f"Cannot perform indexed write on uninitialized field '{key}'."
-            )
+            outer_dims = self._infer_outer_dims(entry, effective_idx)
+            if entry.is_static:
+                int_shape = cast(Tuple[int, ...], entry.shape)
+                total_shape = (*outer_dims, *int_shape)
+                buffer = np.zeros(total_shape, dtype=entry.dtype,)
+                buffer[effective_idx] = data
+                self._data[field_key] = buffer
+            else:
+                lst = self._build_nested_list(outer_dims)
+                self._traverse_list_update(lst, effective_idx, data)
+                self._data[field_key] = ak.Array(lst)
+            return
 
+        # 3. Indexed write on existing buffer
         buffer = self._data[field_key]
 
-        if isinstance(buffer, np.ndarray):
-            if self._fits_numpy_buffer(buffer, effective_idx, data):
-                buffer[effective_idx] = data
-            elif not entry.is_static:
-                self._data[field_key] = self._promote_and_update(buffer, effective_idx, data)
-            else:
-                raise ValueError(f"Shape mismatch writing to static field '{key}'.")
-        else:
-            if entry.is_static:
-                raise ValueError(f"Shape mismatch writing to static field '{key}'.")
-            self._data[field_key] = self._update_ak_array(buffer, effective_idx, data)
+        match buffer:
+            case np.ndarray():
+                buffer = self._expand_numpy_if_needed(
+                    buffer, effective_idx, field_key,
+                )
+                if self._fits_numpy_buffer(buffer, effective_idx, data):
+                    buffer[effective_idx] = data
+                elif not entry.is_static:
+                    self._data[field_key] = self._promote_and_update(
+                        buffer, effective_idx, data,
+                    )
+                else:
+                    raise ValueError(
+                        f"Shape mismatch writing to static field '{key}'.",
+                    )
+            case ak.Array():
+                if entry.is_static:
+                    raise ValueError(
+                        f"Shape mismatch writing to static field '{key}'.",
+                    )
+                self._data[field_key] = self._update_ak_array(
+                    buffer, effective_idx, data,
+                )
 
     def _validate_dtype(self, data: Any, target_dtype: Any, key: KeyPath) -> None:
         if isinstance(data, ak.Array):
@@ -397,10 +432,71 @@ class StagingEngine(_BaseStorage):
         self._traverse_list_update(lst, effective_idx, data)
         return ak.Array(lst)
 
-    def _update_ak_array(self, buffer: ak.Array, effective_idx: Tuple[IndexType, ...], data: Any) -> ak.Array:
+    def _infer_outer_dims(
+        self, entry: Entry, effective_idx: Tuple[IndexType, ...]
+    ) -> Tuple[int, ...]:
+        outer_dims: List[int] = []
+        for i, idx in enumerate(effective_idx):
+            dim_cap = (
+                entry.capacity
+                if i == 0 and isinstance(entry, SetEntryBase) and entry.capacity is not None
+                else 0
+            )
+            match idx:
+                case int(n):
+                    dim_cap = max(dim_cap, n + 1)
+                case slice() as s if s.stop is not None:
+                    dim_cap = max(dim_cap, s.stop)
+                case _ if hasattr(idx, "__len__"):
+                    dim_cap = max(dim_cap, len(idx))
+
+            outer_dims.append(dim_cap)
+        return tuple(outer_dims)
+
+    @staticmethod
+    def _build_nested_list(dims: Sequence[int]) -> list:
+        if len(dims) <= 1:
+            return [None] * (dims[0] if dims else 0)
+        return [StagingEngine._build_nested_list(dims[1:]) for _ in range(dims[0])]
+
+    def _expand_numpy_if_needed(
+        self,
+        buffer: np.ndarray,
+        effective_idx: Tuple[IndexType, ...],
+        field_key: Tuple[str, ...],
+    ) -> np.ndarray:
+        new_shape = list(buffer.shape)
+        expanded = False
+        for i, idx in enumerate(effective_idx):
+            match idx:
+                case int(n) if n >= new_shape[i]:
+                    new_shape[i] = n + 1
+                    expanded = True
+                case slice() as s if s.stop is not None and s.stop > new_shape[i]:
+                    new_shape[i] = s.stop
+                    expanded = True
+                case _:
+                    pass
+
+        if expanded:
+            new_buffer = np.zeros(tuple(new_shape), dtype=buffer.dtype,)
+            slices = tuple(slice(0, s) for s in buffer.shape)
+            new_buffer[slices] = buffer
+            self._data[field_key] = new_buffer
+            return new_buffer
+
+        return buffer
+
+    def _update_ak_array(
+        self, buffer: ak.Array, effective_idx: Tuple[IndexType, ...], data: Any
+    ) -> ak.Array:
         lst = cast(list, ak.to_list(buffer))
+        match effective_idx:
+            case (int(idx), *_) if idx >= len(lst):
+                lst.extend([None] * (idx + 1 - len(lst)))
+            case _:
+                pass
         self._traverse_list_update(lst, effective_idx, data)
-        
         return ak.Array(lst)
 
     def _traverse_list_update(self, lst: list, effective_idx: Tuple[IndexType, ...], data: Any) -> None:
