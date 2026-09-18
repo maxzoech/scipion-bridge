@@ -26,7 +26,7 @@ class Particle(B.Struct):
 
 
 class ParticleEmbeddings(B.Struct):
-    particles: B.Set[Particle] = B.Set[Particle](10)
+    particles: B.Set[Particle] = B.Set[Particle](capacity=10)
     latent_code: B.Array[np.float32] = B.Array(shape=(128,))
 
 

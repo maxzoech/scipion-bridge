@@ -701,15 +701,14 @@ def test_dynamic_set_len_and_indexing():
     assert bool(dyn_set) is False
     assert dyn_set.__length_hint__() == 0
 
-    # Calling len() on unpopulated dynamic set raises TypeError
-    with pytest.raises(TypeError, match="dynamic capacity has no defined length"):
-        len(dyn_set)
+    # Dynamic set without elements has length 0
+    assert len(dyn_set) == 0
 
     # Indexing into unpopulated dynamic set raises IndexError
     with pytest.raises(IndexError, match="Cannot index into a Set with dynamic capacity"):
         _ = dyn_set[0]
 
-    # Slicing unpopulated dynamic set succeeds symbolically (JIT / tracing mode)
+    # Slicing unpopulated dynamic set succeeds symbolically (symbolic / tracing mode)
     pre_slice = dyn_set[:5]
     assert pre_slice.capacity is None
     assert bool(pre_slice) is False
@@ -1242,6 +1241,8 @@ class MockEngine(_BaseStorage):
 
     def read(self, key: KeyPath, entry: Entry) -> Any:
         print(f"Read key {key} for entry {entry}")
+        if isinstance(entry, ArrayEntryBase):
+            return np.zeros(entry.shape, dtype=entry.dtype)
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         print(f"Write key {key} for entry {entry}")

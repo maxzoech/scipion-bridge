@@ -40,10 +40,15 @@ class MockStorage(_BaseStorage):
 
     def read(self, key: KeyPath, entry: Entry) -> Any:
         self.reads.append((key, entry))
-        return self.data.get(str(key), None)
+        val = self.data.get(str(key), None)
+        if val is not None and isinstance(entry, ArrayEntryBase) and not hasattr(val, "item"):
+            val = np.asarray(val, dtype=entry.dtype)
+        return val
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         self.writes.append((key, entry, data))
+        if isinstance(entry, ArrayEntryBase) and not hasattr(data, "item"):
+            data = np.asarray(data, dtype=entry.dtype)
         self.data[str(key)] = data
 
 
