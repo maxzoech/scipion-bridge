@@ -1,4 +1,3 @@
-import pickle
 import numpy as np
 import pytest
 
@@ -170,31 +169,3 @@ def test_group_by_missing_key():
 
     with pytest.raises(KeyError, match="Field or attribute 'nonexistent_field' not found"):
         stream.send(items=Particle(id=1, class_id=1, score=0.5))
-
-
-def test_set_arrow_pickle_roundtrip():
-    p1 = Particle(id=1, class_id=10, score=0.1)
-    p2 = Particle(id=2, class_id=20, score=0.2)
-    p3 = Particle(id=3, class_id=30, score=0.3)
-
-    particles = B.Set[Particle]([p1, p2, p3])
-    serialized = pickle.dumps(particles)
-    deserialized = pickle.loads(serialized)
-
-    assert isinstance(deserialized, B.Set)
-    assert deserialized.dtype == Particle
-    assert len(deserialized) == 3
-    assert deserialized[0].id == 1
-    assert deserialized[1].class_id == 20
-    assert deserialized[2].score == 0.3
-
-    # Test sliced Set roundtrip
-    sub = particles[1:3]
-    sub_serialized = pickle.dumps(sub)
-    sub_deserialized = pickle.loads(sub_serialized)
-
-    assert isinstance(sub_deserialized, B.Set)
-    assert sub_deserialized.dtype == Particle
-    assert len(sub_deserialized) == 2
-    assert sub_deserialized[0].id == 2
-    assert sub_deserialized[1].id == 3

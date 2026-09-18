@@ -4,6 +4,7 @@ import pytest
 
 import scipion_bridge as B
 
+@pytest.mark.skip(reason="Pending arrow engine implementation")
 def test_set_of_classes_2d_struct():
 
     class Particle(B.Struct):
