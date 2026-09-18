@@ -330,6 +330,20 @@ class StagingEngine(_BaseStorage):
         effective_idx = self._compute_index(index_tuple)
 
         if not effective_idx:
+            if (
+                isinstance(entry, ArrayEntryBase)
+                and not entry.is_static
+                and isinstance(buffer, (ak.Array, np.ndarray))
+            ):
+                try:
+                    ak_arr = buffer if isinstance(buffer, ak.Array) else ak.Array(buffer)
+                    pa_arr = ak.to_arrow(ak_arr, extensionarray=False)
+                    if isinstance(pa_arr, pa.ChunkedArray):
+                        pa_arr = pa_arr.combine_chunks()
+                    if isinstance(pa_arr, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
+                        return RaggedArrayView(pa_arr, entry.dtype)
+                except Exception:
+                    pass
             return buffer
 
         val = buffer[effective_idx]

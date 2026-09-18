@@ -217,12 +217,11 @@ class Set(Marker[T], SchemaConvertible):
         return cls._bridge_schema
 
     def _get_length(self) -> Optional[int]:
-        """Return the staged storage length, or resolved capacity if uninitialized."""
-        st_len = self._storage.get_length()
-        if st_len is not None:
-            return st_len
+        """Return the fixed capacity if defined, otherwise the staged storage length."""
+        if self._capacity is not None:
+            return self._capacity
 
-        return self._capacity
+        return self._storage.get_length()
 
     def __bool__(self) -> bool:
         length = self._get_length()
