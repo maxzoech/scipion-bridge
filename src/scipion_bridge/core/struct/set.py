@@ -119,39 +119,16 @@ class Set(Marker[T], SchemaConvertible):
 
     def _populate_from_items(self, items: Sequence[T]) -> None:
         """Write struct items into columnar storage."""
-        extra_slots = (
-            self._capacity - len(items)
-            if self._capacity is not None and self._capacity > len(items)
-            else 0
-        )
+        target_schema = self.schema().to_set_schema(capacity=self._capacity)
 
-        for path, entry in self.schema().tree_iter():
+        for path, entry in target_schema.tree_iter():
             col_chunks = [
                 item.storage.read(item.storage.root.extend(path), entry)
                 for item in items
             ]
-
-            if entry.is_static:
-                stacked = np.stack(col_chunks, axis=0)
-                if extra_slots > 0:
-                    assert self._capacity is not None
-                    buffer = np.zeros(
-                        (self._capacity, *stacked.shape[1:]),
-                        dtype=entry.dtype,
-                    )
-
-                    buffer[: len(items)] = stacked
-                    col_data = buffer
-                else:
-                    col_data = stacked
-            else:
-                if extra_slots > 0:
-                    col_data = ak.Array(col_chunks + [None] * extra_slots)
-                else:
-                    col_data = ak.Array(col_chunks)
-
+            
             target_path = self._storage.root.extend(path)
-            self._storage.write(target_path, entry, col_data)
+            self._storage.write(target_path, entry, col_chunks)
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         if instance is None:

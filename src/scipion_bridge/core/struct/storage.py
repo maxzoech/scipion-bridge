@@ -285,6 +285,7 @@ class StagingEngine(_BaseStorage):
     ) -> None:
         super().__init__(root=root, parent=parent)
         self._data: Dict[Tuple[str, ...], Union[np.ndarray, ak.Array]] = {}
+        self._chunks: Dict[Tuple[str, ...], List[Any]] = {}
 
     @staticmethod
     def _decompose(key: KeyPath) -> Tuple[Tuple[str, ...], Tuple[IndexType, ...]]:
@@ -292,7 +293,7 @@ class StagingEngine(_BaseStorage):
         path = key.path
         if not path or path[0] != "root":
             raise ValueError("KeyPath must start with a 'root' component")
-            
+
         return path[1:], key.indices
 
     @staticmethod
@@ -301,9 +302,72 @@ class StagingEngine(_BaseStorage):
         match index_tuple:
             case (*rest, slice() as trailing_slice) if trailing_slice == slice(None):
                 return StagingEngine._compute_index(tuple(rest))
-            
+
             case _:
                 return index_tuple
+
+    @staticmethod
+    def _get_item_from_index(
+        container: Any, effective_idx: Tuple[IndexType, ...],
+    ) -> Any:
+        curr = container
+        for idx in effective_idx:
+            if curr is None:
+                return None
+            match idx:
+                case int(i):
+                    curr = curr[i]
+                case slice() as s:
+                    curr = curr[s]
+                case _:
+                    curr = curr[idx]
+        return curr
+
+    def _materialize_chunks(
+        self,
+        field_key: Tuple[str, ...],
+        entry: Entry,
+    ) -> Union[np.ndarray, ak.Array]:
+        chunks = self._chunks[field_key]
+        valid_chunks = [c for c in chunks if c is not None]
+        if not valid_chunks:
+            arr = ak.Array([None] * len(chunks))
+            self._data[field_key] = arr
+            del self._chunks[field_key]
+            return arr
+
+        if not isinstance(valid_chunks[0], (np.ndarray, ak.Array, Sequence)):
+            arr = ak.Array(chunks)
+            self._data[field_key] = arr
+            del self._chunks[field_key]
+            return arr
+
+        all_np = all(isinstance(c, np.ndarray) for c in valid_chunks)
+        first = valid_chunks[0]
+        if (
+            all_np
+            and isinstance(first, np.ndarray)
+            and all(c.shape == first.shape for c in valid_chunks)
+            and all(c is not None for c in chunks)
+        ):
+            stacked = np.stack(chunks, axis=0)
+            res = stacked if entry.is_static else ak.Array(stacked)
+            self._data[field_key] = res
+            del self._chunks[field_key]
+            return res
+
+        flat = ak.concatenate(valid_chunks, axis=0)
+        lengths = [len(c) if c is not None else 0 for c in chunks]
+        unflat = ak.unflatten(flat, lengths, axis=0)
+        if any(c is None for c in chunks):
+            mask = [c is not None for c in chunks]
+            arr = ak.mask(unflat, mask)
+        else:
+            arr = unflat
+
+        self._data[field_key] = arr
+        del self._chunks[field_key]
+        return arr
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
         """Return the active sequence length of data stored under key or root."""
@@ -312,22 +376,45 @@ class StagingEngine(_BaseStorage):
         effective_idx = self._compute_index(index_tuple)
 
         for field_key, buffer in self._data.items():
-            if field_key[:len(prefix_fields)] == prefix_fields:
+            if field_key[: len(prefix_fields)] == prefix_fields:
                 if not effective_idx:
                     return len(buffer)
                 return len(buffer[effective_idx])
+
+        for field_key, chunks in self._chunks.items():
+            if field_key[: len(prefix_fields)] == prefix_fields:
+                if not effective_idx:
+                    return len(chunks)
+                val = self._get_item_from_index(chunks, effective_idx)
+                return len(val) if val is not None else 0
 
         return None
 
     def read(self, key: KeyPath, entry: Entry) -> Any:
         field_key, index_tuple = self._decompose(key)
+        effective_idx = self._compute_index(index_tuple)
+
+        if field_key in self._chunks:
+            if not effective_idx or not all(
+                isinstance(idx, int) for idx in effective_idx
+            ):
+                self._materialize_chunks(field_key, entry)
+            else:
+                val = self._get_item_from_index(
+                    self._chunks[field_key], effective_idx,
+                )
+                if val is None:
+                    raise UninitializedFieldError(
+                        f"Element at '{key}' has not been initialized.",
+                    )
+                return val
+
         if field_key not in self._data:
             raise UninitializedFieldError(
                 f"Field '{key}' has not been initialized.",
             )
 
         buffer = self._data[field_key]
-        effective_idx = self._compute_index(index_tuple)
 
         if not effective_idx:
             if (
@@ -336,11 +423,22 @@ class StagingEngine(_BaseStorage):
                 and isinstance(buffer, (ak.Array, np.ndarray))
             ):
                 try:
-                    ak_arr = buffer if isinstance(buffer, ak.Array) else ak.Array(buffer)
+                    ak_arr = (
+                        buffer
+                        if isinstance(buffer, ak.Array)
+                        else ak.Array(buffer)
+                    )
                     pa_arr = ak.to_arrow(ak_arr, extensionarray=False)
                     if isinstance(pa_arr, pa.ChunkedArray):
                         pa_arr = pa_arr.combine_chunks()
-                    if isinstance(pa_arr, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
+                    if isinstance(
+                        pa_arr,
+                        (
+                            pa.ListArray,
+                            pa.LargeListArray,
+                            pa.FixedSizeListArray,
+                        ),
+                    ):
                         return RaggedArrayView(pa_arr, entry.dtype)
                 except Exception:
                     pass
@@ -379,7 +477,6 @@ class StagingEngine(_BaseStorage):
                 if entry.capacity is None and __debug__ == True:
                     container_prefix = field_key[:-1]
                     for other_key, other_buffer in self._data.items():
-
                         if other_key[:-1] == container_prefix and len(other_key) == len(field_key):
                             if data_len != len(other_buffer):
                                 raise ValueError(
@@ -387,68 +484,147 @@ class StagingEngine(_BaseStorage):
                                 )
                             break
 
+            self._chunks.pop(field_key, None)
             self._data[field_key] = self._allocate_buffer(data, entry, key)
             return
 
-        # 2. Indexed write on uninitialized field -> auto-allocate
-        if field_key not in self._data:
-            outer_dims = self._infer_outer_dims(entry, effective_idx)
-            if entry.is_static:
+        # 2. Indexed write on static field
+        if entry.is_static:
+            if field_key not in self._data:
+                outer_dims = self._infer_outer_dims(entry, effective_idx)
                 int_shape = cast(Tuple[int, ...], entry.shape)
                 total_shape = (*outer_dims, *int_shape)
-                buffer = np.zeros(total_shape, dtype=entry.dtype,)
+                buffer = np.zeros(
+                    total_shape,
+                    dtype=entry.dtype,
+                )
                 buffer[effective_idx] = data
                 self._data[field_key] = buffer
+                return
+
+            buffer = self._data[field_key]
+            assert isinstance(buffer, np.ndarray)
+            buffer = self._expand_numpy_if_needed(
+                buffer,
+                effective_idx,
+                field_key,
+            )
+            if self._fits_numpy_buffer(buffer, effective_idx, data):
+                buffer[effective_idx] = data
             else:
-                lst = self._build_nested_list(outer_dims)
-                self._traverse_list_update(lst, effective_idx, data)
-                self._data[field_key] = ak.Array(lst)
+                raise ValueError(
+                    f"Shape mismatch writing to static field '{key}'.",
+                )
             return
 
-        # 3. Indexed write on existing buffer
-        buffer = self._data[field_key]
+        # 3. Indexed write on dynamic field (staged as chunks)
+        if field_key in self._data:
+            existing = self._data.pop(field_key)
+            if isinstance(existing, ak.Array):
+                self._chunks[field_key] = cast(list, ak.to_list(existing))
+            else:
+                self._chunks[field_key] = list(existing)
 
-        match buffer:
-            case np.ndarray():
-                buffer = self._expand_numpy_if_needed(
-                    buffer, effective_idx, field_key,
-                )
-                if self._fits_numpy_buffer(buffer, effective_idx, data):
-                    buffer[effective_idx] = data
-                elif not entry.is_static:
-                    self._data[field_key] = self._promote_and_update(
-                        buffer, effective_idx, data,
-                    )
-                else:
-                    raise ValueError(
-                        f"Shape mismatch writing to static field '{key}'.",
-                    )
-            case ak.Array():
-                if entry.is_static:
-                    raise ValueError(
-                        f"Shape mismatch writing to static field '{key}'.",
-                    )
-                self._data[field_key] = self._update_ak_array(
-                    buffer, effective_idx, data,
-                )
+        if field_key not in self._chunks:
+            outer_dims = self._infer_outer_dims(entry, effective_idx)
+            self._chunks[field_key] = self._build_nested_list(outer_dims)
+
+        chunks = self._chunks[field_key]
+        match effective_idx:
+            case (int(idx), *_) if idx >= len(chunks):
+                chunks.extend([None] * (idx + 1 - len(chunks)))
+            case _:
+                pass
+
+        self._traverse_list_update(chunks, effective_idx, data)
 
     def _validate_dtype(self, data: Any, target_dtype: Any, key: KeyPath) -> None:
         if isinstance(data, ak.Array):
             return
-            
+
+        if isinstance(data, (list, tuple)) and len(data) > 0:
+            first = data[0]
+            if isinstance(first, ak.Array):
+                return
+            first_dtype = getattr(first, "dtype", None)
+            if first_dtype is not None:
+                if first_dtype != object and not np.can_cast(
+                    first_dtype, target_dtype, casting="same_kind",
+                ):
+                    raise TypeError(
+                        f"Cannot cast data of dtype '{first_dtype}' to field '{key}' dtype '{target_dtype}'."
+                    )
+                return
+
         data_dtype = getattr(data, "dtype", None)
         if data_dtype is None:
-            data_dtype = np.asarray(data).dtype
-            
-        if data_dtype != object and not np.can_cast(data_dtype, target_dtype, casting="same_kind"):
+            try:
+                data_dtype = np.asarray(data).dtype
+            except Exception:
+                return
+
+        if data_dtype != object and not np.can_cast(
+            data_dtype, target_dtype, casting="same_kind",
+        ):
             raise TypeError(
                 f"Cannot cast data of dtype '{data_dtype}' to field '{key}' dtype '{target_dtype}'."
             )
-        
-    def _allocate_buffer(self, data: Any, entry: Entry, key: KeyPath) -> Union[np.ndarray, ak.Array]:
+
+    def _allocate_buffer(
+        self, data: Any, entry: Entry, key: KeyPath,
+    ) -> Union[np.ndarray, ak.Array]:
         assert isinstance(entry, ArrayEntryBase)
         is_static = entry.is_static
-        
+
+        if isinstance(data, (list, tuple)) and len(data) > 0:
+            all_np = all(isinstance(c, np.ndarray) for c in data)
+            if all_np and all(c.shape == data[0].shape for c in data):
+                stacked = np.stack(data, axis=0)
+                cap = (
+                    entry.capacity
+                    if isinstance(entry, SetEntryBase)
+                    else None
+                )
+                if cap is not None and cap > len(data):
+                    buffer = np.zeros(
+                        (cap, *stacked.shape[1:]),
+                        dtype=entry.dtype,
+                    )
+                    buffer[: len(data)] = stacked
+                    return buffer if is_static else ak.Array(buffer)
+                return stacked if is_static else ak.Array(stacked)
+            elif all(isinstance(c, (np.ndarray, ak.Array)) for c in data):
+                flat = ak.concatenate(data, axis=0)
+                lengths = [len(c) for c in data]
+                unflat = ak.unflatten(flat, lengths, axis=0)
+                cap = (
+                    entry.capacity
+                    if isinstance(entry, SetEntryBase)
+                    else None
+                )
+                if cap is not None and cap > len(data):
+                    return ak.pad_none(unflat, cap, axis=0)
+                return unflat
+            else:
+                try:
+                    arr = np.asarray(data, dtype=entry.dtype)
+                    if arr.dtype != object:
+                        cap = (
+                            entry.capacity
+                            if isinstance(entry, SetEntryBase)
+                            else None
+                        )
+                        if cap is not None and cap > len(data):
+                            buf = np.zeros(
+                                (cap, *arr.shape[1:]),
+                                dtype=entry.dtype,
+                            )
+                            buf[: len(data)] = arr
+                            return buf if is_static else ak.Array(buf)
+                        return arr if is_static else ak.Array(arr)
+                except Exception:
+                    pass
+
         if not isinstance(data, ak.Array):
             try:
                 arr = np.asarray(data, dtype=entry.dtype)
@@ -467,10 +643,10 @@ class StagingEngine(_BaseStorage):
                     return arr
             except (ValueError, TypeError):
                 pass
-                
+
         if is_static:
             raise ValueError(f"Shape mismatch for static field '{key}'.")
-            
+
         return data if isinstance(data, ak.Array) else ak.Array(data)
 
     def _fits_numpy_buffer(self, buffer: np.ndarray, effective_idx: Tuple[IndexType, ...], data: Any) -> bool:
