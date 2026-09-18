@@ -217,11 +217,12 @@ class Set(Marker[T], SchemaConvertible):
         return cls._bridge_schema
 
     def _get_length(self) -> Optional[int]:
-        """Return the resolved capacity or staged storage length, or None if unknown."""
-        if self._capacity is not None:
-            return self._capacity
+        """Return the staged storage length, or resolved capacity if uninitialized."""
+        st_len = self._storage.get_length()
+        if st_len is not None:
+            return st_len
 
-        return self._storage.get_length()
+        return self._capacity
 
     def __bool__(self) -> bool:
         length = self._get_length()
@@ -238,6 +239,10 @@ class Set(Marker[T], SchemaConvertible):
     @property
     def capacity(self) -> Optional[int]:
         return self._capacity
+
+    @property
+    def storage(self) -> _BaseStorage:
+        return self._storage
 
     def convert_to_entry(self) -> Entry:
         if self.dtype is None:
@@ -510,3 +515,50 @@ class Set(Marker[T], SchemaConvertible):
                 raise TypeError(
                     f"Invalid Set index type '{type(key).__name__}'. Expected int, slice, str, or integer/boolean sequence."
                 )
+
+
+def concat(sets: Sequence[Set[T]]) -> Set[T]:
+    """Concatenate multiple Sets with identical schemas along axis 0.
+
+    Args:
+        sets: A non-empty sequence of Set instances to concatenate.
+
+    Returns:
+        A new Set containing the concatenated data.
+    """
+    if not sets:
+        raise ValueError("concat requires at least one Set to concatenate.")
+
+    first_set, *other_sets = sets
+    for s in sets:
+        assert isinstance(s, Set)
+
+    first_schema, *other_schemas = [s.schema() for s in sets]
+    for other in other_schemas:
+        if other != first_schema:
+            raise ValueError(
+                f"Cannot concatenate sets with mismatched schemas: {other} != {first_schema}",
+            )
+
+    if not other_sets:
+        return first_set
+
+    if all(s.capacity is not None for s in sets):
+        total_capacity: Optional[int] = sum(cast(int, s.capacity) for s in sets)
+    else:
+        total_capacity = None
+
+    target_entry = SchemaSetEntry(
+        schema=first_set.schema().to_set_schema(capacity=total_capacity),
+        capacity=total_capacity,
+    )
+    new_storage = first_set.storage.concat(
+        [s.storage for s in other_sets],
+        entry=target_entry,
+    )
+
+    assert first_set.dtype is not None
+    return Set[first_set.dtype](
+        capacity=total_capacity,
+        storage=new_storage,
+    )

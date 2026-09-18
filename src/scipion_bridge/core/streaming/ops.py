@@ -180,7 +180,7 @@ class ReduceOutputOp(Op):
                 )
 
             if k in acc:
-                acc[k] = struct.Set.concat(acc[k], value)
+                acc[k] = struct.concat([acc[k], value])
             else:
                 acc[k] = value
 
@@ -233,7 +233,7 @@ class ChunkOp(Op):
                 leftover = (
                     queue[0]
                     if len(queue) == 1
-                    else struct.Set.concat(*queue)
+                    else struct.concat(queue)
                 )
                 emitted.append(leftover)
             emitted.append(FLUSH)
@@ -269,7 +269,7 @@ class ChunkOp(Op):
             chunk = (
                 accumulated[0]
                 if len(accumulated) == 1
-                else struct.Set.concat(*accumulated)
+                else struct.concat(accumulated)
             )
             emitted.append(chunk)
             capacity -= self.chunk_size
@@ -306,7 +306,7 @@ class MinChunkOp(Op):
             emitted = []
             if queue:
                 emitted.append(
-                    queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
+                    queue[0] if len(queue) == 1 else struct.concat(queue)
                 )
             emitted.append(FLUSH)
             return ([], 0), emitted
@@ -322,7 +322,7 @@ class MinChunkOp(Op):
 
         if capacity >= self.min_size:
             emitted.append(
-                queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
+                queue[0] if len(queue) == 1 else struct.concat(queue)
             )
             queue, capacity = [], 0
 
@@ -369,7 +369,7 @@ class CollectOp(Op):
             emitted = []
             if queue:
                 res = (
-                    queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
+                    queue[0] if len(queue) == 1 else struct.concat(queue)
                 )
                 if self.count is not None and len(res) > self.count:
                     res = res[: self.count]
@@ -391,7 +391,7 @@ class CollectOp(Op):
 
         if self.count is not None and capacity >= self.count:
             res = (
-                queue[0] if len(queue) == 1 else struct.Set.concat(*queue)
+                queue[0] if len(queue) == 1 else struct.concat(queue)
             )
             if len(res) > self.count:
                 res = res[: self.count]
@@ -681,7 +681,7 @@ class KeyedChunkOp(ChunkOp, GroupedOp):
                         leftover = (
                             state.set_queue[0]
                             if len(state.set_queue) == 1
-                            else struct.Set.concat(*state.set_queue)
+                            else struct.concat(state.set_queue)
                         )
                         emitted.append((k, leftover))
                 else:
@@ -732,7 +732,7 @@ class KeyedChunkOp(ChunkOp, GroupedOp):
                 chunk = (
                     accumulated[0]
                     if len(accumulated) == 1
-                    else struct.Set.concat(*accumulated)
+                    else struct.concat(accumulated)
                 )
                 emitted.append((k, chunk))
                 state.set_capacity -= self.chunk_size

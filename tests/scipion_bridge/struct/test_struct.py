@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 import numpy as np
 import pytest
 import scipion_bridge as B
@@ -50,6 +50,13 @@ class MockStorage(_BaseStorage):
         if isinstance(entry, ArrayEntryBase) and not hasattr(data, "item"):
             data = np.asarray(data, dtype=entry.dtype)
         self.data[str(key)] = data
+
+    def concat(
+        self,
+        others: Sequence["_BaseStorage"],
+        entry: Entry,
+    ) -> "_BaseStorage":
+        raise NotImplementedError("MockStorage does not implement concat.")
 
 
 # ==============================================================================

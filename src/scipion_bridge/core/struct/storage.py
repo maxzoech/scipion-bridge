@@ -205,6 +205,54 @@ class _BaseStorage(abc.ABC):
 
         ...
 
+    def concat(
+        self,
+        others: Sequence["_BaseStorage"],
+        entry: Entry,
+    ) -> "_BaseStorage":
+        """Concatenate this storage with other compatible storages along axis 0."""
+        target_cls = type(self.root_storage)
+        result_storage = target_cls()
+        all_storages = [self, *others]
+
+        assert isinstance(entry, SchemaSetEntry) or isinstance(entry, SchemaEntry)
+
+        for path, target_entry in entry.schema.tree_iter():
+            if not isinstance(target_entry, ArrayEntryBase):
+                continue
+
+            try:
+                buffers = [
+                    st.read(st.root.extend(path), target_entry)
+                    for st in all_storages
+                ]
+            except UninitializedFieldError:
+                init_mask = []
+                for st in all_storages:
+                    try:
+                        st.read(st.root.extend(path), target_entry)
+                        init_mask.append(True)
+                    except UninitializedFieldError:
+                        init_mask.append(False)
+                if not any(init_mask):
+                    continue
+                raise UninitializedFieldError(
+                    f"Cannot concatenate sets: field '{path}' is initialized in some sets but not others."
+                )
+
+            if target_entry.is_static:
+                concatenated = np.concatenate(buffers, axis=0)
+            else:
+                concatenated = ak.concatenate(buffers, axis=0)
+
+            result_storage.write(
+                result_storage.root.extend(path),
+                target_entry,
+                concatenated,
+            )
+
+        return result_storage
+
 
 class StorageView(_BaseStorage):
     """
@@ -447,8 +495,10 @@ class StagingEngine(_BaseStorage):
                     dim_cap = max(dim_cap, n + 1)
                 case slice() as s if s.stop is not None:
                     dim_cap = max(dim_cap, s.stop)
-                case _ if hasattr(idx, "__len__"):
-                    dim_cap = max(dim_cap, len(idx))
+                case np.ndarray() as arr:
+                    dim_cap = max(dim_cap, len(arr))
+                case Sequence() as seq:
+                    dim_cap = max(dim_cap, len(seq))
 
             outer_dims.append(dim_cap)
         return tuple(outer_dims)

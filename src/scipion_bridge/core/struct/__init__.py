@@ -11,7 +11,7 @@ from .schema import (
     SchemaSetEntry,
 )
 from .struct import Struct, Array, Arg, Dim
-from .set import Set
+from .set import Set, concat
 from .key_path import KeyPath, IndexType
 from .storage import (
     _BaseStorage,
@@ -25,6 +25,7 @@ from .utils import dask_serialization
 __all__ = [
     "Struct",
     "Set",
+    "concat",
     "Array",
     "Arg",
     "Dim",

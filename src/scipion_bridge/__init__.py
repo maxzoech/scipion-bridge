@@ -10,7 +10,7 @@ from .core import protocol
 from .core.protocol import Protocol, Field, Input
 
 from .core import struct
-from .core.struct import Struct, Set, Array, Arg, Dim
+from .core.struct import Struct, Set, concat, Array, Arg, Dim
 
 from .core.streaming.ops import Op, FlushSignal, FLUSH
 
@@ -42,6 +42,7 @@ __all__ = [
     "struct",
     "Struct",
     "Set",
+    "concat",
     "Array",
     "RaggedArrayView",
     "Op",

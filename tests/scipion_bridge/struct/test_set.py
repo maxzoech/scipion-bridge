@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
 import numpy as np
@@ -970,7 +970,6 @@ def test_sliced_set_to_arrow(as_engine):
         assert np.allclose(restored[i].embeddings, embeddings[2 + i])
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_sliced_set_concat(as_engine):
     class Particle(B.Struct):
         embeddings: B.Array[float] = B.Array(shape=(None,))
@@ -984,13 +983,12 @@ def test_sliced_set_concat(as_engine):
     chunk2 = p_set[4:7]
     chunk3 = p_set[7:10]
 
-    combined = B.Set.concat(chunk1, chunk2, chunk3)
+    combined = B.concat([chunk1, chunk2, chunk3])
     assert len(combined) == 10
     for i in range(10):
         assert np.allclose(combined[i].embeddings, embeddings[i])
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_empty_set_concat():
     class Particle(B.Struct):
         embeddings: B.Array[float] = B.Array(shape=(None,))
@@ -1001,7 +999,7 @@ def test_empty_set_concat():
     p_set2 = B.Set[Particle](capacity=0)
     p_set2["embeddings"] = np.empty((0, 8), dtype=np.float64)
 
-    combined = B.Set.concat(p_set1, p_set2)
+    combined = B.concat([p_set1, p_set2])
     assert len(combined) == 0
 
 
@@ -1246,6 +1244,13 @@ class MockEngine(_BaseStorage):
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         print(f"Write key {key} for entry {entry}")
+
+    def concat(
+        self,
+        others: Sequence["_BaseStorage"],
+        entry: Entry,
+    ) -> "_BaseStorage":
+        raise NotImplementedError("MockEngine does not implement concat.")
 
 
 def test_basic_set_assign():

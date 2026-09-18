@@ -455,7 +455,7 @@ def test_flatten_op_invalid_type_raises():
 
 def test_basic_accumulate():
     def _acc_fn(state: B.Set, new_value: B.Set):
-        state = B.Set.concat(state, new_value)
+        state = B.concat([state, new_value])
 
         return state, state
 
