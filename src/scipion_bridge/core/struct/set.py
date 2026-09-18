@@ -165,7 +165,9 @@ class Set(Marker[T], SchemaConvertible):
             assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
 
             subview = instance.storage.append(self.name)
-            return type(self)(storage=subview, capacity=self.capacity)
+            st_len = subview.get_length()
+            active_capacity = st_len if st_len is not None else self.capacity
+            return type(self)(storage=subview, capacity=active_capacity)
 
         raise NotImplementedError
 
@@ -216,24 +218,26 @@ class Set(Marker[T], SchemaConvertible):
     def schema(cls) -> Schema:
         return cls._bridge_schema
 
-    def _get_length(self) -> Optional[int]:
-        """Return the fixed capacity if defined, otherwise the staged storage length."""
+    @property
+    def _active_span(self) -> Optional[int]:
+        """Return the active indexable span: fixed capacity if set, otherwise storage data length."""
         if self._capacity is not None:
             return self._capacity
 
         return self._storage.get_length()
 
     def __bool__(self) -> bool:
-        length = self._get_length()
-        return length is not None and length > 0
+        """A Set is truthy if and only if it contains populated data."""
+        return len(self) > 0
 
     def __len__(self) -> int:
-        length = self._get_length()
-        return length if length is not None else 0
+        """The actual length of the set queried directly from data."""
+        st_len = self._storage.get_length()
+        return st_len if st_len is not None else 0
 
     def __length_hint__(self) -> int:
-        length = self._get_length()
-        return length if length is not None else 0
+        """The capacity of the set if fixed; returns 0 for unsized sets (PEP 424 fast estimate)."""
+        return self._capacity if self._capacity is not None else 0
 
     @property
     def capacity(self) -> Optional[int]:
@@ -281,7 +285,7 @@ class Set(Marker[T], SchemaConvertible):
                         f"Expected value to be of subclass Struct, got {type(value).__name__}"
                     )
 
-                active_len = self._get_length()
+                span = self._active_span
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -291,7 +295,7 @@ class Set(Marker[T], SchemaConvertible):
                     data = value.storage.read(source_path, source_entry)
 
                     target_path = self._storage.root.narrow_index(
-                        index, length=active_len
+                        index, length=span
                     ).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
@@ -301,7 +305,7 @@ class Set(Marker[T], SchemaConvertible):
                         f"Expected value to be of subclass Set, got {type(value).__name__}"
                     )
 
-                active_len = self._get_length()
+                span = self._active_span
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -311,7 +315,7 @@ class Set(Marker[T], SchemaConvertible):
                     data = value._storage.read(source_path, source_entry)
 
                     target_path = self._storage.root.narrow_slice(
-                        index, length=active_len
+                        index, length=span
                     ).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
@@ -321,7 +325,7 @@ class Set(Marker[T], SchemaConvertible):
                         f"Expected value to be of subclass Set, got {type(value).__name__}"
                     )
 
-                active_len = self._get_length()
+                span = self._active_span
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -331,7 +335,7 @@ class Set(Marker[T], SchemaConvertible):
                     data = value._storage.read(source_path, source_entry)
 
                     target_path = self._storage.root.narrow_mask(
-                        key, length=active_len
+                        key, length=span
                     ).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
@@ -341,7 +345,7 @@ class Set(Marker[T], SchemaConvertible):
                         f"Expected value to be of subclass Set, got {type(value).__name__}"
                     )
 
-                active_len = self._get_length()
+                span = self._active_span
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -351,7 +355,7 @@ class Set(Marker[T], SchemaConvertible):
                     data = value._storage.read(source_path, source_entry)
 
                     target_path = self._storage.root.narrow_indices(
-                        key, length=active_len
+                        key, length=span
                     ).extend(path)
                     self._storage.write(target_path, target_entry, data)
 
@@ -434,39 +438,39 @@ class Set(Marker[T], SchemaConvertible):
                 if self.dtype is None:
                     raise TypeError("Cannot index Set with unspecified element type.")
 
-                active_len = self._get_length()
-                if active_len is None:
+                span = self._active_span
+                if span is None:
                     raise IndexError("Cannot index into a Set with dynamic capacity.")
 
                 _dt = self.dtype
                 assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
-                view = self._storage.narrow_mask(key, length=active_len)
+                view = self._storage.narrow_mask(key, length=span)
                 return Set[_dt](capacity=int(np.sum(key)), storage=view)
 
             case _ if _is_int_sequence(key):
                 if self.dtype is None:
                     raise TypeError("Cannot index Set with unspecified element type.")
 
-                active_len = self._get_length()
-                if active_len is None:
+                span = self._active_span
+                if span is None:
                     raise IndexError("Cannot index into a Set with dynamic capacity.")
 
                 _dt = self.dtype
                 assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
-                view = self._storage.narrow_indices(key, length=active_len)
+                view = self._storage.narrow_indices(key, length=span)
                 return Set[_dt](capacity=len(key), storage=view)
 
             case int(index):
-                active_len = self._get_length()
-                if active_len is None:
+                span = self._active_span
+                if span is None:
                     raise IndexError("Cannot index into a Set with dynamic capacity.")
 
                 _dt = self.dtype
                 assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
-                view = self._storage.narrow_index(index, length=active_len)
+                view = self._storage.narrow_index(index, length=span)
                 return cast(T, _dt(view))
 
             case slice() as index:
@@ -476,13 +480,13 @@ class Set(Marker[T], SchemaConvertible):
                 _dt = self.dtype
                 assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
-                active_len = self._get_length()
+                span = self._active_span
                 new_cap = (
-                    len(range(*index.indices(active_len)))
-                    if active_len is not None
+                    len(range(*index.indices(span)))
+                    if span is not None
                     else None
                 )
-                view = self._storage.narrow_slice(index, length=active_len)
+                view = self._storage.narrow_slice(index, length=span)
                 return Set[_dt](capacity=new_cap, storage=view)
 
             case str(field_name):

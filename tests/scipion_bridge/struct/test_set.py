@@ -721,7 +721,7 @@ def test_dynamic_set_len_and_indexing():
     dyn_set["val"] = np.array([1.0, 2.0, 3.0])
     assert bool(dyn_set) is True
     assert len(dyn_set) == 3
-    assert dyn_set.__length_hint__() == 3
+    assert dyn_set.__length_hint__() == 0
     assert dyn_set[0].val == 1.0
 
     # Previously sliced symbolic views now resolve concrete length and data
