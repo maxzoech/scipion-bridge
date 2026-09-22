@@ -187,8 +187,6 @@ class resolution_context:
             )
 
     def __enter__(self):
-        global CURRENT_CTX
-
         return CURRENT_CTX
 
     def __exit__(self, *args, **kws):
@@ -536,8 +534,6 @@ CURRENT_CTX: Optional[ResolveContext] = None
 
 
 def current_registry() -> Registry:
-    global CURRENT_CTX
-
     if CURRENT_CTX:
         return CURRENT_CTX.registry
     else:

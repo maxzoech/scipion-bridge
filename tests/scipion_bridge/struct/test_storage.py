@@ -42,3 +42,24 @@ def test_container_storage_provider_injection():
     p = Particle()
     p.voltage = 200.0
     assert p.voltage == 200.0
+
+
+def test_slice_arrow_array():
+    import pyarrow as pa
+    from scipion_bridge.core.struct.utils.arrow_utils import slice_arrow_array
+    from scipion_bridge.core.struct.key_path import KeyPath
+
+    arr = pa.array([10, 20, 30, 40, 50])
+
+    assert slice_arrow_array(arr, ()).to_pylist() == [10, 20, 30, 40, 50]
+    assert slice_arrow_array(arr, None).to_pylist() == [10, 20, 30, 40, 50]
+    assert slice_arrow_array(arr, 2).to_pylist() == [30]
+    assert slice_arrow_array(arr, -1).to_pylist() == [50]
+    assert slice_arrow_array(arr, slice(1, 4)).to_pylist() == [20, 30, 40]
+    assert slice_arrow_array(arr, (slice(2, 5),)).to_pylist() == [30, 40, 50]
+
+    kp = KeyPath().narrow_slice(slice(1, 3))
+    assert slice_arrow_array(arr, kp).to_pylist() == [20, 30]
+
+    with pytest.raises(IndexError):
+        slice_arrow_array(arr, 10)

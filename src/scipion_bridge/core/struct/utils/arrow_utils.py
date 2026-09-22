@@ -28,7 +28,9 @@ class RaggedArrayView(Sequence[Any]):
     def __len__(self) -> int:
         return len(self._list_array)
 
-    def __getitem__(self, item: Union[int, slice, Tuple[Union[int, slice], ...]]) -> Any:
+    def __getitem__(
+        self, item: Union[int, slice, Tuple[Union[int, slice], ...]]
+    ) -> Any:
         match item:
             case ():
                 return self
@@ -49,7 +51,9 @@ class RaggedArrayView(Sequence[Any]):
 
                 scalar = self._list_array[norm_idx]
                 if not scalar.is_valid:
-                    raise UninitializedFieldError(f"Cannot read unpopulated or null value at index {norm_idx}.")
+                    raise UninitializedFieldError(
+                        f"Cannot read unpopulated or null value at index {norm_idx}."
+                    )
 
                 match scalar.values:
                     case pa.ListArray() | pa.LargeListArray() | pa.FixedSizeListArray():
@@ -61,7 +65,9 @@ class RaggedArrayView(Sequence[Any]):
                         return scalar.values.to_numpy(zero_copy_only=False)
 
             case _:
-                raise TypeError(f"Invalid RaggedArrayView index type '{type(item).__name__}'.")
+                raise TypeError(
+                    f"Invalid RaggedArrayView index type '{type(item).__name__}'."
+                )
 
     def __iter__(self):
         for i in range(len(self)):
@@ -75,7 +81,11 @@ class RaggedArrayView(Sequence[Any]):
             if len(self) != len(other):
                 return False
             return all(
-                np.array_equal(a, b) if isinstance(a, np.ndarray) and isinstance(b, np.ndarray) else a == b
+                (
+                    np.array_equal(a, b)
+                    if isinstance(a, np.ndarray) and isinstance(b, np.ndarray)
+                    else a == b
+                )
                 for a, b in zip(self, other)
             )
         return False
@@ -116,10 +126,24 @@ class RaggedArrayView(Sequence[Any]):
 
     def __repr__(self) -> str:
         if len(self) <= 3:
-            shapes = [tuple(arr.shape) if isinstance(arr, np.ndarray) else f"len={len(arr)}" for arr in self]
-            return f"RaggedArrayView(len={len(self)}, shapes={shapes}, dtype={self.dtype})"
-        shapes = [tuple(self[i].shape) if isinstance(self[i], np.ndarray) else f"len={len(self[i])}" for i in range(3)]
-        return f"RaggedArrayView(len={len(self)}, shapes={shapes}..., dtype={self.dtype})"
+            shapes = [
+                tuple(arr.shape) if isinstance(arr, np.ndarray) else f"len={len(arr)}"
+                for arr in self
+            ]
+            return (
+                f"RaggedArrayView(len={len(self)}, shapes={shapes}, dtype={self.dtype})"
+            )
+        shapes = [
+            (
+                tuple(self[i].shape)
+                if isinstance(self[i], np.ndarray)
+                else f"len={len(self[i])}"
+            )
+            for i in range(3)
+        ]
+        return (
+            f"RaggedArrayView(len={len(self)}, shapes={shapes}..., dtype={self.dtype})"
+        )
 
 
 def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
@@ -129,7 +153,9 @@ def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
     for name, entry in schema.fields.items():
         if entry.children is not None:
             child_pa_schema = schema_to_arrow_schema(entry.children)
-            field_type = pa.struct([child_pa_schema.field(i) for i in range(len(child_pa_schema))])
+            field_type = pa.struct(
+                [child_pa_schema.field(i) for i in range(len(child_pa_schema))]
+            )
             fields.append(pa.field(name, field_type))
         elif isinstance(entry, ArrayEntryBase):
             pa_dtype = pa.from_numpy_dtype(entry.dtype)
@@ -140,7 +166,9 @@ def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
                 field_type = pa.list_(pa_dtype)
             fields.append(pa.field(name, field_type))
         else:
-            raise TypeError(f"Unsupported schema entry type '{type(entry).__name__}' for field '{name}'.")
+            raise TypeError(
+                f"Unsupported schema entry type '{type(entry).__name__}' for field '{name}'."
+            )
 
     return pa.schema(fields)
 
@@ -162,7 +190,9 @@ def build_tensor_array(
     return pa.ExtensionArray.from_storage(tensor_type, storage)
 
 
-def build_ragged_array(chunks: Sequence[Optional[np.ndarray]], dtype: np.dtype) -> pa.ListArray:
+def build_ragged_array(
+    chunks: Sequence[Optional[np.ndarray]], dtype: np.dtype
+) -> pa.ListArray:
     """Compile a list of variable-length NumPy arrays into an Arrow ListArray using offsets and validity bitmask."""
     offsets = [0]
     valid_chunks: List[np.ndarray] = []
@@ -227,12 +257,18 @@ def build_multidim_ragged_array(
     flat = np.concatenate(valid_flats) if valid_flats else np.empty(0, dtype=dtype)
     pa_flat = pa.array(flat, type=pa.from_numpy_dtype(dtype))
     if len(offsets_1) > 1:
-        pa_inner = pa.ListArray.from_arrays(pa.array(offsets_1, type=pa.int32()), pa_flat)
+        pa_inner = pa.ListArray.from_arrays(
+            pa.array(offsets_1, type=pa.int32()), pa_flat
+        )
         pa_mask = pa.array(mask_0, type=pa.bool_()) if any(mask_0) else None
-        return pa.ListArray.from_arrays(pa.array(offsets_0, type=pa.int32()), pa_inner, mask=pa_mask)
+        return pa.ListArray.from_arrays(
+            pa.array(offsets_0, type=pa.int32()), pa_inner, mask=pa_mask
+        )
     else:
         pa_mask = pa.array(mask_0, type=pa.bool_()) if any(mask_0) else None
-        return pa.ListArray.from_arrays(pa.array(offsets_0, type=pa.int32()), pa_flat, mask=pa_mask)
+        return pa.ListArray.from_arrays(
+            pa.array(offsets_0, type=pa.int32()), pa_flat, mask=pa_mask
+        )
 
 
 def is_regular_awkward(arr: ak.Array) -> bool:
@@ -248,9 +284,31 @@ def is_regular_awkward(arr: ak.Array) -> bool:
     return True
 
 
+def _normalize_offset_dims(offset: Any) -> Tuple[IndexType, ...]:
+    match offset:
+        case KeyPath() as kp:
+            return kp.indices
+        case tuple() as t:
+            return t
+        case list() as l:
+            return tuple(l)
+        case None:
+            return ()
+        case int() | slice() | np.ndarray():
+            return (offset,)
+        case _ if isinstance(offset, Sequence):
+            return tuple(offset)
+        case _:
+            return ()
+
+
 def read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Any) -> Any:
     """Resolve a read on a RaggedArraySetEntry from an Awkward array slice."""
-    if offset.is_element_index:
+    dims = _normalize_offset_dims(offset)
+    is_element_index = len(dims) > 0 and all(isinstance(d, int) for d in dims)
+    is_empty = len(dims) == 0
+
+    if is_element_index:
         if isinstance(sliced, ak.Array) and is_regular_awkward(sliced):
             return ak.to_numpy(sliced)
         return sliced
@@ -259,7 +317,7 @@ def read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Any) -> Any:
         isinstance(sliced, ak.Array)
         and sliced.ndim == 2
         and not np.issubdtype(entry.dtype, np.complexfloating)
-        and (offset.is_empty or (len(offset) == 1 and isinstance(offset[0], slice)))
+        and (is_empty or (len(dims) == 1 and isinstance(dims[0], slice)))
     ):
         pa_arr = ak.to_arrow(sliced, extensionarray=False)
         if isinstance(pa_arr, pa.ChunkedArray):
@@ -351,15 +409,13 @@ def rewrap_extension_after_compute(
     return arr
 
 
-def slice_arrow_array(
-    arr: pa.Array, offset: Any
-) -> pa.Array:
+def slice_arrow_array(arr: pa.Array, offset: Any) -> pa.Array:
     """Apply multi-dimensional offset tuple using PyArrow slicing and pc.list_slice."""
-    offset_val = Offset(offset)
-    if offset_val.is_empty:
+    dims = _normalize_offset_dims(offset)
+    if not dims:
         return arr
 
-    first, *inner_offsets = offset_val.dims
+    first, *inner_offsets = dims
 
     # 1. Dimension 0 (Batch / Row level)
     match first:
@@ -429,5 +485,3 @@ _unwrap_extension_for_compute = unwrap_extension_for_compute
 _rewrap_extension_after_compute = rewrap_extension_after_compute
 _slice_arrow_array = slice_arrow_array
 _arrow_to_numpy = arrow_to_numpy
-
-

@@ -38,14 +38,20 @@ def test_chunk_single_elements_into_set():
     sink_node = source.chunk(3).sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
 
     stream.send(items=B.Set[Particle]([p1]))
     stream.send(items=B.Set[Particle]([p2]))
     assert len(received) == 0  # Not enough items yet
 
-    p3 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3))
+    p3 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3)
+    )
     stream.send(items=B.Set[Particle]([p3]))
 
     assert len(received) == 1
@@ -67,7 +73,9 @@ def test_chunk_rechunk_large_set_into_small_sets():
 
     # Emit 6 single-element Set containers
     for i in range(1, 7):
-        p = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + i, metadata=Metadata(foo=i))
+        p = Particle(
+            pixels=np.zeros([256, 256], dtype=np.float32) + i, metadata=Metadata(foo=i)
+        )
         stream.send(items=B.Set[Particle]([p]))
 
     # Should have split the 6-element set into 3 smaller sets of capacity 2
@@ -89,7 +97,9 @@ def test_chunk_large_number_of_elements():
     stream = Pipeline.from_sink(sink_node)
 
     for i in range(1, 1501):
-        p = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + i, metadata=Metadata(foo=i))
+        p = Particle(
+            pixels=np.zeros([256, 256], dtype=np.float32) + i, metadata=Metadata(foo=i)
+        )
         stream.send(items=B.Set[Particle]([p]))
 
     assert len(received) == 1
@@ -101,15 +111,14 @@ def test_map_op():
 
     source = Source("numbers")
     sink_node = (
-        source
-        .map(lambda x: x + 10)
+        source.map(lambda x: x + 10)
         .map(lambda x: x * 2)
         .sink(lambda x: received.append(x))
     )
 
     stream = Pipeline.from_sink(sink_node)
-    stream.send(numbers=5)   # 5 -> 15 -> 30
-    stream.send(numbers=1)   # 1 -> 11 -> 22
+    stream.send(numbers=5)  # 5 -> 15 -> 30
+    stream.send(numbers=1)  # 1 -> 11 -> 22
 
     assert received == [30, 22]
 
@@ -150,8 +159,12 @@ def test_chunk_op_flush_partial_set():
     sink_node = source.chunk(5).sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
 
     stream.send(items=B.Set[Particle]([p1]))
     stream.send(items=B.Set[Particle]([p2]))
@@ -187,16 +200,28 @@ def test_min_chunk_buffers_and_emits_complete_set():
     sink_node = source.min_chunk(5).sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
 
     stream.send(items=B.Set[Particle]([p1, p2]))
     assert len(received) == 0  # 2 elements < 5 -> buffered
 
-    p3 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3))
-    p4 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 4.0, metadata=Metadata(foo=4))
-    p5 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 5.0, metadata=Metadata(foo=5))
-    p6 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 6.0, metadata=Metadata(foo=6))
+    p3 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3)
+    )
+    p4 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 4.0, metadata=Metadata(foo=4)
+    )
+    p5 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 5.0, metadata=Metadata(foo=5)
+    )
+    p6 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 6.0, metadata=Metadata(foo=6)
+    )
 
     # Send set of 4 (total capacity = 2 + 4 = 6 >= 5) -> emits complete set of 6 without splitting
     stream.send(items=B.Set[Particle]([p3, p4, p5, p6]))
@@ -214,8 +239,12 @@ def test_min_chunk_flush():
     sink_node = source.min_chunk(5).sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
 
     stream.send(items=B.Set[Particle]([p1, p2]))
     assert len(received) == 0  # 2 elements < 5 -> buffered
@@ -235,10 +264,18 @@ def test_collect_buffers_emits_once_and_ignores_subsequent_items():
     sink_node = source.collect(5).sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
-    p3 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3))
-    p4 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 4.0, metadata=Metadata(foo=4))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
+    p3 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3)
+    )
+    p4 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 4.0, metadata=Metadata(foo=4)
+    )
 
     # Send 2 elements (2 < 5) -> buffered
     stream.send(items=B.Set[Particle]([p1, p2]))
@@ -248,8 +285,12 @@ def test_collect_buffers_emits_once_and_ignores_subsequent_items():
     stream.send(items=B.Set[Particle]([p3, p4]))
     assert len(received) == 0
 
-    p5 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 5.0, metadata=Metadata(foo=5))
-    p6 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 6.0, metadata=Metadata(foo=6))
+    p5 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 5.0, metadata=Metadata(foo=5)
+    )
+    p6 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 6.0, metadata=Metadata(foo=6)
+    )
 
     # Send 2 elements (total 4 + 2 = 6 >= 5 threshold reached) -> emits concatenated set truncated to count 5
     stream.send(items=B.Set[Particle]([p5, p6]))
@@ -259,7 +300,9 @@ def test_collect_buffers_emits_once_and_ignores_subsequent_items():
     assert len(result) == 5
 
     # Subsequent sends after threshold reached should be ignored
-    p7 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 7.0, metadata=Metadata(foo=7))
+    p7 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 7.0, metadata=Metadata(foo=7)
+    )
     stream.send(items=B.Set[Particle]([p7]))
     assert len(received) == 1
 
@@ -272,7 +315,10 @@ def test_collect_single_large_set_truncated_to_count():
     stream = Pipeline.from_sink(sink_node)
 
     particles = [
-        Particle(pixels=np.zeros([256, 256], dtype=np.float32) + float(i), metadata=Metadata(foo=i))
+        Particle(
+            pixels=np.zeros([256, 256], dtype=np.float32) + float(i),
+            metadata=Metadata(foo=i),
+        )
         for i in range(1, 10)
     ]
 
@@ -294,8 +340,12 @@ def test_collect_flush_before_threshold():
     sink_node = source.collect(5).sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
 
     stream.send(items=B.Set[Particle]([p1, p2]))
     assert len(received) == 0
@@ -315,9 +365,15 @@ def test_collect_count_none_buffers_until_flush():
     sink_node = source.collect(None).sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
-    p3 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
+    p3 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3)
+    )
 
     stream.send(items=B.Set[Particle]([p1]))
     stream.send(items=B.Set[Particle]([p2, p3]))
@@ -376,7 +432,12 @@ def test_combine_op_buffers_pre_emission_items():
     assert received == [(10, "trained"), (20, "trained"), (30, "trained")]
 
     stream.send(a=40)
-    assert received == [(10, "trained"), (20, "trained"), (30, "trained"), (40, "trained")]
+    assert received == [
+        (10, "trained"),
+        (20, "trained"),
+        (30, "trained"),
+        (40, "trained"),
+    ]
 
 
 def test_flatten_op_unrolls_set():
@@ -386,9 +447,15 @@ def test_flatten_op_unrolls_set():
     sink_node = source.flatten().sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
-    p3 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
+    p3 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 3.0, metadata=Metadata(foo=3)
+    )
 
     stream.send(items=B.Set[Particle]([p1, p2]))
     assert len(received) == 2
@@ -429,8 +496,12 @@ def test_flatten_op_flush_lifecycle():
     sink_node = source.flatten().sink(lambda x: received.append(x))
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
 
     stream.send(items=B.Set[Particle]([p1, p2]))
     assert len(received) == 2
@@ -445,11 +516,17 @@ def test_flatten_op_flush_lifecycle():
 
 def test_flatten_op_invalid_type_raises():
     op = FlattenOp()
-    with pytest.raises(TypeError, match="FlattenOp expected an iterable or struct.Set, got int"):
+    with pytest.raises(
+        TypeError, match="FlattenOp expected an iterable or struct.Set, got int"
+    ):
         op._prepare_unroll(42)
 
-    with pytest.raises(TypeError, match="FlattenOp expected an iterable or struct.Set, got Particle"):
-        p = Particle(pixels=np.zeros([256, 256], dtype=np.float32), metadata=Metadata(foo=1))
+    with pytest.raises(
+        TypeError, match="FlattenOp expected an iterable or struct.Set, got Particle"
+    ):
+        p = Particle(
+            pixels=np.zeros([256, 256], dtype=np.float32), metadata=Metadata(foo=1)
+        )
         op._prepare_unroll(p)
 
 
@@ -462,17 +539,18 @@ def test_basic_accumulate():
     received = []
 
     source = Source("items")
-    sink_node = (
-        source.accumulate(
-            _acc_fn,
-        )
-        .sink(lambda x: received.append(x))
-    )
+    sink_node = source.accumulate(
+        _acc_fn,
+    ).sink(lambda x: received.append(x))
 
     stream = Pipeline.from_sink(sink_node)
 
-    p1 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1))
-    p2 = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2))
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 2.0, metadata=Metadata(foo=2)
+    )
 
     stream.send(items=B.Set[Particle]([p1]))
     stream.send(items=B.Set[Particle]([p2]))
@@ -501,7 +579,7 @@ def test_basic_accumulate():
 #         return state, new_value
 
 #     received = []
-    
+
 #     source = Source("items")
 #     sink_node = (
 #         source.accumulate(
@@ -514,14 +592,11 @@ def test_basic_accumulate():
 #     stream = Pipeline.from_sink(sink_node)
 
 #     stream.send(items=(0, B.Set[Sample]([Sample(label=0)])))
-    
 
 
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
+
     configure_default_env()
 
-    test_basic_accumulate_start_value()
-
-
-
+    test_basic_accumulate()
