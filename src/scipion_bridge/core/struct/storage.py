@@ -15,55 +15,16 @@ pc: Any = _pc
 
 from .exceptions import UninitializedFieldError
 from .schema import (
-    Schema,
     Entry,
     SetEntryBase,
     ArrayEntryBase,
-    ArrayEntry,
-    ArraySetEntry,
-    RaggedArraySetEntry,
     SchemaEntry,
     SchemaSetEntry,
 )
 from .utils.arrow_utils import (
     RaggedArrayView,
-    build_tensor_array,
-    build_ragged_array,
-    build_multidim_ragged_array,
-    _read_ragged,
-    _get_nested_arrow_field,
-    _slice_arrow_array,
-    _arrow_to_numpy,
 )
 from .key_path import IndexType, KeyPath
-
-
-class _StorageEngine(abc.ABC):
-    """Abstract interface for polymorphic storage engines."""
-
-    @abc.abstractmethod
-    def read(
-        self, key: KeyPath, entry: Entry,
-    ) -> Any: ...
-
-    @abc.abstractmethod
-    def write(
-        self, key: KeyPath, entry: Entry, data: Any,
-    ) -> None: ...
-
-    @abc.abstractmethod
-    def to_record_batch(self) -> pa.RecordBatch: ...
-
-    @abc.abstractmethod
-    def __contains__(self, key: KeyPath) -> bool: ...
-
-    @property
-    @abc.abstractmethod
-    def root_entry(self) -> SchemaEntry: ...
-
-    @property
-    @abc.abstractmethod
-    def is_frozen(self) -> bool: ...
 
 
 class _BaseStorage(abc.ABC):

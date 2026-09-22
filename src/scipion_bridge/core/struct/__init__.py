@@ -15,7 +15,6 @@ from .set import Set, concat
 from .key_path import KeyPath, IndexType
 from .storage import (
     _BaseStorage,
-    _StorageEngine,
     StorageView,
 )
 from .utils.arrow_utils import RaggedArrayView
@@ -34,7 +33,6 @@ __all__ = [
     "IndexType",
     "Schema",
     "_BaseStorage",
-    "_StorageEngine",
     "StorageView",
     "ArrayEntryBase",
     "ArrayEntry",
