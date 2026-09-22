@@ -6,6 +6,7 @@ import scipion_bridge.core.typed.resolve as resolve
 from scipion_bridge.core.typed.resolve import ScopedPathfindingContainer as Container
 
 from typing import Optional
+import awkward as ak
 import numpy as np
 
 import pytest
@@ -56,7 +57,6 @@ def test_unresolvable_types_error():
             {__name__}, float, str, local_scope_name="__main__"
         )
         _ = func(2.5)
-
 
 
 def test_resolved_func():
@@ -270,9 +270,7 @@ def test_resolve_namespaces_recursive():
 
     @sb.resolver
     def resolve_tuple_to_str_underline(value: tuple) -> str:
-        return "_".join(
-            [sb.resolve(v, astype=str) for v in value]
-        )
+        return "_".join([sb.resolve(v, astype=str) for v in value])
 
     def bar():
         @sb.resolver
@@ -364,28 +362,29 @@ def test_resolver_with_metadata_multistep():
     assert res.text == "custom_tag_10"
 
 
-def test_resolve_ragged_view_to_ndarray():
+def test_resolve_awkward_to_ndarray():
     class Item(sb.Struct):
         embeddings: sb.Array[float] = sb.Array(shape=(None,))
 
-    s = sb.Set[Item](capacity=4)
-    data = np.arange(4 * 6, dtype=np.float64).reshape(4, 6)
-    s["embeddings"] = data
+    s = sb.Set[Item](capacity=2)
+    s[0].embeddings = np.array([1.0, 2.0, 3.0])
+    s[1].embeddings = np.array([4.0, 5.0, 6.0])
 
     ragged = s["embeddings"]
-    assert isinstance(ragged, sb.RaggedArrayView)
+    assert isinstance(ragged, ak.Array)
 
-    # Direct resolution from RaggedArrayView to np.ndarray
+    expected = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+    # Direct resolution from ak.Array to np.ndarray
     resolved = sb.resolve(ragged, astype=np.ndarray)
     assert isinstance(resolved, np.ndarray)
-    assert np.allclose(resolved, data)
+    assert np.allclose(resolved, expected)
 
-    # Test .to_numpy() and np.asarray()
-    assert np.allclose(ragged.to_numpy(), data)
-    assert np.allclose(np.asarray(ragged), data)
+    # Test ak.to_numpy()
+    assert np.allclose(ak.to_numpy(ragged), expected)
 
 
-def test_ragged_view_irregular_lengths_raise():
+def test_awkward_irregular_lengths_raise():
     class Item(sb.Struct):
         embeddings: sb.Array[float] = sb.Array(shape=(None,))
 
@@ -394,13 +393,11 @@ def test_ragged_view_irregular_lengths_raise():
     s[1].embeddings = np.array([3.0, 4.0, 5.0])
 
     ragged = s["embeddings"]
-    with pytest.raises(ValueError, match="subarray lengths are not uniform"):
-        ragged.to_numpy() # type: ignore
+    with pytest.raises(ValueError):
+        ak.to_numpy(ragged)
 
-    with pytest.raises(ValueError, match="subarray lengths are not uniform"):
+    with pytest.raises(ValueError):
         sb.resolve(ragged, astype=np.ndarray)
-
-
 
 
 if __name__ == "__main__":
@@ -408,6 +405,3 @@ if __name__ == "__main__":
     test_resolve_namespaces_recursive()
     test_resolver_with_metadata_option()
     test_resolver_with_metadata_multistep()
-
-
-

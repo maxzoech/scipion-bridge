@@ -1,7 +1,20 @@
-from .core.typed.resolve import resolver, resolve_params, resolve, lift_resolvers, Resolve
+from .core.typed.resolve import (
+    resolver,
+    resolve_params,
+    resolve,
+    lift_resolvers,
+    Resolve,
+)
 
 from .core.typed import proxy
-from .core.typed.proxy import proxify, Proxy, ProxyGroup, Output, ResolveProxy, namedproxy
+from .core.typed.proxy import (
+    proxify,
+    Proxy,
+    ProxyGroup,
+    Output,
+    ResolveProxy,
+    namedproxy,
+)
 from .single_particle.proxies import ParticleStackProxy, StarfileProxy, MRCStackProxy
 from .core.environment.domain import Domain
 from .core.utils.shell import shell_command
@@ -14,9 +27,8 @@ from .core.struct import Struct, Set, concat, Array, Arg, Dim
 
 from .core.streaming.ops import Op, FlushSignal, FLUSH
 
-from .core.struct import RaggedArrayView
-
 from .core.typed import core_resolvers
+
 lift_resolvers(core_resolvers, proxy)
 
 __all__ = [
@@ -44,7 +56,6 @@ __all__ = [
     "Set",
     "concat",
     "Array",
-    "RaggedArrayView",
     "Op",
     "FlushSignal",
     "FLUSH",

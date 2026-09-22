@@ -21,9 +21,6 @@ from .schema import (
     SchemaEntry,
     SchemaSetEntry,
 )
-from .utils.arrow_utils import (
-    RaggedArrayView,
-)
 from .key_path import IndexType, KeyPath
 
 
@@ -57,7 +54,7 @@ class _BaseStorage(abc.ABC):
         self.root: KeyPath = root
 
     def view(self, path: KeyPath) -> StorageView:
-        assert path.path[:len(self.root)] == self.root.path
+        assert path.path[: len(self.root)] == self.root.path
 
         return StorageView(
             path,
@@ -74,9 +71,7 @@ class _BaseStorage(abc.ABC):
             StorageView: A view into the parent storage rooted at the appended path.
         """
 
-        return self.view(
-            self.root.append(name)
-        )
+        return self.view(self.root.append(name))
 
     def narrow_index(self, index: int, length: Optional[int] = None) -> StorageView:
         """Create a child storage view focused on a single scalar item along the active dimension.
@@ -89,9 +84,7 @@ class _BaseStorage(abc.ABC):
             StorageView: A view focused on the indexed element.
         """
         effective_len = length if length is not None else self.get_length()
-        return self.view(
-            self.root.narrow_index(index, length=effective_len)
-        )
+        return self.view(self.root.narrow_index(index, length=effective_len))
 
     def narrow_slice(self, index: slice, length: Optional[int] = None) -> StorageView:
         """Create a child storage view restricted to a sub-slice along the active dimension.
@@ -104,9 +97,7 @@ class _BaseStorage(abc.ABC):
             StorageView: A view restricted to the sub-sliced window.
         """
         effective_len = length if length is not None else self.get_length()
-        return self.view(
-            self.root.narrow_slice(index, length=effective_len)
-        )
+        return self.view(self.root.narrow_slice(index, length=effective_len))
 
     def narrow_indices(
         self,
@@ -115,9 +106,7 @@ class _BaseStorage(abc.ABC):
     ) -> StorageView:
         """Create a child storage view restricted to specified integer indices along the active dimension."""
         effective_len = length if length is not None else self.get_length()
-        return self.view(
-            self.root.narrow_indices(indices, length=effective_len)
-        )
+        return self.view(self.root.narrow_indices(indices, length=effective_len))
 
     def narrow_mask(
         self,
@@ -126,9 +115,7 @@ class _BaseStorage(abc.ABC):
     ) -> StorageView:
         """Create a child storage view filtered by a boolean mask along the active dimension."""
         effective_len = length if length is not None else self.get_length()
-        return self.view(
-            self.root.narrow_mask(mask, length=effective_len)
-        )
+        return self.view(self.root.narrow_mask(mask, length=effective_len))
 
     @property
     def is_view(self) -> bool:
@@ -138,9 +125,8 @@ class _BaseStorage(abc.ABC):
     def root_storage(self) -> "_BaseStorage":
         if self.parent is None:
             return self
-        
-        return self.parent.root_storage
 
+        return self.parent.root_storage
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
         """Return active sequence length under key/root, or None if uninitialized."""
@@ -184,8 +170,7 @@ class _BaseStorage(abc.ABC):
 
             try:
                 buffers = [
-                    st.read(st.root.extend(path), target_entry)
-                    for st in all_storages
+                    st.read(st.root.extend(path), target_entry) for st in all_storages
                 ]
             except UninitializedFieldError:
                 init_mask = []
@@ -221,7 +206,7 @@ class StorageView(_BaseStorage):
 
     Schema-based types like `Struct` or `Set` are internally backed by an array
     storage (e.g. numpy or Arrow).
-    
+
     """
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
@@ -233,7 +218,6 @@ class StorageView(_BaseStorage):
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         return self.root_storage.write(key, entry, data)
-
 
 
 class StagingEngine(_BaseStorage):
@@ -269,7 +253,8 @@ class StagingEngine(_BaseStorage):
 
     @staticmethod
     def _get_item_from_index(
-        container: Any, effective_idx: Tuple[IndexType, ...],
+        container: Any,
+        effective_idx: Tuple[IndexType, ...],
     ) -> Any:
         curr = container
         for idx in effective_idx:
@@ -376,11 +361,10 @@ class StagingEngine(_BaseStorage):
 
         # Guard: pending chunks with scalar index → return directly
         if field_key in self._chunks:
-            if effective_idx and all(
-                isinstance(idx, int) for idx in effective_idx
-            ):
+            if effective_idx and all(isinstance(idx, int) for idx in effective_idx):
                 val = self._get_item_from_index(
-                    self._chunks[field_key], effective_idx,
+                    self._chunks[field_key],
+                    effective_idx,
                 )
                 if val is None:
                     raise UninitializedFieldError(
@@ -397,41 +381,9 @@ class StagingEngine(_BaseStorage):
         buffer = self._data[field_key]
 
         if not effective_idx:
-            return self._read_full_column(buffer, entry)
-
-        return self._read_indexed(buffer, effective_idx, key)
-
-    def _read_full_column(
-        self,
-        buffer: Union[np.ndarray, ak.Array],
-        entry: Entry,
-    ) -> Any:
-        """Read an entire column, wrapping dynamic entries as RaggedArrayView when possible."""
-        if not (
-            isinstance(entry, ArrayEntryBase)
-            and not entry.is_static
-            and isinstance(buffer, (ak.Array, np.ndarray))
-        ):
             return buffer
 
-        try:
-            ak_arr = (
-                buffer
-                if isinstance(buffer, ak.Array)
-                else ak.Array(buffer)
-            )
-            pa_arr = ak.to_arrow(ak_arr, extensionarray=False)
-            if isinstance(pa_arr, pa.ChunkedArray):
-                pa_arr = pa_arr.combine_chunks()
-            if isinstance(
-                pa_arr,
-                (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray),
-            ):
-                return RaggedArrayView(pa_arr, entry.dtype)
-        except (pa.ArrowInvalid, ValueError, TypeError):
-            pass
-
-        return buffer
+        return self._read_indexed(buffer, effective_idx, key)
 
     @staticmethod
     def _read_indexed(
@@ -465,7 +417,11 @@ class StagingEngine(_BaseStorage):
 
         if entry.is_static:
             return self._write_indexed_static(
-                field_key, entry, effective_idx, data, key,
+                field_key,
+                entry,
+                effective_idx,
+                data,
+                key,
             )
 
         return self._write_indexed_dynamic(field_key, entry, effective_idx, data)
@@ -488,7 +444,9 @@ class StagingEngine(_BaseStorage):
             if entry.capacity is None and __debug__ == True:
                 container_prefix = field_key[:-1]
                 for other_key, other_buffer in self._data.items():
-                    if other_key[:-1] == container_prefix and len(other_key) == len(field_key):
+                    if other_key[:-1] == container_prefix and len(other_key) == len(
+                        field_key
+                    ):
                         if data_len != len(other_buffer):
                             raise ValueError(
                                 f"Length mismatch for key '{key}': data length {data_len} does not match existing column '{other_key[-1]}' length {len(other_buffer)}.",
@@ -574,7 +532,9 @@ class StagingEngine(_BaseStorage):
                 first_dtype = getattr(first, "dtype", None)
                 if first_dtype is not None:
                     if first_dtype != object and not np.can_cast(
-                        first_dtype, target_dtype, casting="same_kind",
+                        first_dtype,
+                        target_dtype,
+                        casting="same_kind",
                     ):
                         raise TypeError(
                             f"Cannot cast data of dtype '{first_dtype}' to field '{key}' dtype '{target_dtype}'.",
@@ -592,14 +552,19 @@ class StagingEngine(_BaseStorage):
                 return
 
         if data_dtype != object and not np.can_cast(
-            data_dtype, target_dtype, casting="same_kind",
+            data_dtype,
+            target_dtype,
+            casting="same_kind",
         ):
             raise TypeError(
                 f"Cannot cast data of dtype '{data_dtype}' to field '{key}' dtype '{target_dtype}'.",
             )
 
     def _allocate_buffer(
-        self, data: Any, entry: Entry, key: KeyPath,
+        self,
+        data: Any,
+        entry: Entry,
+        key: KeyPath,
     ) -> Union[np.ndarray, ak.Array]:
         assert isinstance(entry, ArrayEntryBase)
         cap = entry.capacity if isinstance(entry, SetEntryBase) else None
@@ -709,7 +674,7 @@ class StagingEngine(_BaseStorage):
 
             case (shape, target) if (
                 len(shape) >= len(target)
-                and shape[len(shape) - len(target):] == target
+                and shape[len(shape) - len(target) :] == target
             ):
                 return arr
 
@@ -718,18 +683,19 @@ class StagingEngine(_BaseStorage):
                     f"Shape mismatch for static field '{key}': expected {entry_shape} for element.",
                 )
 
-    def _fits_numpy_buffer(self, buffer: np.ndarray, effective_idx: Tuple[IndexType, ...], data: Any) -> bool:
+    def _fits_numpy_buffer(
+        self, buffer: np.ndarray, effective_idx: Tuple[IndexType, ...], data: Any
+    ) -> bool:
         try:
             arr_data = np.asarray(data, dtype=buffer.dtype)
             if arr_data.dtype == object:
                 return False
-            
+
             target_shape = buffer[effective_idx].shape
             np.broadcast_shapes(target_shape, arr_data.shape)
             return True
         except (ValueError, TypeError, IndexError):
             return False
-
 
     def _infer_outer_dims(
         self, entry: Entry, effective_idx: Tuple[IndexType, ...]
@@ -738,7 +704,9 @@ class StagingEngine(_BaseStorage):
         for i, idx in enumerate(effective_idx):
             dim_cap = (
                 entry.capacity
-                if i == 0 and isinstance(entry, SetEntryBase) and entry.capacity is not None
+                if i == 0
+                and isinstance(entry, SetEntryBase)
+                and entry.capacity is not None
                 else 0
             )
             match idx:
@@ -780,7 +748,10 @@ class StagingEngine(_BaseStorage):
                     pass
 
         if expanded:
-            new_buffer = np.zeros(tuple(new_shape), dtype=buffer.dtype,)
+            new_buffer = np.zeros(
+                tuple(new_shape),
+                dtype=buffer.dtype,
+            )
             slices = tuple(slice(0, s) for s in buffer.shape)
             new_buffer[slices] = buffer
             self._data[field_key] = new_buffer
@@ -788,8 +759,9 @@ class StagingEngine(_BaseStorage):
 
         return buffer
 
-
-    def _traverse_list_update(self, lst: list, effective_idx: Tuple[IndexType, ...], data: Any) -> None:
+    def _traverse_list_update(
+        self, lst: list, effective_idx: Tuple[IndexType, ...], data: Any
+    ) -> None:
         match effective_idx:
             case (np.ndarray() as arr,):
                 for i, d in zip(arr, data):
@@ -808,7 +780,6 @@ class StagingEngine(_BaseStorage):
 
             case (int() as idx, *rest):
                 self._traverse_list_update(lst[idx], tuple(rest), data)
-
 
 
 # class ArrayStorage(_BaseStorage):

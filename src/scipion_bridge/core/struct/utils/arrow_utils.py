@@ -14,138 +14,6 @@ from ..key_path import IndexType, KeyPath
 from ..exceptions import UninitializedFieldError
 
 
-class RaggedArrayView(Sequence[Any]):
-    """A zero-copy multi-axis sequence view over single- or multi-level Apache Arrow ListArrays."""
-
-    def __init__(
-        self,
-        list_array: Union[pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray],
-        dtype: np.dtype,
-    ) -> None:
-        self._list_array = list_array
-        self.dtype = np.dtype(dtype)
-
-    def __len__(self) -> int:
-        return len(self._list_array)
-
-    def __getitem__(
-        self, item: Union[int, slice, Tuple[Union[int, slice], ...]]
-    ) -> Any:
-        match item:
-            case ():
-                return self
-
-            case (first, *rest):
-                sub = self[first]
-                return sub[tuple(rest)] if rest else sub
-
-            case slice():
-                return RaggedArrayView(self._list_array[item], self.dtype)
-
-            case int(idx):
-                norm_idx = idx + len(self) if idx < 0 else idx
-                if norm_idx < 0 or norm_idx >= len(self):
-                    raise IndexError(
-                        f"Index {idx} out of range for RaggedArrayView of length {len(self)}."
-                    )
-
-                scalar = self._list_array[norm_idx]
-                if not scalar.is_valid:
-                    raise UninitializedFieldError(
-                        f"Cannot read unpopulated or null value at index {norm_idx}."
-                    )
-
-                match scalar.values:
-                    case pa.ListArray() | pa.LargeListArray() | pa.FixedSizeListArray():
-                        try:
-                            return ak.to_numpy(ak.from_arrow(scalar.values))
-                        except (ValueError, TypeError):
-                            return RaggedArrayView(scalar.values, self.dtype)
-                    case _:
-                        return scalar.values.to_numpy(zero_copy_only=False)
-
-            case _:
-                raise TypeError(
-                    f"Invalid RaggedArrayView index type '{type(item).__name__}'."
-                )
-
-    def __iter__(self):
-        for i in range(len(self)):
-            yield self[i]
-
-    def to_list(self) -> List[Any]:
-        return list(self)
-
-    def __eq__(self, other: Any) -> bool:
-        if isinstance(other, (RaggedArrayView, list, tuple)):
-            if len(self) != len(other):
-                return False
-            return all(
-                (
-                    np.array_equal(a, b)
-                    if isinstance(a, np.ndarray) and isinstance(b, np.ndarray)
-                    else a == b
-                )
-                for a, b in zip(self, other)
-            )
-        return False
-
-    def to_numpy(self) -> np.ndarray:
-        """Convert the ragged array view to a regular NumPy ndarray.
-
-        Raises:
-            ValueError: If subarray lengths are irregular or contain null values.
-        """
-        try:
-            arr = ak.to_numpy(ak.from_arrow(self._list_array))
-        except ValueError as e:
-            raise ValueError(
-                f"Cannot resolve {type(self).__name__} to regular NumPy ndarray: "
-                "subarray lengths are not uniform."
-            ) from e
-
-        if isinstance(arr, np.ma.MaskedArray):
-            if np.ma.is_masked(arr):
-                raise ValueError(
-                    f"Cannot resolve {type(self).__name__} to NumPy ndarray: "
-                    "data contains null or uninitialized values."
-                )
-            return arr.data
-        return arr
-
-    def __array__(
-        self, dtype: Optional[np.dtype] = None, copy: Optional[bool] = None
-    ) -> np.ndarray:
-        arr = self.to_numpy()
-        if dtype is not None and arr.dtype != dtype:
-            return arr.astype(dtype, copy=copy if copy is not None else True)
-        elif copy:
-            return arr.copy()
-        else:
-            return arr
-
-    def __repr__(self) -> str:
-        if len(self) <= 3:
-            shapes = [
-                tuple(arr.shape) if isinstance(arr, np.ndarray) else f"len={len(arr)}"
-                for arr in self
-            ]
-            return (
-                f"RaggedArrayView(len={len(self)}, shapes={shapes}, dtype={self.dtype})"
-            )
-        shapes = [
-            (
-                tuple(self[i].shape)
-                if isinstance(self[i], np.ndarray)
-                else f"len={len(self[i])}"
-            )
-            for i in range(3)
-        ]
-        return (
-            f"RaggedArrayView(len={len(self)}, shapes={shapes}..., dtype={self.dtype})"
-        )
-
-
 def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
     """Recursively convert a scipion-bridge Schema into a pyarrow.Schema."""
     fields: List[pa.Field] = []
@@ -306,24 +174,11 @@ def read_ragged(sliced: Any, entry: RaggedArraySetEntry, offset: Any) -> Any:
     """Resolve a read on a RaggedArraySetEntry from an Awkward array slice."""
     dims = _normalize_offset_dims(offset)
     is_element_index = len(dims) > 0 and all(isinstance(d, int) for d in dims)
-    is_empty = len(dims) == 0
 
     if is_element_index:
         if isinstance(sliced, ak.Array) and is_regular_awkward(sliced):
             return ak.to_numpy(sliced)
         return sliced
-
-    if (
-        isinstance(sliced, ak.Array)
-        and sliced.ndim == 2
-        and not np.issubdtype(entry.dtype, np.complexfloating)
-        and (is_empty or (len(dims) == 1 and isinstance(dims[0], slice)))
-    ):
-        pa_arr = ak.to_arrow(sliced, extensionarray=False)
-        if isinstance(pa_arr, pa.ChunkedArray):
-            pa_arr = pa_arr.combine_chunks()
-        if isinstance(pa_arr, (pa.ListArray, pa.LargeListArray)):
-            return RaggedArrayView(pa_arr, entry.dtype)
 
     return sliced
 

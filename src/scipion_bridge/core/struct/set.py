@@ -36,7 +36,6 @@ from .schema import (
 )
 from .key_path import KeyPath
 from .storage import _BaseStorage, StagingEngine, StorageView
-from .utils.arrow_utils import RaggedArrayView
 from ..utils.marker import Marker
 
 T = TypeVar("T", bound=Struct)
@@ -126,7 +125,7 @@ class Set(Marker[T], SchemaConvertible):
                 item.storage.read(item.storage.root.extend(path), entry)
                 for item in items
             ]
-            
+
             target_path = self._storage.root.extend(path)
             self._storage.write(target_path, entry, col_chunks)
 
@@ -458,11 +457,7 @@ class Set(Marker[T], SchemaConvertible):
                 assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
                 span = self._active_span
-                new_cap = (
-                    len(range(*index.indices(span)))
-                    if span is not None
-                    else None
-                )
+                new_cap = len(range(*index.indices(span))) if span is not None else None
                 view = self._storage.narrow_slice(index, length=span)
                 return Set[_dt](capacity=new_cap, storage=view)
 

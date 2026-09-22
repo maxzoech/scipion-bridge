@@ -37,6 +37,13 @@ Testing is implemented under the directory `test/` and uses pytests for testing.
 
 Verify that the library is correctly typed with pyright.
 
+Use black for formatting.
+
+Use flake8 for static analysis:
+```
+flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+```
 
 ## Conventions
 `scipion-bridge` is implemented in Python 3.11. When writing code, follow modern

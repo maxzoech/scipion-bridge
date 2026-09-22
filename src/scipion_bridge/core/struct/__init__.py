@@ -17,7 +17,6 @@ from .storage import (
     _BaseStorage,
     StorageView,
 )
-from .utils.arrow_utils import RaggedArrayView
 from .exceptions import UninitializedFieldError
 from .utils import dask_serialization
 
@@ -40,6 +39,5 @@ __all__ = [
     "RaggedArraySetEntry",
     "SchemaEntry",
     "SchemaSetEntry",
-    "RaggedArrayView",
     "UninitializedFieldError",
 ]
