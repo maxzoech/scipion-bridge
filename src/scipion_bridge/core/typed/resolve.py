@@ -1,6 +1,7 @@
 import sys
 import inspect
-import textwrap
+from contextlib import contextmanager
+from contextvars import ContextVar
 import types
 import typing
 import networkx as nx
@@ -8,6 +9,7 @@ import logging
 import warnings
 import time
 from collections import namedtuple
+from collections.abc import Generator
 from functools import wraps, partial
 
 from ..utils.func_params import extract_func_params
@@ -166,33 +168,30 @@ def build_default_container(
     )
 
 
-class resolution_context:
+@contextmanager
+def resolution_context(
+    registry: "Registry", namespace: Set[str], caller_namespace: str
+) -> Generator[ResolveContext]:
+    parent_ctx = _current_ctx.get()
 
-    def __init__(
-        self, registry: "Registry", namespace: Set[str], caller_namespace: str
-    ):
+    if parent_ctx is None:
+        new_ctx = ResolveContext(
+            registry, namespace, caller_namespace, recursion_level=0
+        )
 
-        global CURRENT_CTX
-        self._old_context: Optional[ResolveContext] = CURRENT_CTX
+    else:
+        new_ctx = ResolveContext(
+            parent_ctx.registry,
+            parent_ctx.namespaces,
+            parent_ctx.caller_namespace,
+            recursion_level=parent_ctx.recursion_level + 1,
+        )
 
-        if self._old_context is None:
-            CURRENT_CTX = ResolveContext(
-                registry, namespace, caller_namespace, recursion_level=0
-            )
-        else:
-            CURRENT_CTX = ResolveContext(
-                self._old_context.registry,
-                self._old_context.namespaces,
-                self._old_context.caller_namespace,
-                recursion_level=self._old_context.recursion_level + 1,
-            )
-
-    def __enter__(self):
-        return CURRENT_CTX
-
-    def __exit__(self, *args, **kws):
-        global CURRENT_CTX
-        CURRENT_CTX = self._old_context
+    token = _current_ctx.set(new_ctx)
+    try:
+        yield new_ctx
+    finally:
+        _current_ctx.reset(token)
 
 
 class Registry:
@@ -531,14 +530,13 @@ class Registry:
 
 
 DEFAULT_REGISTRY = Registry()
-CURRENT_CTX: Optional[ResolveContext] = None
-
+_current_ctx: ContextVar[Optional[ResolveContext]] = ContextVar(
+    "_current_ctx", default=None
+)
 
 def current_registry() -> Registry:
-    if CURRENT_CTX:
-        return CURRENT_CTX.registry
-    else:
-        return DEFAULT_REGISTRY
+    ctx = _current_ctx.get()
+    return ctx.registry if ctx is not None else DEFAULT_REGISTRY
 
 
 def resolver(f):
