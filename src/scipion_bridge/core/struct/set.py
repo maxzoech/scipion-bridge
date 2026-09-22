@@ -34,6 +34,7 @@ from .schema import (
     ArraySetEntry,
     RaggedArraySetEntry,
 )
+from .exceptions import UninitializedFieldError
 from .key_path import KeyPath
 from .storage import _BaseStorage, StagingEngine, StorageView
 from ..utils.marker import Marker
@@ -121,9 +122,19 @@ class Set(Marker[T], SchemaConvertible):
         target_schema = self.schema().to_set_schema(capacity=self._capacity)
 
         for path, entry in target_schema.tree_iter():
+            item_paths = [item.storage.root.extend(path) for item in items]
+            init_mask = [p in item.storage for p, item in zip(item_paths, items)]
+
+            if not any(init_mask):
+                continue
+
+            if not all(init_mask):
+                raise UninitializedFieldError(
+                    f"Cannot construct Set from items: field '{path}' is initialized in some items but not others.",
+                )
+
             col_chunks = [
-                item.storage.read(item.storage.root.extend(path), entry)
-                for item in items
+                item.storage.read(p, entry) for p, item in zip(item_paths, items)
             ]
 
             target_path = self._storage.root.extend(path)
@@ -150,12 +161,12 @@ class Set(Marker[T], SchemaConvertible):
     def __set__(self, instance: Any, value: Any) -> None:
         if not isinstance(instance, Struct):
             raise TypeError(
-                f"Expected Struct instance, got '{type(instance).__name__}'."
+                f"Expected Struct instance, got '{type(instance).__name__}'.",
             )
 
         if not isinstance(value, Set):
             raise TypeError(
-                f"Expected Struct instance, got '{type(instance).__name__}'."
+                f"Expected Struct instance, got '{type(instance).__name__}'.",
             )
 
         if self.name is None:
@@ -169,10 +180,11 @@ class Set(Marker[T], SchemaConvertible):
             raise AttributeError
 
         for path, entry in field_entry.schema.tree_iter():
-
             source_path = value._storage.root.extend(path)
-            data = value._storage.read(source_path, entry)
+            if source_path not in value._storage:
+                continue
 
+            data = value._storage.read(source_path, entry)
             target_path = instance.storage.root.append(self.name).extend(path)
             instance.storage.write(target_path, entry, data)
 
@@ -193,6 +205,15 @@ class Set(Marker[T], SchemaConvertible):
     @classmethod
     def schema(cls) -> Schema:
         return cls._bridge_schema
+
+    @classmethod
+    def item_type(cls) -> Type[Struct]:
+        """Return the element Struct type of the Set."""
+        assert (
+            cls._dtype is not None
+        ), "Cannot retrieve item_type from unsubscripted Set"
+        
+        return cls._dtype
 
     @property
     def _active_span(self) -> Optional[int]:

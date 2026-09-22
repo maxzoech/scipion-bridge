@@ -2,6 +2,7 @@ import sys
 import inspect
 import textwrap
 import types
+import typing
 import networkx as nx
 import logging
 import warnings
@@ -248,7 +249,7 @@ class Registry:
                 return
 
         def _add_downcasts(subclass: Type):
-            for weight, dtype in enumerate(subclass.__mro__):
+            for weight, dtype in enumerate(inspect.getmro(subclass)):
                 if subclass == dtype:
                     continue
 
@@ -259,8 +260,6 @@ class Registry:
                     weight=weight,
                     module=__package__,
                 )
-
-                # print(f"Add downcast: {subclass} -> {dtype} in {__package__}, {weight}")
 
         self.graph.add_edge(
             origin,
@@ -354,14 +353,16 @@ class Registry:
                 else:
                     x = step.func(x)  # type: ignore
 
-            if not isinstance(x, target):
+            target_check = get_origin(target) or target
+            if not isinstance(x, target_check):
                 resolve_desc = "\n".join([step.description for step in steps])
+                target_name = getattr(target, "__qualname__", str(target))
 
                 raise TypeError(
-                    f"The resolved output with type '{type(x).__qualname__}' did not match target data type '{target.__qualname__}'; this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\nResolvers used:\n{resolve_desc}"
+                    f"The resolved output with type '{type(x).__qualname__}' did not match target data type '{target_name}'; this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\nResolvers used:\n{resolve_desc}"
                 )
 
-            return x
+            return x  # type: ignore
 
         return resolver_fn
 
@@ -543,10 +544,11 @@ def current_registry() -> Registry:
 def resolver(f):
 
     # TODO: Input validation
-    in_dtype = f.__annotations__["value"]
-    out_dtype = f.__annotations__["return"]
+    hints = typing.get_type_hints(f)
+    in_dtype = hints["value"]
+    out_dtype = hints["return"]
 
-    requires_metadata = "metadata" in f.__annotations__
+    requires_metadata = "metadata" in hints
 
     namespace = Registry._namespace_from_symbol(
         module=f.__module__,

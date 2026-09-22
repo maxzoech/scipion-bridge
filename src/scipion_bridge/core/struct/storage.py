@@ -152,6 +152,14 @@ class _BaseStorage(abc.ABC):
 
         ...
 
+    def is_initialized(self, key: KeyPath) -> bool:
+        """Return True if the field identified by key has been initialized in storage."""
+        return True
+
+    def __contains__(self, key: KeyPath) -> bool:
+        """Enable 'key in storage' membership testing."""
+        return self.is_initialized(key)
+
     def concat(
         self,
         others: Sequence["_BaseStorage"],
@@ -168,23 +176,20 @@ class _BaseStorage(abc.ABC):
             if not isinstance(target_entry, ArrayEntryBase):
                 continue
 
-            try:
-                buffers = [
-                    st.read(st.root.extend(path), target_entry) for st in all_storages
-                ]
-            except UninitializedFieldError:
-                init_mask = []
-                for st in all_storages:
-                    try:
-                        st.read(st.root.extend(path), target_entry)
-                        init_mask.append(True)
-                    except UninitializedFieldError:
-                        init_mask.append(False)
-                if not any(init_mask):
-                    continue
+            st_paths = [st.root.extend(path) for st in all_storages]
+            init_mask = [p in st for p, st in zip(st_paths, all_storages)]
+
+            if not any(init_mask):
+                continue
+
+            if not all(init_mask):
                 raise UninitializedFieldError(
-                    f"Cannot concatenate sets: field '{path}' is initialized in some sets but not others."
+                    f"Cannot concatenate sets: field '{path}' is initialized in some sets but not others.",
                 )
+
+            buffers = [
+                st.read(p, target_entry) for p, st in zip(st_paths, all_storages)
+            ]
 
             if target_entry.is_static:
                 concatenated = np.concatenate(buffers, axis=0)
@@ -208,6 +213,9 @@ class StorageView(_BaseStorage):
     storage (e.g. numpy or Arrow).
 
     """
+
+    def is_initialized(self, key: KeyPath) -> bool:
+        return self.root_storage.is_initialized(key)
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
         target_key = key if key is not None else self.root
@@ -333,6 +341,11 @@ class StagingEngine(_BaseStorage):
             return ak.mask(unflat, mask)
 
         return unflat
+
+    def is_initialized(self, key: KeyPath) -> bool:
+        """Return True if the field identified by key has been initialized in staging."""
+        field_key, _ = self._decompose(key)
+        return field_key in self._data or field_key in self._chunks
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
         """Return the active sequence length of data stored under key or root."""

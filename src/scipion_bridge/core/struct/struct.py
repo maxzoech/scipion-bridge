@@ -28,6 +28,7 @@ from .schema import (
 )
 from ..utils.marker import Marker
 from .storage import _BaseStorage, StagingEngine
+from .exceptions import UninitializedFieldError
 
 
 def _is_supported_scalar_value(cls: Type) -> bool:
@@ -276,7 +277,7 @@ class Array(Marker[T], SchemaConvertible):
         )
         if self.is_scalar:
             return val.item()
-        
+
         return val
 
     def __set__(self, instance: Struct, value: Any) -> None:
@@ -488,11 +489,12 @@ class Struct(Trait, SchemaConvertible):
 
         for path, entry in field_entry.schema.tree_iter():
             source_path = value.storage.root.extend(path)
-            data = value.storage.read(source_path, entry)
+            if source_path not in value.storage:
+                continue
 
+            data = value.storage.read(source_path, entry)
             target_path = instance.storage.root.append(self.name).extend(path)
             instance.storage.write(target_path, entry, data)
-            
 
     def convert_to_entry(self) -> Entry:
         return SchemaEntry(schema=self.schema())

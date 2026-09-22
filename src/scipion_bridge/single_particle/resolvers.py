@@ -1,9 +1,8 @@
-
-
 from .proxies import ParticleStackProxy
 from .particle import Particle
 from ..core.typed.resolve import resolver
 from ..core import struct
+
 
 @resolver
 def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackProxy:

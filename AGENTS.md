@@ -128,6 +128,32 @@ Avoid deeply nesting conditionals (never deeper than two levels). Prefer early
 returns (guard clauses) to prevent implicit else indentation blocks, keeping the
 code flat and readable.
 
+### Do not use exceptions for control flow
+Exceptions are to catch unexpected results (e.g. missing data, missing columns), that break the normal flow of the program. Expected cases need to be handeld 
+using conditionals.
+
+**Avoid:**
+```
+def process_queue(items):
+    # Antipattern: relying on IndexError to terminate processing
+    idx = 0
+    while True:
+        try:
+            item = items[idx]
+            print(f"Processing: {item}")
+            idx += 1
+        except IndexError:
+            break
+```
+
+### Still adhere to “Easier to Ask Forgiveness Than Permission” (EAFP) Style in Python
+Adhere to the the EAFP guideline in Python:
+Easier to ask for forgiveness than permission. This common Python coding style assumes the existence of valid keys or attributes and catches exceptions if the assumption proves false. This clean and fast style is characterized by the presence of many try and except statements. The technique contrasts with the LBYL style common to many other languages such as C. 
+
+Balance this against the guideline to avoid overly defensive code (genuine bugs
+need to crash early), and not to express control flow through exception handling.
+
+
 ### Never implement special cases in code for unit tests
 Unit tests need to test the functionality of the code. Never accomindate unit
 tests with special cases. For example, sets and structs are tested using a mock

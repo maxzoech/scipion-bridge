@@ -1,6 +1,5 @@
-
-
 from ..core.typed.proxy import Proxy, ProxyGroup
+
 
 class StarfileProxy(Proxy):
 

@@ -41,9 +41,16 @@ class MockStorage(_BaseStorage):
     def read(self, key: KeyPath, entry: Entry) -> Any:
         self.reads.append((key, entry))
         val = self.data.get(str(key), None)
-        if val is not None and isinstance(entry, ArrayEntryBase) and not hasattr(val, "item"):
+        if (
+            val is not None
+            and isinstance(entry, ArrayEntryBase)
+            and not hasattr(val, "item")
+        ):
             val = np.asarray(val, dtype=entry.dtype)
         return val
+
+    def is_initialized(self, key: KeyPath) -> bool:
+        return str(key) in self.data
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         self.writes.append((key, entry, data))
@@ -75,7 +82,11 @@ class TestStructSchema:
         struct.print_schema()
 
         assert struct.schema().is_static
-        assert set(struct.schema().fields.keys()) == {"val_int", "val_float", "val_bool"}
+        assert set(struct.schema().fields.keys()) == {
+            "val_int",
+            "val_float",
+            "val_bool",
+        }
         assert_array_entry(struct.schema().fields["val_int"], (1,))
 
     def test_nested_struct(self):
@@ -90,7 +101,11 @@ class TestStructSchema:
 
         struct = CTF()
         assert struct.schema().is_static
-        assert set(struct.schema().fields.keys()) == {"voltage_kv", "amplitude_contrast", "foo"}
+        assert set(struct.schema().fields.keys()) == {
+            "voltage_kv",
+            "amplitude_contrast",
+            "foo",
+        }
         foo_schema = get_child_struct(struct.schema().fields["foo"])
         assert set(foo_schema.fields.keys()) == {"a", "b"}
         struct.schema().print_tree()
@@ -106,7 +121,12 @@ class TestStructSchema:
 
         record = ExtendedRecord()
         assert record.schema().is_static
-        assert set(record.schema().fields.keys()) == {"id", "weight", "is_active", "pixels"}
+        assert set(record.schema().fields.keys()) == {
+            "id",
+            "weight",
+            "is_active",
+            "pixels",
+        }
         assert_array_entry(record.schema().fields["id"], (1,))
         assert_array_entry(record.schema().fields["weight"], (1,))
         assert_array_entry(record.schema().fields["is_active"], (1,))
@@ -117,17 +137,27 @@ class TestStructSchema:
             dim = B.Dim(64)
 
         # 1. Overriding fixed dimension with None raises ValueError
-        with pytest.raises(ValueError, match=r"Cannot override fixed dimension 'dim' \(value=64\) with None"):
+        with pytest.raises(
+            ValueError,
+            match=r"Cannot override fixed dimension 'dim' \(value=64\) with None",
+        ):
+
             class InvalidChild(FixedBase):
                 dim = B.Dim(None)
 
         # 2. Overriding dimension with invalid default value type raises TypeError
-        with pytest.raises(TypeError, match="was assigned an invalid default value of type"):
+        with pytest.raises(
+            TypeError, match="was assigned an invalid default value of type"
+        ):
+
             class InvalidAnnotatedChild(FixedBase):
                 dim: B.Dim = 12.34  # type: ignore
 
         # 3. Unannotated invalid attribute in subclass raises TypeError
-        with pytest.raises(TypeError, match="contains class-level attributes missing type annotations"):
+        with pytest.raises(
+            TypeError, match="contains class-level attributes missing type annotations"
+        ):
+
             class UnannotatedChild(FixedBase):
                 dim = "invalid_dimension"
 
@@ -145,7 +175,12 @@ class TestStructSchema:
             extra_items: B.Set[Inner]
 
         child = ContainerChild()
-        assert set(child.schema().fields.keys()) == {"inner", "items", "name_id", "extra_items"}
+        assert set(child.schema().fields.keys()) == {
+            "inner",
+            "items",
+            "name_id",
+            "extra_items",
+        }
 
         inner_schema = get_child_struct(child.schema().fields["inner"])
         assert set(inner_schema.fields.keys()) == {"feature", "vector"}
@@ -220,6 +255,7 @@ class TestStructSchema:
 
     def test_sibling_subclasses_do_not_mutate_base_dimension(self):
         """Edge case: subclassing must not mutate the parent class descriptor."""
+
         class Base(B.Struct):
             H = B.Dim()
             pixels = B.Array[float](shape=(H, H))
@@ -239,6 +275,7 @@ class TestStructSchema:
 
     def test_sibling_subclasses_do_not_poison_each_other(self):
         """Edge case: defining multiple siblings with different values."""
+
         class Base(B.Struct):
             H = B.Dim()
             pixels = B.Array[float](shape=(H, H))
@@ -299,7 +336,11 @@ class TestStructSchema:
         class FixedBase(B.Struct):
             dim = B.Dim(64)
 
-        with pytest.raises(ValueError, match=r"Cannot override fixed dimension 'dim' \(value=64\) with None"):
+        with pytest.raises(
+            ValueError,
+            match=r"Cannot override fixed dimension 'dim' \(value=64\) with None",
+        ):
+
             class InvalidSub(FixedBase):
                 dim = B.Dim(None)
 
@@ -342,14 +383,20 @@ class TestStructSchema:
 class TestArrayDescriptor:
     def test_array_instantiation_validation(self):
         # 1. Missing shape raises ValueError
-        with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        with pytest.raises(
+            ValueError, match="Missing required argument 'shape' for Array"
+        ):
             B.Array()
 
-        with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        with pytest.raises(
+            ValueError, match="Missing required argument 'shape' for Array"
+        ):
             B.Array[float]()
 
         # 2. Non-sequence shape raises TypeError
-        with pytest.raises(TypeError, match="Expected shape to be a tuple or list of dimensions"):
+        with pytest.raises(
+            TypeError, match="Expected shape to be a tuple or list of dimensions"
+        ):
             B.Array[float](shape=128)  # type: ignore
 
         # 3. Negative dimension raises ValueError
@@ -363,7 +410,10 @@ class TestArrayDescriptor:
         assert arr.shape_spec[1].value == 64
 
     def test_array_unassigned_annotation_raises_helpful_error(self):
-        with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        with pytest.raises(
+            ValueError, match="Missing required argument 'shape' for Array"
+        ):
+
             class BadStruct(B.Struct):
                 pixels: B.Array[float]
 
@@ -383,23 +433,32 @@ class TestArrayDescriptor:
         assert entry.shape == (64, 64)
 
         # Calling schema() on uninstantiated Array class raises NotImplementedError
-        with pytest.raises(NotImplementedError, match="Cannot get schema directly from an uninstantiated Array class"):
+        with pytest.raises(
+            NotImplementedError,
+            match="Cannot get schema directly from an uninstantiated Array class",
+        ):
             B.Array.schema()
 
         # Calling default() raises ValueError
-        with pytest.raises(ValueError, match="Missing required argument 'shape' for Array"):
+        with pytest.raises(
+            ValueError, match="Missing required argument 'shape' for Array"
+        ):
             B.Array.default()
 
     def test_array_missing_dtype_error(self):
         # Defining a Struct with an Array lacking a dtype specification raises TypeError during class creation
         with pytest.raises(TypeError, match="missing a dtype specification"):
+
             class UnspecifiedArrayStruct(B.Struct):
                 pixels = B.Array(shape=(64, 64))  # type: ignore[var-annotated]
 
     def test_array_schema_convertible_methods(self):
         arr = B.Array[float](shape=(10, 10))
 
-        with pytest.raises(NotImplementedError, match="Cannot get schema directly from an uninstantiated Array class"):
+        with pytest.raises(
+            NotImplementedError,
+            match="Cannot get schema directly from an uninstantiated Array class",
+        ):
             B.Array.schema()
 
         entry = arr.convert_to_entry()
@@ -447,8 +506,8 @@ class TestStructStorageInference:
 
         foo.pixels = sample_pixels
 
-        assert len(foo.storage.writes) == 1 # type: ignore
-        written_key, written_entry, written_data = foo.storage.writes[0] # type: ignore
+        assert len(foo.storage.writes) == 1  # type: ignore
+        written_key, written_entry, written_data = foo.storage.writes[0]  # type: ignore
 
         expected_key = KeyPath().append("pixels")
         assert written_key == expected_key
@@ -456,7 +515,7 @@ class TestStructStorageInference:
         assert written_entry.dtype == np.dtype(np.float32)
         assert written_entry.shape == (128, 128)
         assert np.array_equal(written_data, sample_pixels)
-        assert np.array_equal(foo.storage.data[str(expected_key)], sample_pixels) # type: ignore
+        assert np.array_equal(foo.storage.data[str(expected_key)], sample_pixels)  # type: ignore
 
     def test_storage_inference_array_read(self):
         """Verify that reading an Array attribute calls storage.read with correct KeyPath."""
@@ -467,8 +526,8 @@ class TestStructStorageInference:
 
         val = foo.pixels
 
-        assert len(foo.storage.reads) == 1 # type: ignore
-        read_key, read_entry = foo.storage.reads[0] # type: ignore
+        assert len(foo.storage.reads) == 1  # type: ignore
+        read_key, read_entry = foo.storage.reads[0]  # type: ignore
         assert read_key == expected_key
         assert isinstance(read_entry, ArrayEntry)
         assert read_entry.dtype == np.dtype(np.float32)
@@ -491,12 +550,12 @@ class TestStructStorageInference:
         """Verify that reading a field from a substruct view resolves the nested path."""
         foo = self.Foo(storage=MockStorage())
         target_path = KeyPath().append("bar").append("data_1")
-        foo.storage.data[str(target_path)] = 42 # type: ignore
+        foo.storage.data[str(target_path)] = 42  # type: ignore
 
         val = foo.bar.data_1
 
-        assert len(foo.storage.reads) == 1 # type: ignore
-        read_key, read_entry = foo.storage.reads[0] # type: ignore
+        assert len(foo.storage.reads) == 1  # type: ignore
+        read_key, read_entry = foo.storage.reads[0]  # type: ignore
         assert read_key == target_path
         assert isinstance(read_entry, ArrayEntry)
         assert read_entry.dtype == np.dtype(np.int64)
@@ -516,23 +575,24 @@ class TestStructStorageInference:
         target_foo.bar = source_bar
 
         # Source storage should have been read for all leaf fields
-        source_read_paths = [key for key, _ in source_bar.storage.reads] # type: ignore
+        source_read_paths = [key for key, _ in source_bar.storage.reads]  # type: ignore
         assert KeyPath().append("data_1") in source_read_paths
         assert KeyPath().append("data_2") in source_read_paths
 
         # Target storage should have written all leaf fields under the 'bar' prefix
-        target_write_paths = [key for key, _, _ in target_foo.storage.writes] # type: ignore
+        target_write_paths = [key for key, _, _ in target_foo.storage.writes]  # type: ignore
         expected_target_d1 = KeyPath().append("bar").append("data_1")
         expected_target_d2 = KeyPath().append("bar").append("data_2")
         assert expected_target_d1 in target_write_paths
         assert expected_target_d2 in target_write_paths
 
         # Assert data transferred correctly
-        assert target_foo.storage.data[str(expected_target_d1)] == 10 # type: ignore
-        assert target_foo.storage.data[str(expected_target_d2)] == 20 # type: ignore
+        assert target_foo.storage.data[str(expected_target_d1)] == 10  # type: ignore
+        assert target_foo.storage.data[str(expected_target_d2)] == 20  # type: ignore
 
     def test_deep_nested_struct_storage_paths(self):
         """Verify 3+ tier nesting path resolution and recursive copying."""
+
         class Level3(B.Struct):
             val: int
 
@@ -544,11 +604,11 @@ class TestStructStorageInference:
 
         root_struct = Level1(storage=MockStorage())
         deep_path = KeyPath().append("mid").append("child").append("val")
-        root_struct.storage.data[str(deep_path)] = 777 # type: ignore
+        root_struct.storage.data[str(deep_path)] = 777  # type: ignore
 
         # Reading through 3 tiers of Structs
-        assert root_struct.mid.child.val == 777 # type: ignore
-        assert root_struct.storage.reads[-1][0] == deep_path # type: ignore
+        assert root_struct.mid.child.val == 777  # type: ignore
+        assert root_struct.storage.reads[-1][0] == deep_path  # type: ignore
 
         # Assigning at intermediate tier Level2
         source_l2 = Level2(storage=MockStorage())
@@ -629,7 +689,12 @@ class TestStructStorageInference:
 class TestStructConcreteStorage:
     def test_basic_struct_storage(self):
         class Data(B.Struct):
-            pixels: B.Array[float] = B.Array[float](shape=(128, 128,))
+            pixels: B.Array[float] = B.Array[float](
+                shape=(
+                    128,
+                    128,
+                )
+            )
             bar: float
 
         data = Data()
@@ -651,7 +716,11 @@ class TestStructConcreteStorage:
             metadata = Metadata()
 
         data = Data()
-        latent_data = np.random.uniform(size=[128,]).astype(np.float32)
+        latent_data = np.random.uniform(
+            size=[
+                128,
+            ]
+        ).astype(np.float32)
         pixel_data = np.random.uniform(size=[128, 128]).astype(np.float64)
 
         # Assign values across nested and primitive fields
@@ -720,8 +789,16 @@ class TestStructConcreteStorage:
         class Sample(B.Struct):
             latent = B.Array[np.float32](shape=(None,))
 
-        noise_small = np.random.uniform(size=[128,])
-        noise_large = np.random.uniform(size=[256,])
+        noise_small = np.random.uniform(
+            size=[
+                128,
+            ]
+        )
+        noise_large = np.random.uniform(
+            size=[
+                256,
+            ]
+        )
 
         sample_small = Sample(latent=noise_small)
         sample_large = Sample(latent=noise_large)
@@ -772,7 +849,13 @@ class TestStructSpecialization:
 
         level3 = Level3()
         assert level3.schema().is_static
-        assert set(level3.schema().fields.keys()) == {"val_a", "val_b", "val_c", "arr1", "arr2"}
+        assert set(level3.schema().fields.keys()) == {
+            "val_a",
+            "val_b",
+            "val_c",
+            "arr1",
+            "arr2",
+        }
         assert_array_entry(level3.schema().fields["arr1"], (32, 32), is_static=True)
         assert_array_entry(level3.schema().fields["arr2"], (32, 10), is_static=True)
         assert_array_entry(level3.schema().fields["val_a"], (1,), is_static=True)
@@ -823,12 +906,18 @@ class TestStructSpecialization:
 
         assert FooStatic128.H.value == 128
         assert FooStatic128.schema().is_static
-        assert_array_entry(FooStatic128.schema().fields["pixels"], (128, 128), is_static=True)
+        assert_array_entry(
+            FooStatic128.schema().fields["pixels"], (128, 128), is_static=True
+        )
 
         inst_128 = Foo128()
         inst_static = FooStatic128()
-        assert_array_entry(inst_128.schema().fields["pixels"], (128, 128), is_static=True)
-        assert_array_entry(inst_static.schema().fields["pixels"], (128, 128), is_static=True)
+        assert_array_entry(
+            inst_128.schema().fields["pixels"], (128, 128), is_static=True
+        )
+        assert_array_entry(
+            inst_static.schema().fields["pixels"], (128, 128), is_static=True
+        )
 
     def test_multidim_partial_and_full_specialization(self):
         class TensorData(B.Struct):
@@ -843,16 +932,24 @@ class TestStructSpecialization:
         assert TensorRGB.H.value is None
         assert TensorRGB.W.value is None
         assert not TensorRGB.schema().is_static
-        assert_array_entry(TensorRGB.schema().fields["image"], (None, None, 3), is_static=False)
-        assert_array_entry(TensorRGB.schema().fields["mask"], (None, None), is_static=False)
+        assert_array_entry(
+            TensorRGB.schema().fields["image"], (None, None, 3), is_static=False
+        )
+        assert_array_entry(
+            TensorRGB.schema().fields["mask"], (None, None), is_static=False
+        )
 
         TensorFixed = TensorRGB.static(H=64, W=128)
         assert TensorFixed.H.value == 64
         assert TensorFixed.W.value == 128
         assert TensorFixed.C.value == 3
         assert TensorFixed.schema().is_static
-        assert_array_entry(TensorFixed.schema().fields["image"], (64, 128, 3), is_static=True)
-        assert_array_entry(TensorFixed.schema().fields["mask"], (64, 128), is_static=True)
+        assert_array_entry(
+            TensorFixed.schema().fields["image"], (64, 128, 3), is_static=True
+        )
+        assert_array_entry(
+            TensorFixed.schema().fields["mask"], (64, 128), is_static=True
+        )
 
     def test_multi_level_inheritance_specialization(self):
         class BaseVolume(B.Struct):
@@ -868,7 +965,9 @@ class TestStructSpecialization:
         assert SlabVolume.Y.value is None
         assert SlabVolume.X.value is None
         assert not SlabVolume.schema().is_static
-        assert_array_entry(SlabVolume.schema().fields["data"], (1, None, None), is_static=False)
+        assert_array_entry(
+            SlabVolume.schema().fields["data"], (1, None, None), is_static=False
+        )
 
         class SquareSlab(SlabVolume, specializations={"Y": 256}):
             pass
@@ -877,14 +976,18 @@ class TestStructSpecialization:
         assert SquareSlab.Y.value == 256
         assert SquareSlab.X.value is None
         assert not SquareSlab.schema().is_static
-        assert_array_entry(SquareSlab.schema().fields["data"], (1, 256, None), is_static=False)
+        assert_array_entry(
+            SquareSlab.schema().fields["data"], (1, 256, None), is_static=False
+        )
 
         Cube256 = SquareSlab.static(X=256)
         assert Cube256.Z.value == 1
         assert Cube256.Y.value == 256
         assert Cube256.X.value == 256
         assert Cube256.schema().is_static
-        assert_array_entry(Cube256.schema().fields["data"], (1, 256, 256), is_static=True)
+        assert_array_entry(
+            Cube256.schema().fields["data"], (1, 256, 256), is_static=True
+        )
 
     def test_nested_struct_specialization(self):
         class Patch(B.Struct):
@@ -902,14 +1005,20 @@ class TestStructSpecialization:
         patch_schema = get_child_struct(Container.schema().fields["patch"])
         assert patch_schema.is_static is True
         assert_array_entry(patch_schema.fields["pixels"], (64, 64), is_static=True)
-        assert_array_entry(Container.schema().fields["weights"], (None,), is_static=False)
+        assert_array_entry(
+            Container.schema().fields["weights"], (None,), is_static=False
+        )
 
         ContainerFixed = Container.static(N=10)
         assert ContainerFixed.schema().is_static is True
         fixed_patch_schema = get_child_struct(ContainerFixed.schema().fields["patch"])
         assert fixed_patch_schema.is_static is True
-        assert_array_entry(fixed_patch_schema.fields["pixels"], (64, 64), is_static=True)
-        assert_array_entry(ContainerFixed.schema().fields["weights"], (10,), is_static=True)
+        assert_array_entry(
+            fixed_patch_schema.fields["pixels"], (64, 64), is_static=True
+        )
+        assert_array_entry(
+            ContainerFixed.schema().fields["weights"], (10,), is_static=True
+        )
 
     def test_specialization_error_handling(self):
         class Foo(B.Struct):
@@ -919,15 +1028,25 @@ class TestStructSpecialization:
         with pytest.raises(TypeError, match="unexpected dimension argument: 'UNKNOWN'"):
             Foo.static(UNKNOWN=64)
 
-        with pytest.raises(TypeError, match="Unknown schema overwrite argument 'UNKNOWN'"):
+        with pytest.raises(
+            TypeError, match="Unknown schema overwrite argument 'UNKNOWN'"
+        ):
+
             class InvalidSub(Foo, specializations={"UNKNOWN": 64}):
                 pass
 
         Foo64 = Foo.static(H=64)
-        with pytest.raises(ValueError, match=r"Cannot override fixed dimension 'H' \(value=64\) with None"):
+        with pytest.raises(
+            ValueError,
+            match=r"Cannot override fixed dimension 'H' \(value=64\) with None",
+        ):
             Foo64.static(H=None)  # type: ignore
 
-        with pytest.raises(ValueError, match=r"Cannot override fixed dimension 'H' \(value=64\) with None"):
+        with pytest.raises(
+            ValueError,
+            match=r"Cannot override fixed dimension 'H' \(value=64\) with None",
+        ):
+
             class InvalidSubFixed(Foo64, specializations={"H": None}):  # type: ignore
                 pass
 
@@ -960,6 +1079,10 @@ class TestStructSpecialization:
         assert not Micrograph.schema().is_static
         MicrographFixed = Micrograph.static(W=1024)
         assert MicrographFixed.schema().is_static is True
-        assert_array_entry(MicrographFixed.schema().fields["raw"], (1024, 1024), is_static=True)
-        particles_schema = get_child_struct(MicrographFixed.schema().fields["particles"])
+        assert_array_entry(
+            MicrographFixed.schema().fields["raw"], (1024, 1024), is_static=True
+        )
+        particles_schema = get_child_struct(
+            MicrographFixed.schema().fields["particles"]
+        )
         assert_array_entry(particles_schema.fields["pixels"], (64, 64), is_static=True)
