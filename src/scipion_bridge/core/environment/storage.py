@@ -8,7 +8,9 @@ import numpy as np
 class NumPyStorageArray:
     """Storage array backed directly by numpy.ndarray."""
 
-    def __init__(self, shape: Tuple[int, ...], dtype: Any, data: Optional[np.ndarray] = None):
+    def __init__(
+        self, shape: Tuple[int, ...], dtype: Any, data: Optional[np.ndarray] = None
+    ):
         if data is not None:
             self._data = np.asarray(data, dtype=dtype)
         else:
@@ -37,7 +39,9 @@ class NumPyStorageArray:
     def __setitem__(self, item: Any, value: Any) -> None:
         self._data[item] = value
 
-    def __array__(self, dtype: Optional[Any] = None, copy: Optional[bool] = None) -> np.ndarray:
+    def __array__(
+        self, dtype: Optional[Any] = None, copy: Optional[bool] = None
+    ) -> np.ndarray:
         if dtype is None:
             arr = self._data
         else:
@@ -53,7 +57,9 @@ class NumPyStorageGroup:
     def __init__(self):
         self._arrays: Dict[str, NumPyStorageArray] = {}
 
-    def create_dataset(self, name: str, shape: Tuple[int, ...], dtype: Any) -> NumPyStorageArray:
+    def create_dataset(
+        self, name: str, shape: Tuple[int, ...], dtype: Any
+    ) -> NumPyStorageArray:
         arr = NumPyStorageArray(shape, dtype)
         self._arrays[name] = arr
         return arr
@@ -80,7 +86,9 @@ class NumPyStorageGroup:
 
     def debug_print(self) -> None:
         """Print all stored arrays along with their shapes and data types."""
-        print(f"NumPyStorageGroup ({len(self._arrays)} array{'s' if len(self._arrays) != 1 else ''}):")
+        print(
+            f"NumPyStorageGroup ({len(self._arrays)} array{'s' if len(self._arrays) != 1 else ''}):"
+        )
         if not self._arrays:
             print("  <empty>")
             return
@@ -125,4 +133,3 @@ class NumPyStorageProvider(ArrayStorageProvider):
 
     def concat(self, arrays: Sequence[Any], axis: int = 0) -> Any:
         return np.concatenate([np.asarray(a) for a in arrays], axis=axis)
-

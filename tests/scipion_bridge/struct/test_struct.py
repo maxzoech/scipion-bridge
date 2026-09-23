@@ -50,7 +50,13 @@ class MockStorage(_BaseStorage):
         return val
 
     def is_initialized(self, key: KeyPath) -> bool:
-        return str(key) in self.data
+        str_key = str(key)
+        if str_key in self.data:
+            return True
+        return any(
+            k.startswith(str_key + ".") or k.startswith(str_key + "[")
+            for k in self.data
+        )
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         self.writes.append((key, entry, data))

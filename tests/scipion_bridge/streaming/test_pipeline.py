@@ -47,7 +47,9 @@ def test_pipeline_context_manager_autoflush():
     source = Source("items")
     sink_node = source.chunk(10).sink(lambda x: received.append(x))
 
-    p = Particle(pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=42))
+    p = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=42)
+    )
 
     with Pipeline.from_sink(sink_node) as pipe:
         pipe.send(items=B.Set[Particle]([p]))

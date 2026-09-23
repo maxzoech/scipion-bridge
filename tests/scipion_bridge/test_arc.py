@@ -27,7 +27,11 @@ def test_reference_counting():
 
     container = Container()
     container.wire(
-        modules=[__name__, "scipion_bridge.core.typed.proxy", "scipion_bridge.core.utils.arc"]
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
     )
 
     temp_file_mock = TempFileMock()

@@ -1,8 +1,8 @@
-
 import numpy as np
 import pytest
 
 import scipion_bridge as B
+
 
 @pytest.mark.skip(reason="Pending arrow engine implementation")
 def test_set_of_classes_2d_struct():
@@ -22,19 +22,39 @@ def test_set_of_classes_2d_struct():
 
     classes_set = B.Set[Class2D](capacity=20)
 
-    particles_1 = B.Set[Particle]([
-        Particle(pixels=np.random.uniform(size=(128, 128,))) for _ in range(10)
-    ])
+    particles_1 = B.Set[Particle](
+        [
+            Particle(
+                pixels=np.random.uniform(
+                    size=(
+                        128,
+                        128,
+                    )
+                )
+            )
+            for _ in range(10)
+        ]
+    )
 
     cls_1 = Class2D(
         particles=particles_1,
         average=np.random.uniform(size=(128, 128)),
     )
 
-    particles_2 = B.Set[Particle]([
-        Particle(pixels=np.random.uniform(size=(128, 128,))) for _ in range(15)
-    ])
-    
+    particles_2 = B.Set[Particle](
+        [
+            Particle(
+                pixels=np.random.uniform(
+                    size=(
+                        128,
+                        128,
+                    )
+                )
+            )
+            for _ in range(15)
+        ]
+    )
+
     cls_2 = Class2D(
         particles=particles_2,
         average=np.random.uniform(size=(128, 128)),
@@ -62,7 +82,9 @@ def test_set_of_classes_2d_struct():
     # Verify set construction from sequence
     classes_from_seq = B.Set[Class2D]([cls_1])
     assert np.allclose(classes_from_seq[0].average, cls_1.average)
-    assert np.allclose(classes_from_seq[0].particles["pixels"][0], particles_1[0].pixels)
+    assert np.allclose(
+        classes_from_seq[0].particles["pixels"][0], particles_1[0].pixels
+    )
 
     # Verify arrow compilation
     batch = classes_from_seq.to_arrow()
@@ -70,9 +92,10 @@ def test_set_of_classes_2d_struct():
     assert "particles" in batch.schema.names
     assert "average" in batch.schema.names
 
+
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
-    
+
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()
 

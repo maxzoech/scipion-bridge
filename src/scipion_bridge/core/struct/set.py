@@ -179,6 +179,9 @@ class Set(Marker[T], SchemaConvertible):
         if not isinstance(field_entry, (SchemaEntry, SchemaSetEntry)):
             raise AttributeError
 
+        target_root = instance.storage.root.append(self.name)
+        instance.storage.clear(target_root)
+
         for path, entry in field_entry.schema.tree_iter():
             source_path = value._storage.root.extend(path)
             if source_path not in value._storage:
@@ -186,6 +189,7 @@ class Set(Marker[T], SchemaConvertible):
 
             data = value._storage.read(source_path, entry)
             target_path = instance.storage.root.append(self.name).extend(path)
+            target_path = target_root.extend(path)
             instance.storage.write(target_path, entry, data)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -212,7 +216,7 @@ class Set(Marker[T], SchemaConvertible):
         assert (
             cls._dtype is not None
         ), "Cannot retrieve item_type from unsubscripted Set"
-        
+
         return cls._dtype
 
     @property

@@ -4,8 +4,10 @@ from scipion_bridge.core.utils.marker import Marker
 
 T = TypeVar("T")
 
+
 class ArrayMarker(Marker[T]):
-    pass # Maker does nothing for now
+    pass  # Maker does nothing for now
+
 
 def test_maker():
 
@@ -14,7 +16,10 @@ def test_maker():
 
     assert Foo.marker.dtype == float
 
-    with pytest.raises(TypeError, match="Forward declarations using type strings are not supported yet"):
+    with pytest.raises(
+        TypeError, match="Forward declarations using type strings are not supported yet"
+    ):
+
         class Bar:
             marker_typevar: ArrayMarker["str"] = ArrayMarker()
 

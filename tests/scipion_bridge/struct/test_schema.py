@@ -15,7 +15,6 @@ from scipion_bridge.core.struct.schema import (
 from scipion_bridge.core.struct.key_path import KeyPath
 
 
-
 def test_schema_construction_and_static_property():
     class Simple(B.Struct):
         val_int: int
@@ -104,6 +103,7 @@ def test_format_entry_formatting():
 
 def test_joint_tree_iter_set_and_struct():
     """Verify joint traversal of Set schema + Struct schema (element assignment)."""
+
     class Particle(B.Struct):
         pixels: B.Array[float] = B.Array(shape=(4, 4))
         embeddings: B.Array[float] = B.Array(shape=(8,))
@@ -133,6 +133,7 @@ def test_joint_tree_iter_set_and_struct():
 
 def test_joint_tree_iter_set_and_set():
     """Verify joint traversal of Set schema + Set schema (subset assignment)."""
+
     class Particle(B.Struct):
         pixels: B.Array[float] = B.Array(shape=(4, 4))
         embeddings: B.Array[float] = B.Array(shape=(8,))
@@ -158,6 +159,7 @@ def test_joint_tree_iter_set_and_set():
 
 def test_joint_tree_iter_nested():
     """Verify joint traversal through nested Struct and Set schemas."""
+
     class Header(B.Struct):
         version: int
 
@@ -190,6 +192,7 @@ def test_joint_tree_iter_nested():
 
 def test_joint_tree_iter_strict_errors():
     """Verify strict validation raises ValueError on key mismatch and TypeError on structural mismatch."""
+
     class Foo(B.Struct):
         a: int
         b: float
@@ -205,6 +208,7 @@ def test_joint_tree_iter_strict_errors():
     class BarBranchMismatch(B.Struct):
         class Child(B.Struct):
             x: int
+
         a: Child
         b: float
 
@@ -223,6 +227,7 @@ def test_joint_tree_iter_strict_errors():
 
 def test_joint_tree_iter_three_schemas():
     """Verify tree_iter with N > 1 additional schemas."""
+
     class Item(B.Struct):
         data: int
 

@@ -87,8 +87,7 @@ def test_grouped_op_map():
     received = []
     source = Source("items")
     sink_node = (
-        source
-        .group_by("class_id")
+        source.group_by("class_id")
         .map(lambda p: p.score * 10)
         .sink(lambda x: received.append(x))
     )
@@ -109,8 +108,7 @@ def test_grouped_op_chained_map():
     received = []
     source = Source("items")
     sink_node = (
-        source
-        .group_by(lambda p: p.class_id)
+        source.group_by(lambda p: p.class_id)
         .map(lambda p: p.score)
         .map(lambda s: f"Score: {s:.1f}")
         .sink(lambda x: received.append(x))
@@ -128,8 +126,7 @@ def test_group_by_flush_signal():
     received = []
     source = Source("items")
     sink_node = (
-        source
-        .group_by("class_id")
+        source.group_by("class_id")
         .map(lambda p: p.score)
         .sink(lambda x: received.append(x))
     )
@@ -167,5 +164,7 @@ def test_group_by_missing_key():
     op = source.group_by("nonexistent_field")
     stream = Pipeline.from_sink(op.sink(lambda x: None))
 
-    with pytest.raises(KeyError, match="Field or attribute 'nonexistent_field' not found"):
+    with pytest.raises(
+        KeyError, match="Field or attribute 'nonexistent_field' not found"
+    ):
         stream.send(items=Particle(id=1, class_id=1, score=0.5))

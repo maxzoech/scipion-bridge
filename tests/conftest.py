@@ -11,7 +11,9 @@ def setup_test_container():
     yield _test_container
 
 
-@pytest.fixture(params=["staging"])  # TODO: add "arrow_frozen", "arrow_from_batch" when implemented
+@pytest.fixture(
+    params=["staging"]
+)  # TODO: add "arrow_frozen", "arrow_from_batch" when implemented
 def engine_mode(request):
     """Parametrizes tests across the three engine states."""
     return request.param
@@ -34,4 +36,3 @@ def as_engine(engine_mode):
                 return type(set_instance).from_arrow(batch)
 
     return _transform
-

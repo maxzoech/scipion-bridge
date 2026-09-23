@@ -23,6 +23,7 @@ from .func_params import extract_func_params
 
 F = TypeVar("F", bound=Callable[..., Any])
 
+
 class ShellDecoratorProtocol(Protocol):
 
     @overload
@@ -33,8 +34,7 @@ class ShellDecoratorProtocol(Protocol):
         name: Optional[str] = None,
         postprocess_fn: Optional[Callable] = None,
         **args_map,
-    ) -> F:
-        ...
+    ) -> F: ...
 
     @overload
     def __call__(
@@ -44,8 +44,7 @@ class ShellDecoratorProtocol(Protocol):
         name: Optional[str] = None,
         postprocess_fn: Optional[Callable] = None,
         **args_map,
-    ) -> "ShellDecoratorProtocol":
-        ...
+    ) -> "ShellDecoratorProtocol": ...
 
     def __call__(
         self,
@@ -54,8 +53,7 @@ class ShellDecoratorProtocol(Protocol):
         name: Optional[str] = None,
         postprocess_fn: Optional[Callable] = None,
         **args_map,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
 
 @overload
@@ -66,8 +64,7 @@ def shell_command(
     name: Optional[str] = None,
     postprocess_fn: Optional[Callable] = None,
     **args_map,
-) -> F:
-    ...
+) -> F: ...
 
 
 @overload
@@ -78,8 +75,7 @@ def shell_command(
     name: Optional[str] = None,
     postprocess_fn: Optional[Callable] = None,
     **args_map,
-) -> ShellDecoratorProtocol:
-    ...
+) -> ShellDecoratorProtocol: ...
 
 
 def shell_command(
@@ -141,7 +137,9 @@ def _param_to_cmd_args(
 
     k = param.name
     arg_name = args_map[k] if k in args_map else k
-    mapped_boolean_params = {args_map[p] if p in args_map else p for p in boolean_params}
+    mapped_boolean_params = {
+        args_map[p] if p in args_map else p for p in boolean_params
+    }
 
     if arg_name in mapped_boolean_params:
         return (

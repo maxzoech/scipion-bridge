@@ -19,13 +19,14 @@ from typing import Optional, Tuple
 
 temp_base_dir = tempfile.gettempdir()
 
+
 class TempFileMock:
 
     def __init__(self):
         self.count = 0
 
     def new_temporary_file(self, suffix: str) -> os.PathLike:
-        
+
         file = f"{temp_base_dir}/temp_file_{self.count}{suffix}"
         self.count += 1
 
@@ -88,7 +89,6 @@ def test_conversion_to_typed_proxy():
 
     with open(proxy_obj.path, mode="r") as f:
         assert f.read() == "Hello World"
-
 
 
 def test_resolve_proxy_output():
@@ -250,7 +250,7 @@ def test_nested_proxy_groups():
     temp_file_mock = TempFileMock()
     with container.temp_file_provider.override(temp_file_mock):
         output = func_2()
-        
+
         assert str(output.metadata.path) == f"{temp_base_dir}/temp_file_0.star"
         assert str(output.particle_stack.path) == f"{temp_base_dir}/temp_file_0.mrcs"
 
@@ -376,7 +376,9 @@ def test_combine_proxify_and_resolve():
     data = np.random.uniform(1.0, 1.0, size=[16, 16, 16])
 
     @sb.proxify
-    def foo(bar: sb.Resolve[str], outputs: sb.ResolveProxy[MyVolume] = sb.Output(MyVolume)):
+    def foo(
+        bar: sb.Resolve[str], outputs: sb.ResolveProxy[MyVolume] = sb.Output(MyVolume)
+    ):
         assert bar == "42.0"
         assert outputs == f"{temp_base_dir}/temp_file_0.custom"
 
@@ -406,7 +408,9 @@ def test_named_proxy():
     PosFile = sb.namedproxy("PosFile", file_ext=".pos")
 
     @sb.proxify
-    def foo(position: sb.ResolveProxy[PosFile], result: sb.ResolveProxy = sb.Output(PosFile)):
+    def foo(
+        position: sb.ResolveProxy[PosFile], result: sb.ResolveProxy = sb.Output(PosFile)
+    ):
         assert position == "/path/to/position.pos"
 
     container = Container()
@@ -459,6 +463,7 @@ def test_proxy_group_new_temporary_proxy():
 
         del group
 
+
 @pytest.mark.filterwarnings(
     "ignore:Counting references for non-temporary file.*is deprecated"
 )
@@ -501,7 +506,8 @@ def test_proxify_with_proxy_group():
         assert isinstance(out_group, sb.ParticleStackProxy)
         assert out_group.managed == True
         assert str(out_group.metadata.path).endswith(".star")
-        
+
+
 def test_proxy_group_abstract_instantiation():
     class IncompleteGroup(sb.ProxyGroup):
         meta: sb.Proxy
@@ -525,7 +531,9 @@ def test_proxy_group_validation_and_mapping():
     assert set(iter(group)) == {"metadata", "particle_stack"}
 
     # Test base_path with extension error
-    with pytest.raises(ValueError, match="ProxyGroup base_path must not have an extension"):
+    with pytest.raises(
+        ValueError, match="ProxyGroup base_path must not have an extension"
+    ):
         sb.ParticleStackProxy(Path("/data/particles.star"))
 
     # Test invalid kwarg name
@@ -534,13 +542,12 @@ def test_proxy_group_validation_and_mapping():
 
     # Test wrong proxy class kwarg
     wrong_proxy = sb.Proxy(Path("/data/particles.vol"))
-    with pytest.raises(TypeError, match="Expected field 'metadata' to be an instance of"):
+    with pytest.raises(
+        TypeError, match="Expected field 'metadata' to be an instance of"
+    ):
         sb.ParticleStackProxy(Path("/data/particles"), metadata=wrong_proxy)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     test_proxify_with_proxy_group()
-
-
-

@@ -534,6 +534,7 @@ _current_ctx: ContextVar[Optional[ResolveContext]] = ContextVar(
     "_current_ctx", default=None
 )
 
+
 def current_registry() -> Registry:
     ctx = _current_ctx.get()
     return ctx.registry if ctx is not None else DEFAULT_REGISTRY

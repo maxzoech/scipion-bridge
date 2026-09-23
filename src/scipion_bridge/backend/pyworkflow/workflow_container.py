@@ -19,6 +19,7 @@ from ..standalone.container import Container
 
 from typing import Optional, Any, Dict, Type, Union, get_args
 
+
 class _PyWorkflowExecProvider(ShellExecProvider):
 
     def __init__(self, backend, conda_env: str):
@@ -115,7 +116,7 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
             )
 
         try:
-            from zarr.storage import LocalStore # type: ignore
+            from zarr.storage import LocalStore  # type: ignore
 
             store = LocalStore()
             group = zarr.group(store=store)
@@ -137,7 +138,6 @@ class _PyWorkflowZarrStorageProvider(ArrayStorageProvider):
             target.append(a, axis=axis)
 
         return target
-
 
 
 def convert_scipion_to_python(val: Any, dtype: Type) -> Any:

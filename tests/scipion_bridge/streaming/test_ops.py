@@ -596,6 +596,8 @@ def test_basic_accumulate():
 
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
+
+
 def test_combine_latest_flush_barrier():
     received = []
     source_a = Source("a")

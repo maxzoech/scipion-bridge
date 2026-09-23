@@ -29,7 +29,9 @@ class BasicProtocol(Protocol):
 
     # Inputs
     path: B.Input[str]
-    magic_number: B.Input[int] = B.Input(default=42, optional=True, label="Magic Number")
+    magic_number: B.Input[int] = B.Input(
+        default=42, optional=True, label="Magic Number"
+    )
 
     # Parameters
     param: B.Field[float]
@@ -44,19 +46,26 @@ class BasicProtocol(Protocol):
     def steps(self):
         pass
 
+
 def test_create_protocol():
     proto = BasicProtocol()
 
     config = proto.configuration
     assert config.inputs["path"] == B.Input(optional=False)
-    assert config.inputs["magic_number"] == B.Input(default=42, optional=True, label="Magic Number")
+    assert config.inputs["magic_number"] == B.Input(
+        default=42, optional=True, label="Magic Number"
+    )
 
     assert config.parameters["param"] == B.Field(optional=False)
     assert config.parameters["param_default"] == B.Field(default=42)
 
 
 def test_protocol_untyped_state():
-    with pytest.raises(TypeError, match="The protocol .* has declared attributes without type annotation."):
+    with pytest.raises(
+        TypeError,
+        match="The protocol .* has declared attributes without type annotation.",
+    ):
+
         class UntypedStateProtocol(Protocol):
             state = 42
 

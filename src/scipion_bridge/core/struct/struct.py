@@ -444,6 +444,15 @@ class Struct(Trait, SchemaConvertible):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    def is_initialized(self, field_name: str) -> bool:
+        """Check if a field has been initialized in storage."""
+        path = self.storage.root.append(field_name)
+        return self.storage.is_initialized(path)
+
+    def initialized_fields(self) -> list[str]:
+        """Return the names of all fields that have been initialized."""
+        return [name for name in self.schema().fields if self.is_initialized(name)]
+
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
 

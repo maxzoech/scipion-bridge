@@ -152,6 +152,10 @@ class _BaseStorage(abc.ABC):
 
         ...
 
+    def clear(self, key: Optional[KeyPath] = None) -> None:
+        """Clear all stored data under key or root."""
+        pass
+
     def is_initialized(self, key: KeyPath) -> bool:
         """Return True if the field identified by key has been initialized in storage."""
         return True
@@ -217,6 +221,10 @@ class StorageView(_BaseStorage):
     def is_initialized(self, key: KeyPath) -> bool:
         return self.root_storage.is_initialized(key)
 
+    def clear(self, key: Optional[KeyPath] = None) -> None:
+        target_key = key if key is not None else self.root
+        self.root_storage.clear(target_key)
+
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
         target_key = key if key is not None else self.root
         return self.root_storage.get_length(target_key)
@@ -250,14 +258,15 @@ class StagingEngine(_BaseStorage):
         return path[1:], key.indices
 
     @staticmethod
-    def _compute_index(index_tuple: Tuple[IndexType, ...]) -> Tuple[IndexType, ...]:
-        """Strip trailing slice(None) no-ops to form a clean index tuple."""
-        match index_tuple:
-            case (*rest, slice() as trailing_slice) if trailing_slice == slice(None):
-                return StagingEngine._compute_index(tuple(rest))
+    def _is_no_op_slice(idx: Any) -> bool:
+        return isinstance(idx, slice) and idx == slice(None)
 
-            case _:
-                return index_tuple
+    @staticmethod
+    def _compute_index(index_tuple: Tuple[IndexType, ...]) -> Tuple[IndexType, ...]:
+        """Strip slice(None) no-ops to form a clean index tuple for array storage."""
+        return tuple(
+            idx for idx in index_tuple if not StagingEngine._is_no_op_slice(idx)
+        )
 
     @staticmethod
     def _get_item_from_index(
@@ -345,7 +354,23 @@ class StagingEngine(_BaseStorage):
     def is_initialized(self, key: KeyPath) -> bool:
         """Return True if the field identified by key has been initialized in staging."""
         field_key, _ = self._decompose(key)
-        return field_key in self._data or field_key in self._chunks
+        if field_key in self._data or field_key in self._chunks:
+            return True
+        
+        return any(
+            k[: len(field_key)] == field_key
+            for k in (*self._data.keys(), *self._chunks.keys())
+        )
+
+    def clear(self, key: Optional[KeyPath] = None) -> None:
+        """Clear all stored data under key or root."""
+        target_key = key if key is not None else self.root
+        prefix, _ = self._decompose(target_key)
+
+        self._data = {k: v for k, v in self._data.items() if k[: len(prefix)] != prefix}
+        self._chunks = {
+            k: v for k, v in self._chunks.items() if k[: len(prefix)] != prefix
+        }
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
         """Return the active sequence length of data stored under key or root."""
@@ -457,8 +482,10 @@ class StagingEngine(_BaseStorage):
             if entry.capacity is None and __debug__ == True:
                 container_prefix = field_key[:-1]
                 for other_key, other_buffer in self._data.items():
-                    if other_key[:-1] == container_prefix and len(other_key) == len(
-                        field_key
+                    if (
+                        other_key != field_key
+                        and other_key[:-1] == container_prefix
+                        and len(other_key) == len(field_key)
                     ):
                         if data_len != len(other_buffer):
                             raise ValueError(

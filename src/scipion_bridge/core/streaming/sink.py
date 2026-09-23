@@ -7,7 +7,9 @@ class Sink(Node):
     Terminal output node. Cannot chain further downstream operations.
     """
 
-    def __init__(self, callback: Callable[[Any], Any], upstream: Optional[List[Node]] = None):
+    def __init__(
+        self, callback: Callable[[Any], Any], upstream: Optional[List[Node]] = None
+    ):
         super().__init__(upstream=upstream)
         self.callback = callback
 

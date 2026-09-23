@@ -5,19 +5,43 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass
 from functools import cache
-from typing import Any, Dict, Iterator, Optional, Sequence, Tuple, Type, Union, TypeAlias, overload
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+    TypeAlias,
+    overload,
+)
+from functools import cache, cached_property
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+    TypeAlias,
+    overload,
+)
 
 import numpy as np
 
 from .key_path import KeyPath
+
 
 class SchemaConvertible(metaclass=abc.ABCMeta):
     """Abstract base for classes or objects convertible to a schema representation."""
 
     @classmethod
     @abc.abstractmethod
-    def schema(cls) -> "Schema":
-        ...
+    def schema(cls) -> "Schema": ...
 
     @classmethod
     @abc.abstractmethod
@@ -57,7 +81,7 @@ class Entry(metaclass=abc.ABCMeta):
         """Return a human-readable label for *name* used by ``print_tree``."""
         ...
 
-    @property
+    @cached_property
     def children(self) -> Optional["Schema"]:
         """Return the nested schema if this entry contains children, else None."""
         return None
@@ -84,8 +108,7 @@ class ArrayEntryBase(Entry):
 
     @property
     @abc.abstractmethod
-    def entry_name(self) -> str:
-        ...
+    def entry_name(self) -> str: ...
 
     @property
     def is_static(self) -> bool:
@@ -178,7 +201,7 @@ class SchemaEntry(Entry):
     def is_static(self) -> bool:
         return self.schema.is_static
 
-    @property
+    @cached_property
     def children(self) -> Optional["Schema"]:
         return self.schema
 
@@ -208,6 +231,40 @@ class SchemaSetEntry(SchemaEntry, SetEntryBase):
         return SchemaSetEntry(
             schema=self.schema,
             capacity=self.capacity,
+        )
+
+
+@dataclass
+class CollectionEntry(Entry):
+    """Wraps a statically-sized Collection container entry."""
+
+    element_entry: Entry
+    size: int
+
+    @property
+    def is_static(self) -> bool:
+        return self.element_entry.is_static
+
+    @cached_property
+    def children(self) -> Optional["Schema"]:
+        return Schema(
+            dtype=None,
+            fields={str(i): self.element_entry for i in range(self.size)},
+        )
+
+    def format_entry(self, name: str) -> str:
+        match self.element_entry:
+            case SchemaEntry(schema=Schema(dtype=type() as dtype)):
+                elem_name = dtype.__name__
+            case Entry() as entry:
+                elem_name = entry.__class__.__name__
+
+        return f"{name}: Collection[{elem_name}](size: {self.size})"
+
+    def to_set_entry(self, capacity: Optional[int] = None) -> "Entry":
+        return CollectionEntry(
+            element_entry=self.element_entry.to_set_entry(capacity=capacity),
+            size=self.size,
         )
 
 
@@ -266,13 +323,11 @@ class Schema:
                         f"Structural mismatch at field '{field_name}': "
                         f"some schemas define a nested branch while others define a leaf."
                     )
-                
+
                 child_schema, *other_children = (e.children for e in entries)
                 assert child_schema is not None
 
-                yield from child_schema.tree_iter(
-                    *other_children, root=path
-                )
+                yield from child_schema.tree_iter(*other_children, root=path)
 
             elif all(isinstance(e, ArrayEntryBase) for e in entries):
                 yield (path, *entries)
@@ -296,10 +351,36 @@ class Schema:
             for i, (field_name, entry) in enumerate(items):
                 is_last = i == len(items) - 1
                 connector = "└── " if is_last else "├── "
-
                 print(f"{prefix}{connector}{entry.format_entry(field_name)}")
 
-                if entry.children is not None:
+                if isinstance(entry, CollectionEntry):
+                    if entry.children is not None and entry.size > 0:
+                        extension = "    " if is_last else "│   "
+                        if entry.size == 1:
+                            print(
+                                f"{prefix}{extension}└── {entry.element_entry.format_entry('0')}"
+                            )
+                            if entry.element_entry.children is not None:
+                                _print_node(
+                                    entry.element_entry.children,
+                                    prefix + extension + "    ",
+                                )
+                        else:
+                            print(
+                                f"{prefix}{extension}├── {entry.element_entry.format_entry('0')}"
+                            )
+                            if entry.element_entry.children is not None:
+                                _print_node(
+                                    entry.element_entry.children,
+                                    prefix + extension + "│   ",
+                                )
+                            if entry.size > 2:
+                                print(f"{prefix}{extension}├── ...")
+                            last_idx = entry.size - 1
+                            print(
+                                f"{prefix}{extension}└── {last_idx} (struct, collapsed)"
+                            )
+                elif entry.children is not None:
                     extension = "    " if is_last else "│   "
                     _print_node(entry.children, prefix + extension)
 
@@ -316,12 +397,12 @@ def _common_entries(*dicts: Dict[str, Any]) -> Iterator[Tuple[str, Tuple[Any, ..
     for other_dict in other_dicts:
         keys = other_dict.keys()
 
-        if primary_keys !=keys:
+        if primary_keys != keys:
             missing = primary_keys - keys
             extra = keys - primary_keys
             raise ValueError(
                 f"Schema field mismatch: missing fields {missing}, extra fields {extra}"
             )
-        
+
     for k in primary_dict:
         yield (k, tuple(d[k] for d in dicts))

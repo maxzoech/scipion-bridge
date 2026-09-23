@@ -8,7 +8,7 @@ class VolumeVisualizer(base.Visualizer):
 
     def show(self, data: Any):
         import k3d  # type: ignore
-        import xmippLib # type: ignore
+        import xmippLib  # type: ignore
 
         volume = xmippLib.Image(data)
         plt_volume = k3d.volume(volume.getData().astype(np.float32))

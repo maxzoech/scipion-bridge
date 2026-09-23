@@ -9,9 +9,11 @@ from .schema import (
     RaggedArraySetEntry,
     SchemaEntry,
     SchemaSetEntry,
+    CollectionEntry,
 )
 from .struct import Struct, Array, Arg, Dim
 from .set import Set, concat
+from .collection import Collection
 from .key_path import KeyPath, IndexType
 from .storage import (
     _BaseStorage,
@@ -23,6 +25,7 @@ from .utils import dask_serialization
 __all__ = [
     "Struct",
     "Set",
+    "Collection",
     "concat",
     "Array",
     "Arg",
@@ -39,5 +42,6 @@ __all__ = [
     "RaggedArraySetEntry",
     "SchemaEntry",
     "SchemaSetEntry",
+    "CollectionEntry",
     "UninitializedFieldError",
 ]

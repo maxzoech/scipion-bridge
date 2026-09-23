@@ -49,7 +49,9 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         3
     """
 
-    def __init__(self, root: Sequence[Tuple[str, IndexType]] = (("root", slice(None)),)) -> None:
+    def __init__(
+        self, root: Sequence[Tuple[str, IndexType]] = (("root", slice(None)),)
+    ) -> None:
         """Initializes a KeyPath with an initial sequence of components.
 
         Args:
@@ -69,7 +71,6 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
     def indices(self) -> Tuple[IndexType, ...]:
         """Returns the tuple of active index/slice components along the path."""
         return tuple([i for (_, i) in self.components])
-
 
     def extend(self, path: "KeyPath") -> "KeyPath":
         """Concatenates another `KeyPath` onto this key path.
@@ -94,13 +95,12 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         """
         return KeyPath([*self.components, *path.components])
 
-
     def append(self, name: str) -> "KeyPath":
         """Appends an attribute or field name to the key path.
 
         Extends the path to target a child attribute on an object, a struct field,
         or a set column. The new component is initialized with an unbounded
-        slice (`slice(None)`), representing the entire range or collection until 
+        slice (`slice(None)`), representing the entire range or collection until
         further narrowed.
 
         Args:
@@ -120,7 +120,6 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             ('root', 'user', 'address', 'city')
         """
         return KeyPath([*self.components, (name, slice(None))])
-
 
     def narrow_index(self, index: int, length: Optional[int] = None) -> "KeyPath":
         """Narrows the terminal component's slice or index array to a concrete integer index.
@@ -198,7 +197,9 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 if span is not None:
                     offset = span + index if index < 0 else index
                     if not (0 <= offset < span):
-                        raise IndexError(f"Index {index} out of bounds for span {span}.")
+                        raise IndexError(
+                            f"Index {index} out of bounds for span {span}."
+                        )
                     return KeyPath([*stem, (name, p_start + offset)])
 
                 # Left-anchored start with open stop: positive index only
@@ -207,7 +208,12 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
                 # Right-anchored stop: negative index relative to right edge
                 # e.g., parent[:-2] with index=-1 => -2 + (-1) = -3
-                if p_stop is not None and p_stop < 0 and index < 0 and parent_index.start is None:
+                if (
+                    p_stop is not None
+                    and p_stop < 0
+                    and index < 0
+                    and parent_index.start is None
+                ):
                     return KeyPath([*stem, (name, p_stop + index)])
 
                 raise ValueError(
@@ -222,14 +228,15 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 return KeyPath([*stem, (name, int(parent_arr[offset]))])
 
             case _:
-                raise ValueError(f"Cannot narrow terminal component with index {index}.")
-
+                raise ValueError(
+                    f"Cannot narrow terminal component with index {index}."
+                )
 
     def narrow_slice(self, index: slice, length: Optional[int] = None) -> "KeyPath":
         """Narrows the terminal component by composing it with a subslice.
 
-        Projects a relative `slice` into the coordinate frame of the component 
-        currently held at the tail of the key path. Only slices with a step of 1 
+        Projects a relative `slice` into the coordinate frame of the component
+        currently held at the tail of the key path. Only slices with a step of 1
         are supported.
 
         Resolution rules:
@@ -284,7 +291,9 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         match self.components:
             case (*stem, (name, slice() as parent)):
                 if (parent.step or 1) != 1:
-                    raise NotImplementedError("Composing over parent slice with step != 1 is not supported.")
+                    raise NotImplementedError(
+                        "Composing over parent slice with step != 1 is not supported."
+                    )
 
                 p_start = parent.start or 0
                 p_stop = parent.stop
@@ -293,10 +302,15 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                     span = max(0, p_stop - p_start)
                 else:
                     span = length
-                
+
                 if span is not None:
                     rel_start, rel_stop, _ = index.indices(span)
-                    return KeyPath([*stem, (name, slice(p_start + rel_start, p_start + rel_stop, 1))])
+                    return KeyPath(
+                        [
+                            *stem,
+                            (name, slice(p_start + rel_start, p_start + rel_stop, 1)),
+                        ]
+                    )
 
                 # Fallback: parent span is open-ended or right-anchored
                 new_start = _add_bound(parent.start, index.start)
@@ -391,7 +405,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 if span is not None:
                     if np.any(arr < -span) or np.any(arr >= span):
                         raise IndexError(f"Index out of bounds for span {span}.")
-                    
+
                     offset = np.where(arr < 0, span + arr, arr)
                     return KeyPath([*stem, (name, p_start + offset)])
 
@@ -422,7 +436,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         length: Optional[int] = None,
     ) -> "KeyPath":
         """Narrows the terminal component using a boolean mask (filtering).
-        
+
         Converts the boolean mask to active integer indices via `np.flatnonzero`
         and projects them into the parent coordinate frame.
 
@@ -480,10 +494,14 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         mask_len = len(bool_mask)
 
         match self.components:
-            case (*stem, (name, slice() as parent_index)) if parent_index == slice(None, None, None):
+            case (*stem, (name, slice() as parent_index)) if parent_index == slice(
+                None, None, None
+            ):
                 if length is not None and mask_len != length:
-                    raise IndexError(f"Boolean mask length {mask_len} does not match container length {length}.")
-                
+                    raise IndexError(
+                        f"Boolean mask length {mask_len} does not match container length {length}."
+                    )
+
                 return KeyPath([*stem, (name, np.flatnonzero(bool_mask))])
 
             case (*stem, (name, slice() as parent_slice)):
@@ -500,8 +518,10 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
                 if span is not None:
                     if mask_len != span:
-                        raise IndexError(f"Boolean mask length {mask_len} does not match span {span}.")
-                    
+                        raise IndexError(
+                            f"Boolean mask length {mask_len} does not match span {span}."
+                        )
+
                     return KeyPath([*stem, (name, p_start + np.flatnonzero(bool_mask))])
 
                 if p_start >= 0 and p_stop is None:
@@ -514,13 +534,14 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             case (*stem, (name, np.ndarray() as parent_arr)):
                 span = len(parent_arr)
                 if mask_len != span:
-                    raise IndexError(f"Boolean mask length {mask_len} does not match span {span}.")
-                
+                    raise IndexError(
+                        f"Boolean mask length {mask_len} does not match span {span}."
+                    )
+
                 return KeyPath([*stem, (name, parent_arr[bool_mask])])
 
             case _:
                 raise ValueError("Cannot apply boolean mask to the terminal component.")
-    
 
     def __getitem__(self, index: Any) -> Any:
         """Returns the component or slice of components at the given index."""
@@ -544,29 +565,30 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         Handles array index components using `np.array_equal`.
         """
         # Combine early exit type and length checks
-        if not isinstance(other, KeyPath) or len(self.components) != len(other.components):
+        if not isinstance(other, KeyPath) or len(self.components) != len(
+            other.components
+        ):
             return False
-        
+
         for (n1, i1), (n2, i2) in zip(self.components, other.components):
             if n1 != n2:
                 return False
-            
+
             match i1, i2:
                 # Both are arrays
                 case np.ndarray(), np.ndarray():
                     if not np.array_equal(i1, i2):
                         return False
-                
+
                 # Only one is an array (mismatched types)
                 case (np.ndarray(), _) | (_, np.ndarray()):
                     return False
-                
+
                 # Neither are arrays, rely on standard equality
                 case _ if i1 != i2:
                     return False
-                    
+
         return True
-    
 
     def __hash__(self) -> int:
         """Computes the hash of the key path.
@@ -582,22 +604,22 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 arrays are mutable and unhashable.
         """
         hashed_components = []
-        
+
         for name, idx in self.components:
             match idx:
                 case np.ndarray():
-                    raise TypeError("unhashable type: 'KeyPath' containing numpy array index")
-                
+                    raise TypeError(
+                        "unhashable type: 'KeyPath' containing numpy array index"
+                    )
+
                 # Unpack slice attributes directly in the pattern match
                 case slice(start=start, stop=stop, step=step):
                     hashed_components.append((name, (start, stop, step)))
-                
+
                 case _:
                     hashed_components.append((name, idx))
 
-                    
         return hash(tuple(hashed_components))
-
 
 
 def _add_bound(base: int | None, delta: int | None) -> int | None:
@@ -618,14 +640,17 @@ def _add_bound(base: int | None, delta: int | None) -> int | None:
     """
     if delta is None:
         return base
-    
+
     if base is None:
         return delta
-    
+
     if (base >= 0) != (delta >= 0):
-        raise ValueError(f"Cannot compose mixed-sign bounds ({base}, {delta}) without sequence length.")
-    
+        raise ValueError(
+            f"Cannot compose mixed-sign bounds ({base}, {delta}) without sequence length."
+        )
+
     return base + delta
+
 
 def _format_index(index: IndexType) -> str:
     """Formats an index component (slice, integer, or array) for string display."""
@@ -635,9 +660,9 @@ def _format_index(index: IndexType) -> str:
             stop_str = "" if stop is None else str(stop)
             step_str = f":{step}" if step not in (None, 1) else ""
             return f"[{start_str}:{stop_str}{step_str}]"
-            
+
         case np.ndarray():
             return f"[{index.tolist()}]"
-            
+
         case _:
             return f"[{index}]"

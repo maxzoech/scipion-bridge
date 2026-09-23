@@ -38,4 +38,3 @@ def register_dask_serialization() -> bool:
 
 # Auto-register if dask is installed
 register_dask_serialization()
-

@@ -10,8 +10,4 @@ class Domain:
 
     @classmethod
     def default(cls) -> "Domain":
-        return Domain(
-            name="Default",
-            command=[],
-            isolated=False
-        )
+        return Domain(name="Default", command=[], isolated=False)

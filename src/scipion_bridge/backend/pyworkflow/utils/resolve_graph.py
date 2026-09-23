@@ -13,6 +13,7 @@ def _get_scipion_env_info() -> Tuple[List[Any], Tuple[Type, ...], Tuple[Type, ..
 
     try:
         import pwem.objects as emobj  # type: ignore
+
         base_set: Tuple[Type, ...] = (emobj.EMSet, pywfobj.Set)
         base_obj: Tuple[Type, ...] = (emobj.EMObject, pywfobj.Object)
         modules = [emobj, pywfobj]
@@ -25,7 +26,10 @@ def _get_scipion_env_info() -> Tuple[List[Any], Tuple[Type, ...], Tuple[Type, ..
 
 
 def _extract_scipion_container_types(
-    cls: Type, modules: List[Any], base_set: Tuple[Type, ...], base_obj: Tuple[Type, ...]
+    cls: Type,
+    modules: List[Any],
+    base_set: Tuple[Type, ...],
+    base_obj: Tuple[Type, ...],
 ) -> List[Type]:
     """Helper to resolve a node type `cls` to candidate Scipion container Python classes."""
     if not isinstance(cls, type):
@@ -128,7 +132,11 @@ def find_output_pointer_class(
             candidates.update(types)
 
     # 2. Item-level Successor Check (if target_type is a Set container)
-    if isinstance(target_type, type) and issubclass(target_type, struct.Set) and include_itemwise:
+    if (
+        isinstance(target_type, type)
+        and issubclass(target_type, struct.Set)
+        and include_itemwise
+    ):
         item_type = target_type.item_type()
         if item_type is not None and item_type in graph:
             for v in graph.successors(item_type):

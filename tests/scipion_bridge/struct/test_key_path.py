@@ -1,4 +1,3 @@
-
 import pytest
 from scipion_bridge.core.struct.key_path import KeyPath
 
@@ -9,19 +8,29 @@ def test_basic_key_path():
 
     key = key.append("foo").append("bar")
     assert key.path == ("root", "foo", "bar")
-    assert key.indices == (slice(None), slice(None), slice(None),)
+    assert key.indices == (
+        slice(None),
+        slice(None),
+        slice(None),
+    )
+
 
 def test_narrow_by_int():
 
     key = KeyPath()
     key = key.append("foo").append("bar")
-     
+
     key_narrowed = key.narrow_index(5)
     assert key_narrowed.path == ("root", "foo", "bar")
-    assert key_narrowed.indices == (slice(None), slice(None), 5,)
+    assert key_narrowed.indices == (
+        slice(None),
+        slice(None),
+        5,
+    )
 
     with pytest.raises(ValueError):
         key_narrowed.narrow_index(10)
+
 
 def test_narrow_slice_by_int_known_span():
     key = KeyPath().append("foo").append("bar")
@@ -135,6 +144,7 @@ def test_str_and_repr():
 
 def test_narrow_indices():
     import numpy as np
+
     key = KeyPath().append("foo")
 
     # 1. On unbounded slice with length
@@ -183,6 +193,7 @@ def test_narrow_indices():
 
 def test_narrow_mask():
     import numpy as np
+
     key = KeyPath().append("foo")
 
     # 1. On unbounded slice with length
@@ -225,6 +236,7 @@ def test_narrow_mask():
 
 def test_keypath_eq_and_hash():
     import numpy as np
+
     key = KeyPath().append("foo")
 
     k1 = key.narrow_indices([0, 2, 4])
@@ -277,6 +289,7 @@ def test_narrow_by_slice_with_length_mixed_signs():
 
 def test_narrow_indices_with_length_open_slice():
     import numpy as np
+
     key = KeyPath().append("items")
 
     # Parent slice [4:] with view length 6
@@ -292,6 +305,7 @@ def test_narrow_indices_with_length_open_slice():
 
 def test_narrow_mask_with_length_open_slice():
     import numpy as np
+
     key = KeyPath().append("items")
 
     open_key = key.narrow_slice(slice(4, None))

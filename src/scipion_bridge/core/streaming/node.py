@@ -3,6 +3,7 @@ from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING
 import streamz
 
 if TYPE_CHECKING:
+
     class Stream:
         def __init__(self, *args: Any, **kwargs: Any) -> None: ...
         def accumulate(
@@ -12,7 +13,9 @@ if TYPE_CHECKING:
             returns_state: bool = ...,
             **kwargs: Any,
         ) -> "Stream": ...
-        def map(self, func: Callable[[Any], Any], *args: Any, **kwargs: Any) -> "Stream": ...
+        def map(
+            self, func: Callable[[Any], Any], *args: Any, **kwargs: Any
+        ) -> "Stream": ...
         def flatten(self) -> "Stream": ...
         def filter(self, predicate: Callable[[Any], bool]) -> "Stream": ...
         def sink(self, func: Callable[[Any], Any], **kwargs: Any) -> Any: ...
@@ -20,6 +23,7 @@ if TYPE_CHECKING:
         def zip(self, *others: "Stream") -> "Stream": ...
         def combine_latest(self, *others: "Stream", **kwargs: Any) -> "Stream": ...
         def destroy(self) -> None: ...
+
 else:
     from streamz import Stream
 
@@ -47,7 +51,6 @@ class Node(metaclass=abc.ABCMeta):
 
     def __eq__(self, other: Any) -> bool:
         return self is other
-
 
     @abc.abstractmethod
     def transform(self, *streams: Stream) -> Stream:

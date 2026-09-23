@@ -44,7 +44,9 @@ class BoundField(Generic[T]):
     @inject
     def _get_value(
         self,
-        config_provider: ProtocolConfigurationProvider = Provide[Container.protocol_config_provider],
+        config_provider: ProtocolConfigurationProvider = Provide[
+            Container.protocol_config_provider
+        ],
     ) -> T:
         return config_provider.get_value(self.name, default=self.default)
 

@@ -15,10 +15,23 @@ from ..utils.func_params import extract_func_params
 
 from .resolve import current_registry, resolve_params, resolver, Registry
 from abc import ABC, ABCMeta, abstractmethod
-from typing import Dict, List, Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast, Callable, get_type_hints, Mapping, Iterator
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Generic,
+    Protocol,
+    Type,
+    Union,
+    TYPE_CHECKING,
+    Any,
+    cast,
+    Callable,
+    get_type_hints,
+    Mapping,
+    Iterator,
+)
 from typing_extensions import TypeAlias, TypeVar, get_args, get_origin, ParamSpec
-
-
 
 Casted = TypeVar("Casted", bound="Proxy")
 T = TypeVar("T")
@@ -133,7 +146,9 @@ class Proxy(metaclass=ProxyMetaclass):
         return cls(Path(param.str_rep), managed=param.managed_proxy)
 
     @classmethod
-    def from_proxy(cls: Type[Casted], source: "Proxy", copy_data: bool = True) -> Casted:
+    def from_proxy(
+        cls: Type[Casted], source: "Proxy", copy_data: bool = True
+    ) -> Casted:
         """Create a typed proxy instance from another proxy instance."""
         if source.file_ext() is not None:
             raise TypeError(
@@ -189,7 +204,9 @@ class Proxy(metaclass=ProxyMetaclass):
                 arc_manager.remove_reference(self._path)
 
         except Exception as e:
-            logging.warning(f"Failed to delete file at {getattr(self, '_path', None)}: {e}")
+            logging.warning(
+                f"Failed to delete file at {getattr(self, '_path', None)}: {e}"
+            )
             pass  # Fail silently
 
     def __str__(self):
@@ -204,7 +221,9 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
     the primary_proxy abstract property.
     """
 
-    def __init__(self, base_path: os.PathLike, managed: bool = False, **kwargs: Any) -> None:
+    def __init__(
+        self, base_path: os.PathLike, managed: bool = False, **kwargs: Any
+    ) -> None:
         base_path = Path(base_path)
         if base_path.suffix != "":
             raise ValueError(
@@ -212,7 +231,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
             )
 
         super().__init__(base_path, managed=False)
-        
+
         self.base_path = base_path
         self.managed = managed
         self._proxies: dict[str, Proxy] = {}
@@ -232,7 +251,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
             child_path = field_paths[field_name]
             if field_name in kwargs:
                 child_proxy = kwargs[field_name]
-                
+
                 if not isinstance(child_proxy, proxy_cls):
                     raise TypeError(
                         f"Expected field '{field_name}' to be an instance of "
@@ -277,7 +296,9 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         return cls(Path(name), managed=param.managed_proxy)
 
     @classmethod
-    def from_proxy(cls: Type[Casted], source: "Proxy", copy_data: bool = True) -> Casted:
+    def from_proxy(
+        cls: Type[Casted], source: "Proxy", copy_data: bool = True
+    ) -> Casted:
         del copy_data  # Unused parameter
 
         """Create a ProxyGroup from an existing Proxy."""
@@ -347,9 +368,11 @@ class Output(Generic[T]):
 
         current_registry().add_resolver(Output, dtype, resolver=resolve_output_to_proxy)
 
+
 class ProxyProtocol(Protocol):
     @classmethod
     def file_ext(cls) -> Optional[str]: ...
+
 
 def namedproxy(typename: str, *, file_ext: str) -> Type[ProxyProtocol]:
     if not typename.isidentifier():
@@ -357,11 +380,11 @@ def namedproxy(typename: str, *, file_ext: str) -> Type[ProxyProtocol]:
 
     if not file_ext.startswith("."):
         raise ValueError("The file extension must start with a .")
-    
+
     _ext = file_ext
 
     class ProxySubclass(Proxy):
-        
+
         @classmethod
         def file_ext(cls) -> Optional[str]:
             return _ext
@@ -396,7 +419,10 @@ def proxify(f: Callable[..., Any]) -> Callable[..., Any]:
     def _resolve_proxy_arg(value, param: inspect.Parameter) -> FuncParam:
         intermediate = None
 
-        if param.annotation is not None and get_origin(param.annotation) == ResolveProxy:
+        if (
+            param.annotation is not None
+            and get_origin(param.annotation) == ResolveProxy
+        ):
             args = get_args(param.annotation)
             if args:
                 arg = args[0]
@@ -481,5 +507,3 @@ def resolve_output_to_proxy(
 
     assert isinstance(new_proxy, Proxy)
     return new_proxy
-
-

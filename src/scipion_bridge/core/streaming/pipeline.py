@@ -18,6 +18,7 @@ from .node import Node, Stream
 
 T = TypeVar("T", bound=Union[Struct, Set, Any])
 
+
 class Pipeline:
     """
     Compiled streaming engine backed by streamz.
@@ -50,7 +51,9 @@ class Pipeline:
                 return
             visited.add(n)
             if isinstance(n, Source):
-                assert n.name is not None, f"Source node {n} must have a name assigned before building the pipeline."
+                assert (
+                    n.name is not None
+                ), f"Source node {n} must have a name assigned before building the pipeline."
                 sources[n.name] = n
 
             for up in n.upstream:
@@ -76,18 +79,22 @@ class Pipeline:
             pipeline.send(particles=particle_set)
         """
         if not kwargs:
-            raise ValueError("send() requires named keyword arguments (e.g., pipeline.send(particles=...))")
+            raise ValueError(
+                "send() requires named keyword arguments (e.g., pipeline.send(particles=...))"
+            )
 
         for name, value in kwargs.items():
             if isinstance(value, list):
                 raise TypeError(
                     f"Python lists are not supported for input '{name}'. Use core.struct.Set instead."
                 )
-            
+
             if name in self._backend_sources:
                 self._backend_sources[name].emit(value)
             else:
-                raise KeyError(f"Input source '{name}' is not registered in this pipeline.")
+                raise KeyError(
+                    f"Input source '{name}' is not registered in this pipeline."
+                )
 
     def flush(self) -> None:
         """

@@ -86,7 +86,7 @@ def xmipp_boolean(inputs: str, *, boolean_flag: bool):
 )
 def test_boolean_function(mocker: MockerFixture, flag: bool, rename_flag: bool):
     flag_name = "renamed" if rename_flag else "boolean_flag"
-    
+
     _xmipp_boolean = xmipp_func(
         xmipp_boolean,
         inputs="i",

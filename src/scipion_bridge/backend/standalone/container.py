@@ -18,6 +18,6 @@ class Container(containers.DeclarativeContainer):
 
 def configure_default_env(modules=None, packages=["scipion_bridge"]):
     container = Container()
-    
+
     container.wire(modules=modules, packages=packages)
     return container

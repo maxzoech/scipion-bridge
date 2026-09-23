@@ -10,4 +10,3 @@ class ProtocolConfigurationProvider(ABC):
     def get_value(self, name: str, default: Any = None) -> Any:
         """Retrieve the value of a field for a given protocol instance."""
         pass
-

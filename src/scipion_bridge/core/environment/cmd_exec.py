@@ -32,4 +32,3 @@ class StandaloneExecProvider(ShellExecProvider):
             raise RuntimeError(error_msg)
 
         return proc.returncode
-

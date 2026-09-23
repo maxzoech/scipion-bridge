@@ -13,7 +13,6 @@ from scipion_bridge.single_particle import (
 )
 from scipion_bridge.core.struct.storage import UninitializedFieldError
 
-
 # ---------------------------------------------------------------------------
 # Schema tests
 # ---------------------------------------------------------------------------
@@ -21,7 +20,14 @@ from scipion_bridge.core.struct.storage import UninitializedFieldError
 
 def test_ctf_schema():
     schema = CTF.schema()
-    expected_fields = {"defocus_u", "defocus_v", "defocus_angle", "phase_shift", "resolution", "fit_quality"}
+    expected_fields = {
+        "defocus_u",
+        "defocus_v",
+        "defocus_angle",
+        "phase_shift",
+        "resolution",
+        "fit_quality",
+    }
     expected_fields = {
         "defocus_u",
         "defocus_v",
@@ -213,4 +219,3 @@ def test_set_class2d_class_id_column():
     ids = np.array(classes["class_id"]).squeeze()
     assert ids[0] == 10
     assert ids[1] == 20
-

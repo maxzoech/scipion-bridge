@@ -74,7 +74,9 @@ def convert_protocol_to_scipion3_protocol(
 
             if not pointer_class:
                 item_type = dtype.item_type()
-                item_name = item_type.__qualname__ if item_type is not None else str(dtype)
+                item_name = (
+                    item_type.__qualname__ if item_type is not None else str(dtype)
+                )
                 field_str = f"'{key}' " if key else ""
                 raise TypeError(
                     f"Cannot bind field {field_str}with container type '{dtype}' for the Scipion 3 backend.\n"
@@ -146,7 +148,9 @@ def convert_protocol_to_scipion3_protocol(
                 form.addParam(
                     key,
                     param,
-                    label=param_element.label if param_element.label is not None else key,
+                    label=(
+                        param_element.label if param_element.label is not None else key
+                    ),
                     help=param_element.help,
                     **args,
                 )

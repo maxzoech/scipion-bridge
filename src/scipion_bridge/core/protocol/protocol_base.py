@@ -14,11 +14,13 @@ from .fields import Field, Input
 from ..utils.ast import parse_ast
 from ..utils.type_annotation import has_untyped_class_definitions
 
+
 @dataclass
 class _ProtocolTypeConfiguration:
     inputs: OrderedDict[str, Type[Input]]
     parameters: OrderedDict[str, Type[Field]]
     states: OrderedDict[str, Type]
+
 
 @dataclass
 class ProtocolConfiguration:
@@ -43,14 +45,13 @@ class Protocol(metaclass=abc.ABCMeta):
                 except AttributeError:
                     field = field_class(optional=False)
                 return (key, field)
-                
+
             return OrderedDict(_get_item(k, v) for k, v in source_dict.items())
 
         inputs = _build_fields(self._configuration.inputs, Input)
-        params = _build_fields(self._configuration.parameters, Field) 
+        params = _build_fields(self._configuration.parameters, Field)
 
         return ProtocolConfiguration(inputs, params)
-    
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -66,6 +67,7 @@ class Protocol(metaclass=abc.ABCMeta):
 
     def get_pipeline(self) -> Op:
         """Return the pipeline of operations for this protocol."""
+
         def _verify_outputs(outputs: Dict):
             if not isinstance(outputs, dict):
                 raise ValueError("Pipeline output needs to be a dictionary")
@@ -102,7 +104,7 @@ class Protocol(metaclass=abc.ABCMeta):
 
 
 def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
-    
+
     attributes = get_type_hints(cls)
 
     source = inspect.getsource(cls)

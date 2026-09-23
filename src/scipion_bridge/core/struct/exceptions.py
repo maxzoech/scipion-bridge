@@ -11,4 +11,3 @@ class UninitializedFieldError(AttributeError, ValueError):
     """
 
     pass
-
