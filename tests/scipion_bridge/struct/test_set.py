@@ -1361,6 +1361,24 @@ def test_dynamic_set_cross_field_validation(as_engine):
     assert len(dyn_set) == 3
 
 
+def test_set_descriptor_self_assignment():
+    class Particle(B.Struct):
+        x: float
+
+    class Cluster(B.Struct):
+        particles: B.Set[Particle]
+
+    c = Cluster()
+    c.particles = B.Set[Particle]([Particle(x=1.0), Particle(x=2.0)])
+    assert len(c.particles) == 2
+
+    # Self-assignment must preserve data and not clear/destroy the set
+    c.particles = c.particles
+    assert len(c.particles) == 2
+    assert c.particles[0].x == 1.0
+    assert c.particles[1].x == 2.0
+
+
 if __name__ == "__main__":
     fixture_fn = lambda x: x
 

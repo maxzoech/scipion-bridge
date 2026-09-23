@@ -49,7 +49,7 @@ def reduce_minibatch_to_persistent_output(
         )
 
     match minibatch_obj:
-        case emobj.SetOfClasses2D(): # type: ignore 
+        case emobj.SetOfClasses2D():  # type: ignore
             persistent_set = getattr(protocol, key, None)
             match persistent_set:
                 case None:
@@ -58,7 +58,7 @@ def reduce_minibatch_to_persistent_output(
                     )
                     persistent_set.enableAppend()
                     existing_classes = {}
-                case emobj.SetOfClasses2D(): # type: ignore 
+                case emobj.SetOfClasses2D():  # type: ignore
                     persistent_set.enableAppend()
                     existing_classes = persistent_set._getExistingItems()
                     if existing_classes:
@@ -74,7 +74,7 @@ def reduce_minibatch_to_persistent_output(
             for mb_cls in minibatch_obj:
                 cid = mb_cls.getObjId()
                 match existing_classes.get(cid):
-                    case emobj.Class2D() as target_cls:  # type: ignore 
+                    case emobj.Class2D() as target_cls:  # type: ignore
                         if mb_cls.hasRepresentative():
                             target_cls.setRepresentative(mb_cls.getRepresentative())
                         target_cls.enableAppend()
@@ -86,13 +86,13 @@ def reduce_minibatch_to_persistent_output(
                         target_cls._getMapper().commit()
                         persistent_set.update(target_cls)
                     case None:
-                        new_cls = emobj.Class2D()  # type: ignore 
+                        new_cls = emobj.Class2D()  # type: ignore
                         new_cls.setObjId(cid)
                         new_cls.copyInfo(persistent_set)
                         if mb_cls.hasRepresentative():
                             new_cls.setRepresentative(mb_cls.getRepresentative())
                         else:
-                            new_cls.setRepresentative(emobj.Particle())  # type: ignore 
+                            new_cls.setRepresentative(emobj.Particle())  # type: ignore
                         persistent_set.append(new_cls)
                         for p in mb_cls:
                             item = p.clone()
@@ -110,7 +110,7 @@ def reduce_minibatch_to_persistent_output(
                 protocol._updateOutputSet(
                     key,
                     persistent_set,
-                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore 
+                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore
                 )
             else:
                 setattr(protocol, key, persistent_set)
@@ -118,7 +118,7 @@ def reduce_minibatch_to_persistent_output(
             minibatch_obj.close()
             return persistent_set
 
-        case emobj.SetOfParticlesFlex():  # type: ignore 
+        case emobj.SetOfParticlesFlex():  # type: ignore
             persistent_set = getattr(protocol, key, None)
             match persistent_set:
                 case None:
@@ -130,7 +130,7 @@ def reduce_minibatch_to_persistent_output(
                     )
                     persistent_set.getFlexInfo().setProgName(resolvers.PROG_NAME)
                     persistent_set.enableAppend()
-                case emobj.SetOfParticlesFlex():  # type: ignore 
+                case emobj.SetOfParticlesFlex():  # type: ignore
                     persistent_set.enableAppend()
                 case _:
                     raise TypeError(
@@ -149,7 +149,7 @@ def reduce_minibatch_to_persistent_output(
                 protocol._updateOutputSet(
                     key,
                     persistent_set,
-                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore 
+                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore
                 )
             else:
                 setattr(protocol, key, persistent_set)
@@ -157,7 +157,7 @@ def reduce_minibatch_to_persistent_output(
             minibatch_obj.close()
             return persistent_set
 
-        case emobj.SetOfParticles():  # type: ignore 
+        case emobj.SetOfParticles():  # type: ignore
             persistent_set = getattr(protocol, key, None)
             match persistent_set:
                 case None:
@@ -192,12 +192,12 @@ def reduce_minibatch_to_persistent_output(
             minibatch_obj.close()
             return persistent_set
 
-        case pywfobj.Set():  # type: ignore 
+        case pywfobj.Set():  # type: ignore
             if hasattr(protocol, "_updateOutputSet"):
                 protocol._updateOutputSet(
                     key,
                     minibatch_obj,
-                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore 
+                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore
                 )
             else:
                 setattr(protocol, key, minibatch_obj)

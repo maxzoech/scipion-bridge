@@ -493,7 +493,7 @@ if HAS_PWEM:
     ) -> struct.Collection[spa.Class2D]:
         """Convert a Scipion SetOfClasses2D to a scipion-bridge Collection[Class2D]."""
         items: list[tuple[int, spa.Class2D]] = []
-        for cls2d in value: # type: ignore
+        for cls2d in value:  # type: ignore
             cid = int(cls2d.getObjId() or 0)
             bridge_cls = _resolve_class2d_to_bridge(cls2d)
             items.append((cid, bridge_cls))
@@ -533,7 +533,7 @@ if HAS_PWEM:
             )
             scipion_cls.setRepresentative(rep)
         else:
-            scipion_cls.setRepresentative(emobj.Particle()) # type: ignore
+            scipion_cls.setRepresentative(emobj.Particle())  # type: ignore
 
         out_classes.append(scipion_cls)
 

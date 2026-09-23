@@ -1092,3 +1092,22 @@ class TestStructSpecialization:
             MicrographFixed.schema().fields["particles"]
         )
         assert_array_entry(particles_schema.fields["pixels"], (64, 64), is_static=True)
+
+
+def test_struct_descriptor_self_assignment():
+    class Sub(B.Struct):
+        x: float
+        y: float
+
+    class Parent(B.Struct):
+        sub: Sub
+
+    p = Parent()
+    p.sub = Sub(x=10.0, y=20.0)
+    assert p.sub.x == 10.0
+    assert p.sub.y == 20.0
+
+    # Self-assignment should preserve data
+    p.sub = p.sub
+    assert p.sub.x == 10.0
+    assert p.sub.y == 20.0

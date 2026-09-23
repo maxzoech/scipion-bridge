@@ -180,6 +180,12 @@ class Set(Marker[T], SchemaConvertible):
             raise AttributeError
 
         target_root = instance.storage.root.append(self.name)
+        if (
+            value._storage.root == target_root
+            and value._storage.root_storage is instance.storage.root_storage
+        ):
+            return
+
         instance.storage.clear(target_root)
 
         for path, entry in field_entry.schema.tree_iter():
@@ -188,7 +194,6 @@ class Set(Marker[T], SchemaConvertible):
                 continue
 
             data = value._storage.read(source_path, entry)
-            target_path = instance.storage.root.append(self.name).extend(path)
             target_path = target_root.extend(path)
             instance.storage.write(target_path, entry, data)
 
@@ -287,6 +292,13 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 span = self._active_span
+                target_root = self._storage.root.narrow_index(index, length=span)
+                if (
+                    value.storage.root == target_root
+                    and value.storage.root_storage is self._storage.root_storage
+                ):
+                    return
+
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -295,9 +307,7 @@ class Set(Marker[T], SchemaConvertible):
                     source_path = value.storage.root.extend(path)
                     data = value.storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_index(
-                        index, length=span
-                    ).extend(path)
+                    target_path = target_root.extend(path)
                     self._storage.write(target_path, target_entry, data)
 
             case slice() as index:
@@ -307,6 +317,13 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 span = self._active_span
+                target_root = self._storage.root.narrow_slice(index, length=span)
+                if (
+                    value._storage.root == target_root
+                    and value._storage.root_storage is self._storage.root_storage
+                ):
+                    return
+
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -315,9 +332,7 @@ class Set(Marker[T], SchemaConvertible):
                     source_path = value._storage.root.extend(path)
                     data = value._storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_slice(
-                        index, length=span
-                    ).extend(path)
+                    target_path = target_root.extend(path)
                     self._storage.write(target_path, target_entry, data)
 
             case _ if _is_bool_sequence(key):

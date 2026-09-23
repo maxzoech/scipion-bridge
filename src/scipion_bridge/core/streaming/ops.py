@@ -606,7 +606,7 @@ class GroupByOp(GroupedOp):
                 return item[int(self.key)]
             if hasattr(item, "__getitem__"):
                 try:
-                    return item[self.key] # type: ignore
+                    return item[self.key]  # type: ignore
                 except Exception:
                     pass
             raise KeyError(

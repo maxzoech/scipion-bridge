@@ -496,13 +496,20 @@ class Struct(Trait, SchemaConvertible):
         if not isinstance(value, dtype):
             raise ValueError
 
+        target_root = instance.storage.root.append(self.name)
+        if (
+            value.storage.root == target_root
+            and value.storage.root_storage is instance.storage.root_storage
+        ):
+            return
+
         for path, entry in field_entry.schema.tree_iter():
             source_path = value.storage.root.extend(path)
             if source_path not in value.storage:
                 continue
 
             data = value.storage.read(source_path, entry)
-            target_path = instance.storage.root.append(self.name).extend(path)
+            target_path = target_root.extend(path)
             instance.storage.write(target_path, entry, data)
 
     def convert_to_entry(self) -> Entry:

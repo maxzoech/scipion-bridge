@@ -266,5 +266,33 @@ def test_standalone_collection_schema_and_item_type() -> None:
         Collection[MinorCluster].schema()
 
 
+def test_collection_descriptor_self_assignment() -> None:
+    class Cluster(Struct):
+        classes: Collection[MinorCluster] = Collection(size=5)
+
+    c = Cluster()
+    c.classes[0] = MinorCluster(sub_id=1, score=0.5)
+    c.classes[2] = MinorCluster(sub_id=3, score=0.9)
+    assert c.classes.initialized_indices() == [0, 2]
+
+    # Self-assignment must preserve data and not clear/destroy the collection
+    c.classes = c.classes
+    assert c.classes.initialized_indices() == [0, 2]
+    assert c.classes[0].sub_id == 1
+    assert c.classes[2].sub_id == 3
+
+
+def test_collection_setitem_self_assignment() -> None:
+    coll = Collection[MinorCluster](size=5)
+    coll[0] = MinorCluster(sub_id=10, score=0.42)
+    assert coll.is_initialized(0) is True
+
+    # Assigning slot to itself must preserve data
+    coll[0] = coll[0]
+    assert coll.is_initialized(0) is True
+    assert coll[0].sub_id == 10
+    assert coll[0].score == pytest.approx(0.42)
+
+
 if __name__ == "__main__":
     test_set_of_structs_with_collection()

@@ -199,6 +199,12 @@ class Collection(Marker[T], SchemaConvertible):
             )
 
         slot_storage = self._storage.append(str(index))
+        if (
+            value.storage.root == slot_storage.root
+            and value.storage.root_storage is slot_storage.root_storage
+        ):
+            return
+
         self._storage.clear(slot_storage.root)
 
         for path, entry in value.schema().tree_iter():
@@ -251,6 +257,12 @@ class Collection(Marker[T], SchemaConvertible):
 
         bound: Collection[T] = self.__get__(instance, type(instance))
         target_root = instance.storage.root.append(self.name)
+        if (
+            value._storage.root == target_root
+            and value._storage.root_storage is instance.storage.root_storage
+        ):
+            return
+
         instance.storage.clear(target_root)
         for idx in value.initialized_indices():
             bound[idx] = value[idx]
