@@ -1,4 +1,19 @@
-from typing import Optional, List, Dict, Callable, Any, Type, TypeAlias, Union, Tuple, TypeVar, Mapping, Generic, cast, overload
+from typing import (
+    Optional,
+    List,
+    Dict,
+    Callable,
+    Any,
+    Type,
+    TypeAlias,
+    Union,
+    Tuple,
+    TypeVar,
+    Mapping,
+    Generic,
+    cast,
+    overload,
+)
 from functools import partial, reduce
 from pyrsistent import pdeque, PDeque
 
@@ -71,6 +86,10 @@ class Op(Node):
         """Group stream items by key, emitting (key, full_item) pairs."""
         return self.op(GroupByOp(key))
 
+    def as_keyed(self) -> "AsKeyedOp":
+        """Promote a stream of (key, value) pairs to a GroupedOp without extra wrapping."""
+        return self.op(AsKeyedOp())
+
     def reduce(
         self,
         func: Callable[[Any, Any], Any],
@@ -116,6 +135,7 @@ class Source(Op):
 
 _AccumulatorState: TypeAlias = Union[S, object]
 
+
 class AccumulateOp(Op, Generic[E, S]):
     """
     Folds stream elements using an accumulator function, emitting the running accumulator on every item.
@@ -137,7 +157,7 @@ class AccumulateOp(Op, Generic[E, S]):
         state: S,
         new_val: E,
     ) -> Tuple[_AccumulatorState, List[Union[Optional[E], FlushSignal]]]:
-        
+
         match (state, new_val):
 
             case (state, new_val) if state == _NO_DEFAULT:
@@ -153,7 +173,8 @@ class AccumulateOp(Op, Generic[E, S]):
     def transform(self, *streams: Stream) -> Stream:
 
         return (
-                streams[0].accumulate(
+            streams[0]
+            .accumulate(
                 self._accumulate_step,
                 start=self.start,
                 returns_state=True,
@@ -222,26 +243,32 @@ class ChunkOp(Op):
     def _accumulate_chunks(
         self,
         state: Tuple[List[struct.Set], int],
-        new_set: Union[struct.Set, FlushSignal],
+        new_set: Union[struct.Set, Struct, FlushSignal],
     ) -> Tuple[Tuple[List[struct.Set], int], List[Union[struct.Set, FlushSignal]]]:
         queue, capacity = state
         emitted: List[Union[struct.Set, FlushSignal]]
 
-        if isinstance(new_set, FlushSignal):
-            emitted = []
-            if queue:
-                leftover = (
-                    queue[0]
-                    if len(queue) == 1
-                    else struct.concat(queue)
-                )
-                emitted.append(leftover)
-            emitted.append(FLUSH)
-            
-            return ([], 0), emitted
+        match new_set:
+            case FlushSignal():
+                emitted = []
+                if queue:
+                    leftover = queue[0] if len(queue) == 1 else struct.concat(queue)
+                    emitted.append(leftover)
+                emitted.append(FLUSH)
+                return ([], 0), emitted
 
-        if not isinstance(new_set, struct.Set):
-            raise ValueError("Input for chunk needs to be a set")
+            case Struct():
+                set_cls: Any = struct.Set
+                item_set: struct.Set = set_cls[type(new_set)]([new_set])
+                new_set = item_set
+
+            case struct.Set():
+                pass
+
+            case _:
+                raise ValueError(
+                    f"Input for chunk needs to be a struct.Set or Struct, got {type(new_set).__name__}",
+                )
 
         if len(new_set) > 0:
             queue.append(new_set)
@@ -267,9 +294,7 @@ class ChunkOp(Op):
                     needed = 0
 
             chunk = (
-                accumulated[0]
-                if len(accumulated) == 1
-                else struct.concat(accumulated)
+                accumulated[0] if len(accumulated) == 1 else struct.concat(accumulated)
             )
             emitted.append(chunk)
             capacity -= self.chunk_size
@@ -277,11 +302,15 @@ class ChunkOp(Op):
         return (queue, capacity), emitted
 
     def transform(self, *streams: Stream) -> Stream:
-        return streams[0].accumulate(
-            self._accumulate_chunks,
-            start=([], 0),
-            returns_state=True,
-        ).flatten()
+        return (
+            streams[0]
+            .accumulate(
+                self._accumulate_chunks,
+                start=([], 0),
+                returns_state=True,
+            )
+            .flatten()
+        )
 
 
 class MinChunkOp(Op):
@@ -305,9 +334,7 @@ class MinChunkOp(Op):
         if isinstance(new_set, FlushSignal):
             emitted = []
             if queue:
-                emitted.append(
-                    queue[0] if len(queue) == 1 else struct.concat(queue)
-                )
+                emitted.append(queue[0] if len(queue) == 1 else struct.concat(queue))
             emitted.append(FLUSH)
             return ([], 0), emitted
 
@@ -321,19 +348,21 @@ class MinChunkOp(Op):
         emitted = []
 
         if capacity >= self.min_size:
-            emitted.append(
-                queue[0] if len(queue) == 1 else struct.concat(queue)
-            )
+            emitted.append(queue[0] if len(queue) == 1 else struct.concat(queue))
             queue, capacity = [], 0
 
         return (queue, capacity), emitted
 
     def transform(self, *streams: Stream) -> Stream:
-        return streams[0].accumulate(
-            self._accumulate_min_chunks,
-            start=([], 0),
-            returns_state=True,
-        ).flatten()
+        return (
+            streams[0]
+            .accumulate(
+                self._accumulate_min_chunks,
+                start=([], 0),
+                returns_state=True,
+            )
+            .flatten()
+        )
 
 
 class CollectOp(Op):
@@ -360,25 +389,36 @@ class CollectOp(Op):
     def _accumulate_collect(
         self,
         state: Tuple[List[struct.Set], int, bool],
-        new_set: Union[struct.Set, FlushSignal],
-    ) -> Tuple[Tuple[List[struct.Set], int, bool], List[Union[struct.Set, FlushSignal]]]:
+        new_set: Union[struct.Set, Struct, FlushSignal],
+    ) -> Tuple[
+        Tuple[List[struct.Set], int, bool], List[Union[struct.Set, FlushSignal]]
+    ]:
         queue, capacity, done = state
         emitted: List[Union[struct.Set, FlushSignal]]
 
-        if isinstance(new_set, FlushSignal):
-            emitted = []
-            if queue:
-                res = (
-                    queue[0] if len(queue) == 1 else struct.concat(queue)
-                )
-                if self.count is not None and len(res) > self.count:
-                    res = res[: self.count]
-                emitted.append(res)
-            emitted.append(FLUSH)
-            return ([], 0, done), emitted
+        match new_set:
+            case FlushSignal():
+                emitted = []
+                if queue:
+                    res = queue[0] if len(queue) == 1 else struct.concat(queue)
+                    if self.count is not None and len(res) > self.count:
+                        res = res[: self.count]
+                    emitted.append(res)
+                emitted.append(FLUSH)
+                return ([], 0, done), emitted
 
-        if not isinstance(new_set, struct.Set):
-            raise ValueError("Input for Collect must be a struct.Set")
+            case Struct():
+                set_cls: Any = struct.Set
+                item_set: struct.Set = set_cls[type(new_set)]([new_set])
+                new_set = item_set
+
+            case struct.Set():
+                pass
+
+            case _:
+                raise ValueError(
+                    f"Input for Collect must be a struct.Set or Struct, got {type(new_set).__name__}",
+                )
 
         if done:
             return (queue, capacity, done), []
@@ -390,9 +430,7 @@ class CollectOp(Op):
         emitted = []
 
         if self.count is not None and capacity >= self.count:
-            res = (
-                queue[0] if len(queue) == 1 else struct.concat(queue)
-            )
+            res = queue[0] if len(queue) == 1 else struct.concat(queue)
             if len(res) > self.count:
                 res = res[: self.count]
             emitted.append(res)
@@ -401,11 +439,15 @@ class CollectOp(Op):
         return (queue, capacity, False), emitted
 
     def transform(self, *streams: Stream) -> Stream:
-        return streams[0].accumulate(
-            self._accumulate_collect,
-            start=([], 0, False),
-            returns_state=True,
-        ).flatten()
+        return (
+            streams[0]
+            .accumulate(
+                self._accumulate_collect,
+                start=([], 0, False),
+                returns_state=True,
+            )
+            .flatten()
+        )
 
 
 class CombineLatestOp(Op):
@@ -433,6 +475,7 @@ class CombineLatestOp(Op):
         latest: List[Any] = [None] * num_streams
         has_emitted: List[bool] = [False] * num_streams
         all_ready = [False]
+        flushed_streams: set[int] = set()
 
         def _drain_initial_buffers():
             max_len = max(len(b) for b in buffers)
@@ -446,22 +489,27 @@ class CombineLatestOp(Op):
                 b.clear()
 
         def _on_emit(stream_idx: int, val: Any):
-            if isinstance(val, FlushSignal):
-                out_stream.emit(FLUSH)
-                return
+            match val:
+                case FlushSignal():
+                    flushed_streams.add(stream_idx)
+                    if len(flushed_streams) == num_streams:
+                        out_stream.emit(FLUSH)
+                        flushed_streams.clear()
+                    return
 
-            if not all_ready[0]:
-                buffers[stream_idx].append(val)
-                latest[stream_idx] = val
-                has_emitted[stream_idx] = True
+                case _:
+                    if not all_ready[0]:
+                        buffers[stream_idx].append(val)
+                        latest[stream_idx] = val
+                        has_emitted[stream_idx] = True
 
-                if all(has_emitted):
-                    all_ready[0] = True
-                    _drain_initial_buffers()
-            else:
-                latest[stream_idx] = val
-                tup = tuple(latest)
-                out_stream.emit(tup)
+                        if all(has_emitted):
+                            all_ready[0] = True
+                            _drain_initial_buffers()
+                    else:
+                        latest[stream_idx] = val
+                        tup = tuple(latest)
+                        out_stream.emit(tup)
 
         for idx, s in enumerate(streams):
             s.sink(partial(_on_emit, idx))
@@ -491,11 +539,7 @@ class FlattenOp(Op):
         )
 
     def transform(self, *streams: Stream) -> Stream:
-        return (
-            streams[0]
-            .map(self._prepare_unroll)
-            .flatten()
-        )
+        return streams[0].map(self._prepare_unroll).flatten()
 
 
 CombineOp = CombineLatestOp
@@ -523,6 +567,48 @@ class GroupedOp(Op):
     ) -> "KeyedReduceOp":
         """Reduce elements independently for each key, emitting (key, reduced_value) upon FlushSignal."""
         return self.op(KeyedReduceOp(func, start=start))
+
+    def unkey(self) -> "UnkeyOp":
+        """Exit grouped stream mode, emitting (key, value) pairs to a standard Op stream."""
+        return self.op(UnkeyOp())
+
+
+class AsKeyedOp(GroupedOp):
+    """
+    Promotes an existing stream carrying (key, value) pairs into a GroupedOp.
+    Validates pair structure and propagates FlushSignal.
+    """
+
+    def __init__(self, upstream: Optional[List[Node]] = None):
+        super().__init__(upstream=upstream)
+
+    def _validate_pair(self, item: Any) -> Any:
+        match item:
+            case FlushSignal():
+                return item
+
+            case (k, v):
+                return (k, v)
+
+            case _:
+                raise TypeError(
+                    f"as_keyed expects (key, value) pairs, got {type(item).__name__}",
+                )
+
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0].map(self._validate_pair)
+
+
+class UnkeyOp(Op):
+    """
+    Converts a GroupedOp back to a standard Op emitting (key, value) tuples.
+    """
+
+    def __init__(self, upstream: Optional[List[Node]] = None):
+        super().__init__(upstream=upstream)
+
+    def transform(self, *streams: Stream) -> Stream:
+        return streams[0]
 
 
 class GroupByOp(GroupedOp):
@@ -642,11 +728,15 @@ class ReduceOp(Op):
     def transform(self, *streams: Stream) -> Stream:
         has_start = self.start is not _NO_DEFAULT
         initial_acc = self.start if has_start else None
-        return streams[0].accumulate(
-            self._reduce_step,
-            start=(initial_acc, has_start, has_start),
-            returns_state=True,
-        ).flatten()
+        return (
+            streams[0]
+            .accumulate(
+                self._reduce_step,
+                start=(initial_acc, has_start, has_start),
+                returns_state=True,
+            )
+            .flatten()
+        )
 
 
 class _KeyedChunkState:
@@ -748,11 +838,15 @@ class KeyedChunkOp(ChunkOp, GroupedOp):
         return states, emitted
 
     def transform(self, *streams: Stream) -> Stream:
-        return streams[0].accumulate(
-            self._accumulate_keyed_chunks,
-            start={},
-            returns_state=True,
-        ).flatten()
+        return (
+            streams[0]
+            .accumulate(
+                self._accumulate_keyed_chunks,
+                start={},
+                returns_state=True,
+            )
+            .flatten()
+        )
 
 
 class KeyedReduceOp(GroupedOp):
@@ -778,38 +872,40 @@ class KeyedReduceOp(GroupedOp):
         emitted: List[Any] = []
         has_start = self.start is not _NO_DEFAULT
 
-        if isinstance(new_item, FlushSignal):
-            for k, (acc, has_val) in list(states.items()):
-                if has_val:
-                    emitted.append((k, acc))
-            states.clear()
-            emitted.append(FLUSH)
-            return states, emitted
+        match new_item:
+            case FlushSignal():
+                for k, (acc, has_val) in list(states.items()):
+                    if has_val:
+                        emitted.append((k, acc))
+                states.clear()
+                emitted.append(FLUSH)
+                return states, emitted
 
-        if not (isinstance(new_item, tuple) and len(new_item) == 2):
-            raise TypeError(
-                f"KeyedReduceOp expects (key, value) pairs, got {type(new_item).__name__}"
-            )
+            case (k, val):
+                if k not in states:
+                    if has_start:
+                        acc = self.func(self.start, val)
+                        states[k] = (acc, True)
+                    else:
+                        states[k] = (val, True)
+                else:
+                    acc, _ = states[k]
+                    states[k] = (self.func(acc, val), True)
 
-        k, val = new_item
-        if k not in states:
-            if has_start:
-                acc = self.func(self.start, val)
-                states[k] = (acc, True)
-            else:
-                states[k] = (val, True)
-        else:
-            acc, _ = states[k]
-            states[k] = (self.func(acc, val), True)
+                return states, emitted
 
-        return states, emitted
+            case _:
+                raise TypeError(
+                    f"KeyedReduceOp expects (key, value) pairs, got {type(new_item).__name__}",
+                )
 
     def transform(self, *streams: Stream) -> Stream:
-        return streams[0].accumulate(
-            self._accumulate_keyed_reduce,
-            start={},
-            returns_state=True,
-        ).flatten()
-
-
-
+        return (
+            streams[0]
+            .accumulate(
+                self._accumulate_keyed_reduce,
+                start={},
+                returns_state=True,
+            )
+            .flatten()
+        )

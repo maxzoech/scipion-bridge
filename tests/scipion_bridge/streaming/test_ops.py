@@ -596,7 +596,121 @@ def test_basic_accumulate():
 
 if __name__ == "__main__":
     from scipion_bridge.backend.standalone.container import configure_default_env
+def test_combine_latest_flush_barrier():
+    received = []
+    source_a = Source("a")
+    source_b = Source("b")
+    # ReduceOp only emits its accumulated list upon receiving FlushSignal
+    sink_node = (
+        source_a.combine_latest(source_b)
+        .reduce(lambda acc, x: acc + [x], start=[])
+        .sink(lambda x: received.append(x))
+    )
+    pipeline = Pipeline.from_sink(sink_node)
 
-    configure_default_env()
+    pipeline.send(a=1)
+    pipeline.send(b=10)
+    assert len(received) == 0  # ReduceOp does not emit until flush
 
-    test_basic_accumulate()
+    # Flush source_a only
+    pipeline._backend_sources["a"].emit(FLUSH)
+    # Downstream ReduceOp should NOT have flushed yet because source_b is still active
+    assert len(received) == 0
+
+    # source_b continues emitting while source_a was already flushed
+    pipeline.send(b=20)
+    assert len(received) == 0
+
+    # Now flush source_b - barrier is satisfied, exactly one FLUSH triggers ReduceOp emission
+    pipeline._backend_sources["b"].emit(FLUSH)
+    assert len(received) == 1
+    assert received[0] == [(1, 10), (1, 20)]
+
+
+def test_as_keyed_and_unkey():
+    received = []
+    source = Source("pairs")
+    sink_node = (
+        source.as_keyed()
+        .reduce_by_key(lambda a, b: a + b)
+        .unkey()
+        .map(lambda pair: f"{pair[0]}:{pair[1]}")
+        .sink(lambda x: received.append(x))
+    )
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(pairs=("k1", 1))
+    pipeline.send(pairs=("k2", 10))
+    pipeline.send(pairs=("k1", 2))
+    assert len(received) == 0
+
+    pipeline.flush()
+    assert len(received) == 2
+    assert "k1:3" in received
+    assert "k2:10" in received
+
+
+def test_as_keyed_type_validation():
+    received = []
+    source = Source("bad_items")
+    sink_node = source.as_keyed().sink(lambda x: received.append(x))
+    pipeline = Pipeline.from_sink(sink_node)
+
+    with pytest.raises(TypeError, match="as_keyed expects \\(key, value\\) pairs"):
+        pipeline.send(bad_items="not_a_tuple")
+
+
+def test_collect_struct_instances():
+    received = []
+    source = Source("structs")
+    sink_node = source.collect().sink(lambda x: received.append(x))
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(structs=Metadata(foo=1))
+    pipeline.send(structs=Metadata(foo=2))
+    pipeline.send(structs=Metadata(foo=3))
+    assert len(received) == 0
+
+    pipeline.flush()
+    assert len(received) == 1
+    collected_set = received[0]
+    assert isinstance(collected_set, B.Set)
+    assert len(collected_set) == 3
+    assert collected_set[0].foo == 1
+    assert collected_set[1].foo == 2
+    assert collected_set[2].foo == 3
+
+
+def test_keyed_reduce_with_struct_concat_and_unkey():
+    received = []
+    source = Source("keyed_sets")
+    sink_node = (
+        source.as_keyed()
+        .reduce_by_key(lambda acc, chunk: B.concat([acc, chunk]))
+        .unkey()
+        .map(lambda item: (item[0], len(item[1])))
+        .sink(lambda x: received.append(x))
+    )
+    pipeline = Pipeline.from_sink(sink_node)
+
+    p1 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32), metadata=Metadata(foo=1)
+    )
+    p2 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32), metadata=Metadata(foo=2)
+    )
+    p3 = Particle(
+        pixels=np.zeros([256, 256], dtype=np.float32), metadata=Metadata(foo=3)
+    )
+
+    pipeline.send(keyed_sets=(0, B.Set[Particle]([p1, p2])))
+    pipeline.send(keyed_sets=(1, B.Set[Particle]([p3])))
+    pipeline.send(keyed_sets=(0, B.Set[Particle]([p3])))
+
+    assert len(received) == 0
+
+    pipeline.flush()
+    assert len(received) == 2
+    results = dict(received)
+    assert results[0] == 3  # 2 + 1
+    assert results[1] == 1  # 1
