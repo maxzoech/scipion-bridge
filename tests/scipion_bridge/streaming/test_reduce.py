@@ -1,16 +1,10 @@
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple
 import pytest
 
 import scipion_bridge as B
 from scipion_bridge.core.streaming import (
     Source,
     Pipeline,
-    FLUSH,
-    FlushSignal,
-    ReduceOp,
-    AccumulateOp,
-    KeyedChunkOp,
-    KeyedReduceOp,
 )
 
 
@@ -30,10 +24,13 @@ class ClassModel(B.Struct):
 # ReduceOp Tests
 # ---------------------------------------------------------------------------
 
+
 def test_reduce_op_with_start():
     received = []
     source = Source("numbers")
-    sink_node = source.reduce(lambda acc, x: acc + x, start=10).sink(lambda x: received.append(x))
+    sink_node = source.reduce(lambda acc, x: acc + x, start=10).sink(
+        lambda x: received.append(x)
+    )
     pipeline = Pipeline.from_sink(sink_node)
 
     pipeline.send(numbers=1)
@@ -51,7 +48,9 @@ def test_reduce_op_with_start():
 def test_reduce_op_without_start():
     received = []
     source = Source("words")
-    sink_node = source.reduce(lambda acc, x: f"{acc}-{x}").sink(lambda x: received.append(x))
+    sink_node = source.reduce(lambda acc, x: f"{acc}-{x}").sink(
+        lambda x: received.append(x)
+    )
     pipeline = Pipeline.from_sink(sink_node)
 
     pipeline.send(words="a")
@@ -68,7 +67,9 @@ def test_reduce_op_without_start():
 def test_reduce_op_empty_stream():
     received_with_start = []
     source1 = Source("items")
-    sink1 = source1.reduce(lambda a, b: a + b, start=0).sink(lambda x: received_with_start.append(x))
+    sink1 = source1.reduce(lambda a, b: a + b, start=0).sink(
+        lambda x: received_with_start.append(x)
+    )
     pipeline1 = Pipeline.from_sink(sink1)
     pipeline1.flush()
     # If start was provided, empty stream emits start value
@@ -76,7 +77,9 @@ def test_reduce_op_empty_stream():
 
     received_no_start = []
     source2 = Source("items")
-    sink2 = source2.reduce(lambda a, b: a + b).sink(lambda x: received_no_start.append(x))
+    sink2 = source2.reduce(lambda a, b: a + b).sink(
+        lambda x: received_no_start.append(x)
+    )
     pipeline2 = Pipeline.from_sink(sink2)
     pipeline2.flush()
     # If no start was provided, empty stream emits nothing
@@ -87,10 +90,13 @@ def test_reduce_op_empty_stream():
 # AccumulateOp Tests
 # ---------------------------------------------------------------------------
 
+
 def test_accumulate_op():
     received = []
     source = Source("numbers")
-    sink_node = source.accumulate(lambda acc, x: (acc + x, acc + x), start=0).sink(lambda x: received.append(x))
+    sink_node = source.accumulate(lambda acc, x: (acc + x, acc + x), start=0).sink(
+        lambda x: received.append(x)
+    )
     pipeline = Pipeline.from_sink(sink_node)
 
     pipeline.send(numbers=1)
@@ -109,12 +115,12 @@ def test_accumulate_op():
 # KeyedChunkOp Tests
 # ---------------------------------------------------------------------------
 
+
 def test_keyed_chunk_with_struct_particles():
     received = []
     source = Source("particles")
     sink_node = (
-        source
-        .group_by(lambda p: p.class_id)
+        source.group_by(lambda p: p.class_id)
         .chunk(3)
         .sink(lambda x: received.append(x))
     )
@@ -151,31 +157,36 @@ def test_keyed_chunk_with_set_input():
     received = []
     source = Source("batches")
     sink_node = (
-        source
-        .flatten()
+        source.flatten()
         .group_by(lambda p: p.class_id)
         .chunk(4)
         .sink(lambda x: received.append(x))
     )
     pipeline = Pipeline.from_sink(sink_node)
 
-    set_c1 = B.Set[Particle]([
-        Particle(id=1, class_id=10, score=0.1),
-        Particle(id=2, class_id=10, score=0.2),
-    ])
-    set_c2 = B.Set[Particle]([
-        Particle(id=10, class_id=20, score=0.5),
-    ])
+    set_c1 = B.Set[Particle](
+        [
+            Particle(id=1, class_id=10, score=0.1),
+            Particle(id=2, class_id=10, score=0.2),
+        ]
+    )
+    set_c2 = B.Set[Particle](
+        [
+            Particle(id=10, class_id=20, score=0.5),
+        ]
+    )
 
     pipeline.send(batches=set_c1)
     pipeline.send(batches=set_c2)
 
     # Send more to class 10 to hit threshold of 4
-    more_c1 = B.Set[Particle]([
-        Particle(id=3, class_id=10, score=0.3),
-        Particle(id=4, class_id=10, score=0.4),
-        Particle(id=5, class_id=10, score=0.5),
-    ])
+    more_c1 = B.Set[Particle](
+        [
+            Particle(id=3, class_id=10, score=0.3),
+            Particle(id=4, class_id=10, score=0.4),
+            Particle(id=5, class_id=10, score=0.5),
+        ]
+    )
     pipeline.send(batches=more_c1)
 
     assert len(received) == 1
@@ -202,16 +213,19 @@ def test_keyed_chunk_with_prekeyed_set_batches():
     source = Source("keyed_sets")
     # source emits (key, Set[Particle])
     sink_node = (
-        source
-        .group_by(0)
+        source.group_by(0)
         .map(lambda x: x[1])
         .chunk(3)
         .sink(lambda x: received.append(x))
     )
     pipeline = Pipeline.from_sink(sink_node)
 
-    s1 = B.Set[Particle]([Particle(id=1, class_id=1, score=0.1), Particle(id=2, class_id=1, score=0.2)])
-    s2 = B.Set[Particle]([Particle(id=3, class_id=1, score=0.3), Particle(id=4, class_id=1, score=0.4)])
+    s1 = B.Set[Particle](
+        [Particle(id=1, class_id=1, score=0.1), Particle(id=2, class_id=1, score=0.2)]
+    )
+    s2 = B.Set[Particle](
+        [Particle(id=3, class_id=1, score=0.3), Particle(id=4, class_id=1, score=0.4)]
+    )
     pipeline.send(keyed_sets=(1, s1))
     assert len(received) == 0
 
@@ -230,8 +244,7 @@ def test_keyed_chunk_with_scalar_values():
     received = []
     source = Source("pairs")
     sink_node = (
-        source
-        .group_by(0)  # tuple key is index 0
+        source.group_by(0)  # tuple key is index 0
         .map(lambda x: x[1])  # extract second item
         .chunk(2)
         .sink(lambda x: received.append(x))
@@ -256,12 +269,12 @@ def test_keyed_chunk_with_scalar_values():
 # KeyedReduceOp Tests
 # ---------------------------------------------------------------------------
 
+
 def test_keyed_reduce():
     received = []
     source = Source("items")
     sink_node = (
-        source
-        .group_by("class_id")
+        source.group_by("class_id")
         .reduce_by_key(lambda acc, p: acc + p.score, start=0.0)
         .sink(lambda x: received.append(x))
     )
@@ -285,6 +298,7 @@ def test_keyed_reduce():
 # Full 2D Classification Pipeline Pattern
 # ---------------------------------------------------------------------------
 
+
 def test_2d_classification_pipeline_pattern():
     def compute_class_alignment(particles_chunk: B.Set[Particle]) -> ClassModel:
         cid = particles_chunk[0].class_id
@@ -295,7 +309,9 @@ def test_2d_classification_pipeline_pattern():
             mean_score=float(sum(scores) / len(scores)),
         )
 
-    def accumulate_classes(acc: Dict[int, ClassModel], item: Tuple[int, ClassModel]) -> Dict[int, ClassModel]:
+    def accumulate_classes(
+        acc: Dict[int, ClassModel], item: Tuple[int, ClassModel]
+    ) -> Dict[int, ClassModel]:
         cid, model = item
         acc[cid] = model
         return acc
@@ -303,8 +319,7 @@ def test_2d_classification_pipeline_pattern():
     received = []
     source = Source("particles")
     sink_node = (
-        source
-        .flatten()
+        source.flatten()
         .group_by(lambda p: p.class_id)
         .chunk(2)
         .map(compute_class_alignment)

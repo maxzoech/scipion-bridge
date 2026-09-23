@@ -15,7 +15,6 @@ from .ops import (
     AsKeyedOp,
     UnkeyOp,
     ReduceOp,
-    ReduceOutputOp,
     AccumulateOp,
     FlushSignal,
     FLUSH,
@@ -40,12 +39,9 @@ __all__ = [
     "AsKeyedOp",
     "UnkeyOp",
     "ReduceOp",
-    "ReduceOutputOp",
     "AccumulateOp",
     "FlushSignal",
     "FLUSH",
     "Sink",
     "Pipeline",
 ]
-
-

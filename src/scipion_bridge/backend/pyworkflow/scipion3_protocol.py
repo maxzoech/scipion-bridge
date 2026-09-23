@@ -19,6 +19,198 @@ from typing import Optional, get_args, Dict, List, Any, get_type_hints, Type, Un
 
 from enum import Enum
 
+try:
+    import pwem.objects as emobj  # type: ignore
+    from pwem.objects import (  # type: ignore
+        SetOfParticles,
+        SetOfParticlesFlex,
+        ParticleFlex,
+        SetOfVolumes,
+        Volume,
+        SetOfClasses2D,
+        Class2D,
+    )
+    import pyworkflow.object as pywfobj  # type: ignore
+
+    HAS_PWEM = True
+except ImportError:
+    HAS_PWEM = False
+
+
+def reduce_minibatch_to_persistent_output(
+    protocol: Any,
+    key: str,
+    minibatch_obj: Any,
+) -> Any:
+    """Reduce a stateless minibatch Scipion object into the protocol's persistent on-disk output set."""
+    if not HAS_PWEM:
+        raise ImportError(
+            'Using scipion bridge with scipion requires pyworkflow option. Install it using pip install "scipion-bridge[pyworkflow]"'
+        )
+
+    match minibatch_obj:
+        case emobj.SetOfClasses2D(): # type: ignore 
+            persistent_set = getattr(protocol, key, None)
+            match persistent_set:
+                case None:
+                    persistent_set = protocol._createSetOfClasses2D(
+                        suffix=f"_{key}",
+                    )
+                    persistent_set.enableAppend()
+                    existing_classes = {}
+                case emobj.SetOfClasses2D(): # type: ignore 
+                    persistent_set.enableAppend()
+                    existing_classes = persistent_set._getExistingItems()
+                    if existing_classes:
+                        first_item = next(iter(existing_classes.values()))
+                        persistent_set._getMapper().db.setupCommands(
+                            first_item.getObjDict(includeClass=True),
+                        )
+                case _:
+                    raise TypeError(
+                        f"Unexpected persistent output type for {key}: {type(persistent_set)}"
+                    )
+
+            for mb_cls in minibatch_obj:
+                cid = mb_cls.getObjId()
+                match existing_classes.get(cid):
+                    case emobj.Class2D() as target_cls:  # type: ignore 
+                        if mb_cls.hasRepresentative():
+                            target_cls.setRepresentative(mb_cls.getRepresentative())
+                        target_cls.enableAppend()
+                        for p in mb_cls:
+                            item = p.clone()
+                            item.setObjId(None)
+                            target_cls.append(item)
+                        target_cls.write()
+                        target_cls._getMapper().commit()
+                        persistent_set.update(target_cls)
+                    case None:
+                        new_cls = emobj.Class2D()  # type: ignore 
+                        new_cls.setObjId(cid)
+                        new_cls.copyInfo(persistent_set)
+                        if mb_cls.hasRepresentative():
+                            new_cls.setRepresentative(mb_cls.getRepresentative())
+                        else:
+                            new_cls.setRepresentative(emobj.Particle())  # type: ignore 
+                        persistent_set.append(new_cls)
+                        for p in mb_cls:
+                            item = p.clone()
+                            item.setObjId(None)
+                            new_cls.append(item)
+                        new_cls.write()
+                        new_cls._getMapper().commit()
+                        persistent_set.update(new_cls)
+                        existing_classes[cid] = new_cls
+
+            persistent_set.write()
+            persistent_set._getMapper().commit()
+
+            if hasattr(protocol, "_updateOutputSet"):
+                protocol._updateOutputSet(
+                    key,
+                    persistent_set,
+                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore 
+                )
+            else:
+                setattr(protocol, key, persistent_set)
+
+            minibatch_obj.close()
+            return persistent_set
+
+        case emobj.SetOfParticlesFlex():  # type: ignore 
+            persistent_set = getattr(protocol, key, None)
+            match persistent_set:
+                case None:
+                    from . import resolvers
+
+                    persistent_set = protocol._createSetOfParticlesFlex(
+                        suffix=f"_{key}",
+                        progName=resolvers.PROG_NAME,
+                    )
+                    persistent_set.getFlexInfo().setProgName(resolvers.PROG_NAME)
+                    persistent_set.enableAppend()
+                case emobj.SetOfParticlesFlex():  # type: ignore 
+                    persistent_set.enableAppend()
+                case _:
+                    raise TypeError(
+                        f"Unexpected persistent output type for {key}: {type(persistent_set)}"
+                    )
+
+            for p in minibatch_obj:
+                item = p.clone()
+                item.setObjId(None)
+                persistent_set.append(item)
+
+            persistent_set.write()
+            persistent_set._getMapper().commit()
+
+            if hasattr(protocol, "_updateOutputSet"):
+                protocol._updateOutputSet(
+                    key,
+                    persistent_set,
+                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore 
+                )
+            else:
+                setattr(protocol, key, persistent_set)
+
+            minibatch_obj.close()
+            return persistent_set
+
+        case emobj.SetOfParticles():  # type: ignore 
+            persistent_set = getattr(protocol, key, None)
+            match persistent_set:
+                case None:
+                    persistent_set = protocol._createSetOfParticles(
+                        suffix=f"_{key}",
+                    )
+                    persistent_set.enableAppend()
+                case emobj.SetOfParticles():
+                    persistent_set.enableAppend()
+                case _:
+                    raise TypeError(
+                        f"Unexpected persistent output type for {key}: {type(persistent_set)}"
+                    )
+
+            for p in minibatch_obj:
+                item = p.clone()
+                item.setObjId(None)
+                persistent_set.append(item)
+
+            persistent_set.write()
+            persistent_set._getMapper().commit()
+
+            if hasattr(protocol, "_updateOutputSet"):
+                protocol._updateOutputSet(
+                    key,
+                    persistent_set,
+                    state=pywfobj.Set.STREAM_OPEN,
+                )
+            else:
+                setattr(protocol, key, persistent_set)
+
+            minibatch_obj.close()
+            return persistent_set
+
+        case pywfobj.Set():  # type: ignore 
+            if hasattr(protocol, "_updateOutputSet"):
+                protocol._updateOutputSet(
+                    key,
+                    minibatch_obj,
+                    state=pywfobj.Set.STREAM_OPEN,  # type: ignore 
+                )
+            else:
+                setattr(protocol, key, minibatch_obj)
+            return minibatch_obj
+
+        case _:
+            if hasattr(protocol, "_defineOutputs"):
+                protocol._defineOutputs(**{key: minibatch_obj})
+            if hasattr(protocol, "_store"):
+                protocol._store(minibatch_obj)
+            setattr(protocol, key, minibatch_obj)
+            return minibatch_obj
+
 
 def convert_protocol_to_scipion3_protocol(
     protocol: Protocol,
@@ -32,7 +224,15 @@ def convert_protocol_to_scipion3_protocol(
         import pwem  # type: ignore
         from pwem.protocols import ProtProcessParticles, ProtFlexBase  # type: ignore
         from pyworkflow.protocol import ProtStreamingBase  # type: ignore
-        from pwem.objects import SetOfParticles, SetOfParticlesFlex, ParticleFlex, SetOfVolumes, Volume  # type: ignore
+        import pwem.objects as emobj  # type: ignore
+        from pwem.objects import (  # type: ignore
+            SetOfParticles,
+            SetOfParticlesFlex,
+            ParticleFlex,
+            SetOfVolumes,
+            Volume,
+            SetOfClasses2D,
+        )
         import pyworkflow.protocol.constants as cons  # type: ignore
         from pyworkflow.constants import BETA  # type: ignore
         from pyworkflow.plugin import Domain  # type: ignore
@@ -69,7 +269,9 @@ def convert_protocol_to_scipion3_protocol(
                     choices.index(element.default) if element.default in choices else 0
                 ),
             }
-        elif isinstance(dtype, type) and issubclass(dtype, struct.Set):
+        elif isinstance(dtype, type) and issubclass(
+            dtype, (struct.Set, struct.Collection)
+        ):
             pointer_class = find_pointer_class(dtype)
 
             if not pointer_class:
@@ -176,12 +378,25 @@ def convert_protocol_to_scipion3_protocol(
         def _runProtocolProlog(self):
             protocol.setup()
 
+        def _createSetOfClasses2D(self, imgSet=None, suffix=""):
+            classes = self._EMProtocol__createSet(
+                emobj.SetOfClasses2D,
+                "classes2D%s.sqlite",
+                suffix,
+            )
+            if imgSet is not None:
+                classes.setImages(imgSet)
+            return classes
+
+        def _reduce_minibatch_to_persistent_output(
+            self, key: str, minibatch_obj: Any
+        ) -> Any:
+            return reduce_minibatch_to_persistent_output(self, key, minibatch_obj)
+
         def _writeOutputDataHandler(self, outputData):
             from .resolvers import PyWorkflowResolutionContext
-            import pyworkflow.object as pywfobj  # type: ignore
 
             with self._lock:
-                outputs = {}
                 for key, value in outputData.items():
                     pyworkflowDtype = find_output_pointer_class(type(value))
                     if pyworkflowDtype is None:
@@ -195,25 +410,22 @@ def convert_protocol_to_scipion3_protocol(
                         metadata=PyWorkflowResolutionContext(
                             self,
                             output_name=key,
-                            append=True,
                         ),
                     )
 
-                    outputs[key] = output
-
-                for key, output in outputs.items():
-                    if isinstance(output, pywfobj.Set):
-                        self._updateOutputSet(
-                            key, output, state=pywfobj.Set.STREAM_OPEN
-                        )
-                    else:
-                        self._defineOutputs(**{key: output})
-                        self._store(output)
+                    persistent_output = self._reduce_minibatch_to_persistent_output(
+                        key,
+                        output,
+                    )
 
                     for input_name in self.inputTypes:
                         source = getattr(self, input_name, None)
-                        if source and source.hasValue():
-                            self._defineSourceRelation(source, output)
+                        if (
+                            source
+                            and source.hasValue()
+                            and persistent_output is not None
+                        ):
+                            self._defineSourceRelation(source, persistent_output)
 
         def _submitDataStep(
             self, argname: str, inputSet: Any, unprocessed_ids: List[Any]

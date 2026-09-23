@@ -129,6 +129,14 @@ class Collection(Marker[T], SchemaConvertible):
         )
 
     @classmethod
+    def item_type(cls) -> Type[Struct]:
+        """Return the element Struct type of the Collection."""
+        assert (
+            cls._dtype is not None
+        ), "Cannot retrieve item_type from unsubscripted Collection"
+        return cls._dtype
+
+    @classmethod
     def schema(cls) -> Schema:
         raise NotImplementedError(
             "Cannot get schema directly from an uninstantiated Collection class. "
@@ -183,7 +191,7 @@ class Collection(Marker[T], SchemaConvertible):
             raise TypeError(
                 f"Collection elements must be Struct instances, got '{type(value).__name__}'.",
             )
-        
+
         assert self._dtype is not None, "Collection element type is not set."
         if not isinstance(value, self._dtype):
             raise TypeError(

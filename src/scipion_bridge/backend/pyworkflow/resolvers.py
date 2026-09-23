@@ -3,6 +3,7 @@ import uuid
 import numpy as np
 import mrcfile
 
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, Any, List, Tuple, Sequence, cast
 
@@ -71,8 +72,8 @@ PROG_NAME = "scipion_bridge"
 class PyWorkflowResolutionContext:
 
     protocol: ProtFlexBase  # type: ignore
-    output_name: Optional[str]
-    append: bool
+    output_name: Optional[str] = None
+    append: bool = False
     unprocessed_ids: Optional[Sequence[int]] = None
 
 
@@ -332,22 +333,20 @@ if HAS_PWEM:
         ), "PyWorkflowResolutionContext is required to resolve Set[Particle] to SetOfParticles."
 
         output_name = metadata.output_name or uuid.uuid4().hex
-        out_set: Optional[SetOfParticles] = (
-            getattr(metadata.protocol, metadata.output_name, None)
-            if metadata.output_name
-            else None
+        unique_id = uuid.uuid4().hex
+        out_set: SetOfParticles = metadata.protocol._createSetOfParticles(
+            suffix=f"_{output_name}_{unique_id}",
         )
 
-        if out_set is not None and metadata.append:
-            start_index = len(out_set)
-            value = cast("struct.Set[spa.Particle]", value[start_index:])
-        else:
-            out_set = metadata.protocol._createSetOfParticles(suffix=f"_{output_name}")
-            start_index = 0
+        if len(value) == 0:
+            out_set.write()
+            out_set._getMapper().commit()
+            return out_set
 
         stack_path = metadata.protocol._getExtraPath(
-            f"output_{output_name}_{uuid.uuid4().hex}.mrcs"
+            f"output_{output_name}_{unique_id}.mrcs",
         )
+        Path(stack_path).parent.mkdir(parents=True, exist_ok=True)
 
         pixels_arr = np.array(value["pixels"], dtype=np.float32)
         mrcfile.write(stack_path, pixels_arr, overwrite=False)
@@ -362,7 +361,7 @@ if HAS_PWEM:
 
         for i in range(len(value)):
             p = emobj.Particle()  # type: ignore
-            p.setLocation(start_index + i + 1, stack_path)
+            p.setLocation(i + 1, stack_path)
 
             if has_sr:
                 p.setSamplingRate(float(value[i].sampling_rate))
@@ -417,40 +416,32 @@ if HAS_PWEM:
     @resolver
     def resolve_embeddings_to_flex_particles(
         value: "struct.Set[spa.FlexParticle]",
-        metadata: PyWorkflowResolutionContext,
+        metadata: Optional[PyWorkflowResolutionContext] = None,
     ) -> SetOfParticlesFlex:
-        if metadata is None:
-            raise ValueError(
-                "The Scipion Protocol is required as context to resolve Embeddings to SetOfParticlesFlex."
-            )
+        assert (
+            metadata is not None
+        ), "PyWorkflowResolutionContext is required to resolve FlexParticle to SetOfParticlesFlex."
 
-        def _get_exisiting_set() -> Optional[SetOfParticlesFlex]:
-            if metadata.output_name is not None:
-                return getattr(metadata.protocol, metadata.output_name, None)
-            else:
-                return None
-
-        # Create the Scipion 3 SetOfParticlesFlex
-        outImgSet = _get_exisiting_set()
         output_name = metadata.output_name or uuid.uuid4().hex
+        unique_id = uuid.uuid4().hex
 
-        if outImgSet is not None and metadata.append == True:
-            start_index = len(outImgSet)
-            value = cast("struct.Set[spa.FlexParticle]", value[start_index:])
-        else:
-            outImgSet = metadata.protocol._createSetOfParticlesFlex(
-                suffix=f"_{output_name}", progName=PROG_NAME
-            )
-            outImgSet.getFlexInfo().setProgName(PROG_NAME)
-            start_index = 0
-
-        stack_uuid = uuid.uuid4().hex
-        stack_path = metadata.protocol._getExtraPath(
-            f"output_{output_name}_{stack_uuid}.mrcs"
+        out_img_set: SetOfParticlesFlex = metadata.protocol._createSetOfParticlesFlex(
+            suffix=f"_{output_name}_{unique_id}",
+            progName=PROG_NAME,
         )
+        out_img_set.getFlexInfo().setProgName(PROG_NAME)
+
+        if len(value) == 0:
+            out_img_set.write()
+            out_img_set._getMapper().commit()
+            return out_img_set
+
+        stack_path = metadata.protocol._getExtraPath(
+            f"output_{output_name}_{unique_id}.mrcs",
+        )
+        Path(stack_path).parent.mkdir(parents=True, exist_ok=True)
 
         pixels_arr = np.array(value["pixels"], dtype=np.float32)
-
         mrcfile.write(
             stack_path,
             pixels_arr,
@@ -459,20 +450,20 @@ if HAS_PWEM:
 
         embeddings_list = np.array(value["embeddings"]).tolist()
 
-        outImgSet.enableAppend()
-        mapper = outImgSet._getMapper()
+        out_img_set.enableAppend()
+        mapper = out_img_set._getMapper()
 
         for i, z_flex_list in enumerate(embeddings_list, start=1):
-            outParticle = ParticleFlex(progName=PROG_NAME)
-            outParticle.getFlexInfo().setProgName(PROG_NAME)
-            outParticle.setLocation(i, stack_path)
-            outParticle.setZFlex(z_flex_list)
-            outImgSet.append(outParticle)
+            out_particle = ParticleFlex(progName=PROG_NAME)
+            out_particle.getFlexInfo().setProgName(PROG_NAME)
+            out_particle.setLocation(i, stack_path)
+            out_particle.setZFlex(z_flex_list)
+            out_img_set.append(out_particle)
 
-        outImgSet.write()
+        out_img_set.write()
         mapper.commit()
 
-        return outImgSet
+        return out_img_set
 
     # ---------------------------------------------------------------------------
     # Class2D resolvers
@@ -487,70 +478,106 @@ if HAS_PWEM:
         )
 
         if cls2d.hasRepresentative():
-            bridge_cls.representative = resolve_scipion_particle_to_bridge_particle(
-                cls2d.getRepresentative(),
-            )
+            rep = cls2d.getRepresentative()
+            if rep is not None and rep.getFileName():
+                bridge_cls.representative = resolve_scipion_particle_to_bridge_particle(
+                    rep,
+                )
 
         return bridge_cls
 
     @resolver
-    def resolve_set_of_classes2d_to_bridge_classes2d(
+    def resolve_set_of_classes2d_to_collection_classes2d(
         value: SetOfClasses2D,
-    ) -> "struct.Set[spa.Class2D]":
-        """Convert a Scipion SetOfClasses2D to a scipion-bridge Set[Class2D]."""
-        classes_list = [_resolve_class2d_to_bridge(cls2d) for cls2d in value]  # type: ignore
-        return struct.Set[spa.Class2D](classes_list)
+        metadata: Optional[PyWorkflowResolutionContext] = None,
+    ) -> struct.Collection[spa.Class2D]:
+        """Convert a Scipion SetOfClasses2D to a scipion-bridge Collection[Class2D]."""
+        items: list[tuple[int, spa.Class2D]] = []
+        for cls2d in value: # type: ignore
+            cid = int(cls2d.getObjId() or 0)
+            bridge_cls = _resolve_class2d_to_bridge(cls2d)
+            items.append((cid, bridge_cls))
+
+        if not items:
+            return struct.Collection[spa.Class2D](size=1)
+
+        ids = [cid for cid, _ in items]
+        is_one_based = 0 not in ids and min(ids) >= 1
+        size = max(ids) if is_one_based else max(ids) + 1
+        offset = 1 if is_one_based else 0
+
+        coll = struct.Collection[spa.Class2D](size=size)
+        for cid, bridge_cls in items:
+            coll[cid - offset] = bridge_cls
+
+        return coll
 
     def _resolve_bridge_to_scipion_class2d(
         bridge_cls: spa.Class2D,
         out_classes: SetOfClasses2D,
+        default_id: Optional[int] = None,
     ) -> Class2D:
         """Convert a single bridge spa.Class2D to a Scipion Class2D and append its particles."""
         scipion_cls = Class2D()
-        scipion_cls.setObjId(int(bridge_cls.class_id))
+        cid = (
+            int(bridge_cls.class_id)
+            if bridge_cls.is_initialized("class_id") and int(bridge_cls.class_id) != 0
+            else (default_id if default_id is not None else 1)
+        )
+        scipion_cls.setObjId(cid)
         scipion_cls.copyInfo(out_classes)
 
-        try:
-            rep = resolve_bridge_particle_to_scipion_particle(bridge_cls.representative)
+        if bridge_cls.is_initialized("representative"):
+            rep = resolve_bridge_particle_to_scipion_particle(
+                bridge_cls.representative,
+            )
             scipion_cls.setRepresentative(rep)
-        except UninitializedFieldError:
-            pass
+        else:
+            scipion_cls.setRepresentative(emobj.Particle()) # type: ignore
 
-        # Scipion requires adding the class to the set first to bind its database mapper
         out_classes.append(scipion_cls)
 
-        # Append particles from the bridge Set[Particle]
-        particles_bridge: struct.Set[spa.Particle] = bridge_cls.particles
-        for i in range(len(particles_bridge)):
-            p = resolve_bridge_particle_to_scipion_particle(particles_bridge[i])
-            scipion_cls.append(p)
+        if bridge_cls.is_initialized("particles"):
+            particles_bridge: struct.Set[spa.Particle] = bridge_cls.particles
+            for i in range(len(particles_bridge)):
+                p = resolve_bridge_particle_to_scipion_particle(
+                    particles_bridge[i],
+                )
+                scipion_cls.append(p)
+            scipion_cls.write()
+            scipion_cls._getMapper().commit()
 
         out_classes.update(scipion_cls)
         return scipion_cls
 
     @resolver
-    def resolve_bridge_classes2d_to_set_of_classes2d(
-        value: "struct.Set[spa.Class2D]",
+    def resolve_collection_classes2d_to_set_of_classes2d(
+        value: struct.Collection[spa.Class2D],
         metadata: Optional[PyWorkflowResolutionContext] = None,
     ) -> SetOfClasses2D:
-        """Convert a scipion-bridge Set[Class2D] to a Scipion SetOfClasses2D."""
+        """Convert a scipion-bridge Collection[Class2D] to a Scipion SetOfClasses2D."""
         assert (
             metadata is not None
-        ), "PyWorkflowResolutionContext is required to resolve Set[Class2D] to SetOfClasses2D."
+        ), "PyWorkflowResolutionContext is required to resolve Collection[Class2D] to SetOfClasses2D."
 
         output_name = metadata.output_name or uuid.uuid4().hex
+        unique_id = uuid.uuid4().hex
+
         out_classes: SetOfClasses2D = metadata.protocol._createSetOfClasses2D(
-            suffix=f"_{output_name}",
+            suffix=f"_{output_name}_{unique_id}",
         )
         out_classes.enableAppend()
-        mapper = out_classes._getMapper()
 
-        for i in range(len(value)):
-            bridge_cls = value[i]
-            _resolve_bridge_to_scipion_class2d(bridge_cls, out_classes)
+        for idx in value.initialized_indices():
+            bridge_cls = value[idx]
+            _resolve_bridge_to_scipion_class2d(
+                bridge_cls,
+                out_classes,
+                default_id=idx + 1,
+            )
 
         out_classes.write()
-        mapper.commit()
+        out_classes._getMapper().commit()
 
         return out_classes
 

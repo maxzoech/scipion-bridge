@@ -13,13 +13,22 @@ from pwem.objects import (
 )
 
 import scipion_bridge as B
+from scipion_bridge import Protocol
 from scipion_bridge.single_particle import (
     Particle as BParticle,
     Class2D as BClass2D,
+    FlexParticle as BFlexParticle,
 )
 from scipion_bridge.core.struct.storage import UninitializedFieldError
 from scipion_bridge.backend.pyworkflow import resolvers as res
-from scipion_bridge.backend.pyworkflow.utils.resolve_graph import find_pointer_class
+from scipion_bridge.backend.pyworkflow.utils.resolve_graph import (
+    find_pointer_class,
+    find_output_pointer_class,
+)
+from scipion_bridge.backend.pyworkflow.scipion3_protocol import (
+    reduce_minibatch_to_persistent_output,
+    convert_protocol_to_scipion3_protocol,
+)
 
 # ---------------------------------------------------------------------------
 # Resolver graph discovery
@@ -33,10 +42,11 @@ def test_find_pointer_class_set_of_particles():
     assert find_pointer_class(B.Set[BParticle]) == "SetOfParticles"
 
 
-def test_find_pointer_class_set_of_classes2d():
+def test_find_pointer_class_collection_classes2d():
     import scipion_bridge.backend.pyworkflow.resolvers  # noqa: F401
 
-    assert find_pointer_class(B.Set[BClass2D]) == "SetOfClasses2D"
+    assert find_pointer_class(B.Collection[BClass2D]) == "SetOfClasses2D"
+    assert find_output_pointer_class(B.Collection[BClass2D]) == emobj.SetOfClasses2D
 
 
 # ---------------------------------------------------------------------------
@@ -239,12 +249,15 @@ def _make_set_of_classes2d(
 
 def test_set_of_classes2d_to_bridge(tmp_path):
     soc = _make_set_of_classes2d(tmp_path, n_classes=2, particles_per_class=3)
-    bridge = res.resolve_set_of_classes2d_to_bridge_classes2d(soc)
+    bridge = res.resolve_set_of_classes2d_to_collection_classes2d(soc)
 
+    assert isinstance(bridge, B.Collection)
     assert len(bridge) == 2
-    # class_id column should have been set
-    ids = np.array(bridge["class_id"]).squeeze()
-    assert set(ids.tolist()) == {1, 2}
+    assert bridge.initialized_indices() == [0, 1]
+    assert bridge[0].class_id == 1
+    assert bridge[1].class_id == 2
+    assert len(bridge[0].particles) == 3
+    assert len(bridge[1].particles) == 3
 
 
 def test_set_of_classes2d_variable_particles(tmp_path):
@@ -277,5 +290,371 @@ def test_set_of_classes2d_variable_particles(tmp_path):
     soc.write()
     soc._getMapper().commit()
 
-    bridge = res.resolve_set_of_classes2d_to_bridge_classes2d(soc)
+    bridge = res.resolve_set_of_classes2d_to_collection_classes2d(soc)
+    assert isinstance(bridge, B.Collection)
     assert len(bridge) == 2
+    assert len(bridge[0].particles) == 5
+    assert len(bridge[1].particles) == 3
+
+
+def test_set_of_classes2d_sparse_ids(tmp_path):
+    """0-based sparse IDs map directly to slot indices without 1-based shift."""
+    import mrcfile
+
+    mrcs_path = str(tmp_path / "sparse_particles.mrcs")
+    db_path = str(tmp_path / "sparse_classes.sqlite")
+
+    data = np.zeros((3, 16, 16), dtype=np.float32)
+    mrcfile.write(mrcs_path, data, overwrite=True)
+
+    soc = emobj.SetOfClasses2D(filename=db_path)
+    soc.enableAppend()
+
+    sparse_ids = [0, 3, 7]
+    for i, cid in enumerate(sparse_ids):
+        cls2d = emobj.Class2D()
+        cls2d.setObjId(cid)
+        soc.append(cls2d)
+        p = emobj.Particle()
+        p.setLocation(i + 1, mrcs_path)
+        cls2d.append(p)
+        soc.update(cls2d)
+
+    soc.write()
+    soc._getMapper().commit()
+
+    bridge = res.resolve_set_of_classes2d_to_collection_classes2d(soc)
+    assert isinstance(bridge, B.Collection)
+    assert len(bridge) == 8  # max(0, 3, 7) + 1
+    assert bridge.initialized_indices() == [0, 3, 7]
+    assert bridge[0].class_id == 0
+    assert bridge[3].class_id == 3
+    assert bridge[7].class_id == 7
+
+
+def test_resolve_collection_classes2d_to_set_of_classes2d(tmp_path):
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfClasses2D(self, suffix=""):
+            db_path = str(self.p / f"classes{suffix}.sqlite")
+            return emobj.SetOfClasses2D(filename=db_path)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    p1 = BParticle(
+        pixels=np.zeros((16, 16), dtype=np.float32),
+        sampling_rate=1.5,
+    )
+    coll = B.Collection[BClass2D](size=5)
+    coll[0] = BClass2D(
+        class_id=1,
+        particles=B.Set[BParticle]([p1]),
+        representative=p1,
+    )
+    coll[3] = BClass2D(
+        class_id=4,
+        particles=B.Set[BParticle]([p1]),
+        representative=p1,
+    )
+
+    ctx = res.PyWorkflowResolutionContext(
+        protocol=_MockProtocol(tmp_path),
+        output_name="output_classes",
+        append=False,
+    )
+    soc = res.resolve_collection_classes2d_to_set_of_classes2d(coll, metadata=ctx)
+    assert isinstance(soc, emobj.SetOfClasses2D)
+    assert len(soc) == 2
+
+    # Check IDs of classes in the generated SetOfClasses2D
+    class_ids = [cls2d.getObjId() for cls2d in soc]
+    assert set(class_ids) == {1, 4}
+
+
+def test_collection_classes2d_roundtrip(tmp_path):
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfClasses2D(self, suffix=""):
+            db_path = str(self.p / f"roundtrip{suffix}.sqlite")
+            return emobj.SetOfClasses2D(filename=db_path)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    soc_orig = _make_set_of_classes2d(tmp_path, n_classes=2, particles_per_class=2)
+    coll = res.resolve_set_of_classes2d_to_collection_classes2d(soc_orig)
+    assert len(coll) == 2
+
+    ctx = res.PyWorkflowResolutionContext(
+        protocol=_MockProtocol(tmp_path),
+        output_name="roundtrip",
+        append=False,
+    )
+    soc_back = res.resolve_collection_classes2d_to_set_of_classes2d(coll, metadata=ctx)
+    assert len(soc_back) == 2
+
+    coll_back = res.resolve_set_of_classes2d_to_collection_classes2d(soc_back)
+    assert len(coll_back) == 2
+    assert coll_back.initialized_indices() == [0, 1]
+    assert len(coll_back[0].particles) == 2
+    assert len(coll_back[1].particles) == 2
+
+
+def test_collection_classes2d_accumulation_output_handler(tmp_path):
+    """Test reduction algebra on disk: representative replaced, particles concatenated."""
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfClasses2D(self, suffix=""):
+            db_path = str(self.p / f"classes{suffix}.sqlite")
+            return emobj.SetOfClasses2D(filename=db_path)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+
+    p1 = BParticle(
+        pixels=np.zeros((16, 16), dtype=np.float32),
+        sampling_rate=1.0,
+    )
+    p2 = BParticle(
+        pixels=np.ones((16, 16), dtype=np.float32),
+        sampling_rate=2.0,
+    )
+
+    # Batch 1: slots 0, 3
+    b1 = B.Collection[BClass2D](size=5)
+    b1[0] = BClass2D(
+        class_id=1,
+        representative=p1,
+        particles=B.Set[BParticle]([p1]),
+    )
+    b1[3] = BClass2D(
+        class_id=4,
+        representative=p1,
+        particles=B.Set[BParticle]([p1]),
+    )
+
+    ctx1 = res.PyWorkflowResolutionContext(
+        protocol=proto,
+        output_name="output_classes",
+        append=False,
+    )
+    soc1 = res.resolve_collection_classes2d_to_set_of_classes2d(b1, metadata=ctx1)
+    assert len(soc1) == 2
+    reduce_minibatch_to_persistent_output(proto, "output_classes", soc1)
+    assert len(proto.output_classes) == 2
+
+    # Batch 2: slots 3, 7 (representative replaced with p2, new particle p2)
+    b2 = B.Collection[BClass2D](size=8)
+    b2[3] = BClass2D(
+        class_id=4,
+        representative=p2,
+        particles=B.Set[BParticle]([p2]),
+    )
+    b2[7] = BClass2D(
+        class_id=8,
+        representative=p2,
+        particles=B.Set[BParticle]([p2]),
+    )
+
+    ctx2 = res.PyWorkflowResolutionContext(
+        protocol=proto,
+        output_name="output_classes",
+        append=True,
+    )
+    soc2 = res.resolve_collection_classes2d_to_set_of_classes2d(b2, metadata=ctx2)
+    assert len(soc2) == 2  # Minibatch only contains 2 classes (stateless)
+
+    reduce_minibatch_to_persistent_output(proto, "output_classes", soc2)
+    assert len(proto.output_classes) == 3  # Reduced on disk
+
+    # Close and reopen from disk to verify true on-disk persistence
+    proto.output_classes.close()
+    db_path = str(tmp_path / "classes_output_classes.sqlite")
+    verify_soc = emobj.SetOfClasses2D(filename=db_path)
+    classes = {c.getObjId(): c.clone() for c in verify_soc}
+
+    assert set(classes.keys()) == {1, 4, 8}
+
+    # In class 1, original representative preserved (sr=1.0) and 1 particle
+    assert classes[1].getRepresentative().getSamplingRate() == pytest.approx(1.0)
+
+    # In class 4, representative replaced (sr=2.0) and particles concatenated (len=2)
+    assert classes[4].getRepresentative().getSamplingRate() == pytest.approx(2.0)
+
+    # In class 8, newly added class (sr=2.0, len=1)
+    assert classes[8].getRepresentative().getSamplingRate() == pytest.approx(2.0)
+
+    # Verify particle counts on disk
+    class_lens = {c.getObjId(): len(c) for c in verify_soc}
+    assert class_lens == {1: 1, 4: 2, 8: 1}
+
+
+def test_set_of_particles_streaming_append(tmp_path):
+    """Test streaming batches of Set[Particle] appended incrementally to disk."""
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfParticles(self, suffix=""):
+            db_path = str(self.p / f"particles{suffix}.sqlite")
+            return emobj.SetOfParticles(filename=db_path)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+
+    # Batch 1: 3 particles
+    p1 = BParticle(pixels=np.zeros((16, 16), dtype=np.float32), sampling_rate=1.0)
+    p2 = BParticle(pixels=np.ones((16, 16), dtype=np.float32), sampling_rate=1.0)
+    p3 = BParticle(pixels=np.ones((16, 16), dtype=np.float32) * 2, sampling_rate=1.0)
+    batch1 = B.Set[BParticle]([p1, p2, p3])
+
+    ctx1 = res.PyWorkflowResolutionContext(
+        protocol=proto, output_name="particles", append=False
+    )
+    sop1 = res.resolve_bridge_particles_to_set_of_particles(batch1, metadata=ctx1)
+    assert len(sop1) == 3
+    reduce_minibatch_to_persistent_output(proto, "particles", sop1)
+    assert len(proto.particles) == 3
+
+    # Batch 2: 2 particles (minibatch, not accumulated)
+    p4 = BParticle(pixels=np.ones((16, 16), dtype=np.float32) * 3, sampling_rate=1.5)
+    p5 = BParticle(pixels=np.ones((16, 16), dtype=np.float32) * 4, sampling_rate=1.5)
+    batch2 = B.Set[BParticle]([p4, p5])
+
+    ctx2 = res.PyWorkflowResolutionContext(
+        protocol=proto, output_name="particles", append=True
+    )
+    sop2 = res.resolve_bridge_particles_to_set_of_particles(batch2, metadata=ctx2)
+    assert len(sop2) == 2  # Stateless: minibatch only contains 2 particles
+
+    reduce_minibatch_to_persistent_output(proto, "particles", sop2)
+    assert len(proto.particles) == 5
+
+    proto.particles.close()
+    db_path = str(tmp_path / "particles_particles.sqlite")
+    verify_sop = emobj.SetOfParticles(filename=db_path)
+    assert len(verify_sop) == 5
+
+    # Check that particles read back properly
+    bridge_sop = res.resolve_set_of_particles_to_bridge_particles(verify_sop)
+    assert len(bridge_sop) == 5
+    assert bridge_sop[0].sampling_rate == pytest.approx(1.0)
+    assert bridge_sop[3].sampling_rate == pytest.approx(1.5)
+    assert bridge_sop[4].sampling_rate == pytest.approx(1.5)
+
+
+def test_set_of_particles_flex_streaming_append(tmp_path):
+    """Test streaming batches of Set[FlexParticle] appended incrementally to disk."""
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfParticlesFlex(self, suffix="", progName=""):
+            db_path = str(self.p / f"flex{suffix}.sqlite")
+            s = emobj.SetOfParticlesFlex(filename=db_path)
+            s.getFlexInfo().setProgName(progName)
+            return s
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+
+    # Batch 1: 2 flex particles
+    fp1 = BFlexParticle(
+        pixels=np.zeros((16, 16), dtype=np.float32),
+        embeddings=np.array([0.1, 0.2], dtype=np.float32),
+    )
+    fp2 = BFlexParticle(
+        pixels=np.ones((16, 16), dtype=np.float32),
+        embeddings=np.array([0.3, 0.4], dtype=np.float32),
+    )
+    batch1 = B.Set[BFlexParticle]([fp1, fp2])
+
+    ctx1 = res.PyWorkflowResolutionContext(
+        protocol=proto, output_name="flex_particles", append=False
+    )
+    flex1 = res.resolve_embeddings_to_flex_particles(batch1, metadata=ctx1)
+    assert len(flex1) == 2
+    reduce_minibatch_to_persistent_output(proto, "flex_particles", flex1)
+    assert len(proto.flex_particles) == 2
+
+    # Batch 2: 1 flex particle
+    fp3 = BFlexParticle(
+        pixels=np.ones((16, 16), dtype=np.float32) * 2,
+        embeddings=np.array([0.5, 0.6], dtype=np.float32),
+    )
+    batch2 = B.Set[BFlexParticle]([fp3])
+
+    ctx2 = res.PyWorkflowResolutionContext(
+        protocol=proto, output_name="flex_particles", append=True
+    )
+    flex2 = res.resolve_embeddings_to_flex_particles(batch2, metadata=ctx2)
+    assert len(flex2) == 1  # Stateless minibatch
+
+    reduce_minibatch_to_persistent_output(proto, "flex_particles", flex2)
+    assert len(proto.flex_particles) == 3
+
+    proto.flex_particles.close()
+    db_path = str(tmp_path / "flex_flex_particles.sqlite")
+    verify_flex = emobj.SetOfParticlesFlex(filename=db_path)
+    assert len(verify_flex) == 3
+
+    # Check that particles read back properly
+    bridge_flex = res.resolve_set_of_particles_flex_to_bridge_particles(verify_flex)
+    assert len(bridge_flex) == 3
+    assert np.allclose(bridge_flex[0].embeddings, [0.1, 0.2])
+    assert np.allclose(bridge_flex[1].embeddings, [0.3, 0.4])
+    assert np.allclose(bridge_flex[2].embeddings, [0.5, 0.6])
+
+
+class _DummyParticleProtocol(Protocol):
+    input_particles: B.Input[B.Set[BParticle]]
+
+    def outputs(self):
+        return {"output_particles": B.Set[BParticle]}
+
+    def steps(self):
+        pass
+
+
+def test_scipion_protocol_wrapper_write_output_data_handler(tmp_path):
+    """Test ScipionProtocolWrapper._writeOutputDataHandler end-to-end reduction."""
+    Wrapper = convert_protocol_to_scipion3_protocol(
+        _DummyParticleProtocol(), label="test_protocol", conda_env="test_env"
+    )
+    w = Wrapper()
+    w._workingDir = str(tmp_path)
+
+    p1 = BParticle(pixels=np.zeros((16, 16), dtype=np.float32), sampling_rate=1.0)
+    batch1 = B.Set[BParticle]([p1])
+    w._writeOutputDataHandler({"output_particles": batch1})
+    assert len(w.output_particles) == 1
+
+    p2 = BParticle(pixels=np.ones((16, 16), dtype=np.float32), sampling_rate=2.0)
+    batch2 = B.Set[BParticle]([p2])
+    w._writeOutputDataHandler({"output_particles": batch2})
+    assert len(w.output_particles) == 2
+
+    # Close and verify on disk
+    db_path = w.output_particles.getFileName()
+    w.output_particles.close()
+    verify = emobj.SetOfParticles(filename=db_path)
+    assert len(verify) == 2
+    bridge_verify = res.resolve_set_of_particles_to_bridge_particles(verify)
+    assert bridge_verify[0].sampling_rate == pytest.approx(1.0)
+    assert bridge_verify[1].sampling_rate == pytest.approx(2.0)

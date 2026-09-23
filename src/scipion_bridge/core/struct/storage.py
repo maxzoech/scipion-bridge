@@ -356,7 +356,7 @@ class StagingEngine(_BaseStorage):
         field_key, _ = self._decompose(key)
         if field_key in self._data or field_key in self._chunks:
             return True
-        
+
         return any(
             k[: len(field_key)] == field_key
             for k in (*self._data.keys(), *self._chunks.keys())

@@ -255,5 +255,16 @@ def test_collection_schema_print_tree_single_struct_entry(
     assert "score" in captured
 
 
+def test_standalone_collection_schema_and_item_type() -> None:
+    # Test item_type classmethod
+    assert Collection[MinorCluster].item_type() is MinorCluster
+    with pytest.raises(AssertionError, match="Cannot retrieve item_type"):
+        Collection.item_type()
+
+    # Test class schema raises NotImplementedError
+    with pytest.raises(NotImplementedError):
+        Collection[MinorCluster].schema()
+
+
 if __name__ == "__main__":
     test_set_of_structs_with_collection()

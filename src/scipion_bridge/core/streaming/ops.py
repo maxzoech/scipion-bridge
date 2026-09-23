@@ -4,7 +4,6 @@ from typing import (
     Dict,
     Callable,
     Any,
-    Type,
     TypeAlias,
     Union,
     Tuple,
@@ -14,8 +13,7 @@ from typing import (
     cast,
     overload,
 )
-from functools import partial, reduce
-from pyrsistent import pdeque, PDeque
+from functools import partial
 
 from scipion_bridge.core.struct import Struct
 from scipion_bridge.core import struct
@@ -181,37 +179,6 @@ class AccumulateOp(Op, Generic[E, S]):
             )
             .flatten()
             .filter(lambda x: x is not None)
-        )
-
-
-class ReduceOutputOp(Op):
-    """Reduce operation node that accumulates input values into a single output."""
-
-    def __init__(self):
-        super().__init__(upstream=None)
-
-    def _reduce_func(self, acc: Any, x: Any) -> Any:
-        if isinstance(x, FlushSignal):
-            return x
-
-        for k, value in x.items():
-            if not isinstance(value, struct.Set):
-                raise ValueError(
-                    f"ReduceOutputOp expects input values to be of type struct.Set, got {type(value)} for key '{k}'."
-                )
-
-            if k in acc:
-                acc[k] = struct.concat([acc[k], value])
-            else:
-                acc[k] = value
-
-        return acc
-
-    def transform(self, *streams: Stream) -> Stream:
-        return streams[0].accumulate(
-            self._reduce_func,
-            start={},
-            returns_state=False,
         )
 
 
@@ -639,7 +606,7 @@ class GroupByOp(GroupedOp):
                 return item[int(self.key)]
             if hasattr(item, "__getitem__"):
                 try:
-                    return item[self.key]
+                    return item[self.key] # type: ignore
                 except Exception:
                     pass
             raise KeyError(
