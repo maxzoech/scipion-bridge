@@ -318,3 +318,67 @@ def test_sub_pipeline_chunk_and_flush():
     flushed_keys = [item[0] for item in received[3:]]
     assert 1 in flushed_keys
     assert 2 in flushed_keys
+
+
+def test_join_on_key_with_count():
+    received = []
+    source = Source("pairs")
+    sink_node = (
+        source.as_keyed().join_on_key(count=2).sink(lambda x: received.append(x))
+    )
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(pairs=("class_a", 10))
+    assert len(received) == 0  # 1 key < 2
+
+    pipeline.send(pairs=("class_b", 20))
+    # Barrier met (2 unique keys) -> emits joined dict
+    assert len(received) == 1
+    assert received[0] == {"class_a": 10, "class_b": 20}
+
+    # Next cycle
+    pipeline.send(pairs=("class_a", 30))
+    assert len(received) == 1
+
+    pipeline.flush()
+    # Flushes partial barrier dictionary
+    assert len(received) == 2
+    assert received[1] == {"class_a": 30}
+
+
+def test_join_on_key_flush_only():
+    received = []
+    source = Source("pairs")
+    sink_node = source.as_keyed().join_on_key().sink(lambda x: received.append(x))
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(pairs=(1, "model_1"))
+    pipeline.send(pairs=(2, "model_2"))
+    pipeline.send(pairs=(3, "model_3"))
+    assert len(received) == 0
+
+    pipeline.flush()
+    assert len(received) == 1
+    assert received[0] == {1: "model_1", 2: "model_2", 3: "model_3"}
+
+
+def test_sub_pipeline_fan_out_fan_in():
+    received = []
+    source = Source("particles")
+    sink_node = (
+        source.group_by(
+            "class_id",
+            pipeline=lambda sub: sub.map(lambda p: f"aligned_{p.id}"),
+        )
+        .join_on_key(count=2)
+        .map(lambda d: {k: f"{v}_done" for k, v in d.items()})
+        .sink(lambda x: received.append(x))
+    )
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(particles=Particle(id=101, class_id=1, score=1.0))
+    assert len(received) == 0
+
+    pipeline.send(particles=Particle(id=202, class_id=2, score=2.0))
+    assert len(received) == 1
+    assert received[0] == {1: "aligned_101_done", 2: "aligned_202_done"}

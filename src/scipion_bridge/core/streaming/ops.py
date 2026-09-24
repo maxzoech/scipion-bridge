@@ -579,6 +579,14 @@ class GroupedOp(Op):
         """Exit grouped stream mode, emitting (key, value) pairs to a standard Op stream."""
         return self.op(UnkeyOp())
 
+    def join_on_key(self, count: Optional[int] = None) -> "JoinOnKeyOp":
+        """Synchronize and fan in grouped (key, value) pairs into a dictionary {key: value}."""
+        return self.op(JoinOnKeyOp(count=count))
+
+    def join_by_key(self, count: Optional[int] = None) -> "JoinOnKeyOp":
+        """Alias for join_on_key."""
+        return self.join_on_key(count=count)
+
 
 class AsKeyedOp(GroupedOp):
     """
@@ -616,6 +624,64 @@ class UnkeyOp(Op):
 
     def transform(self, *streams: Stream) -> Stream:
         return streams[0]
+
+
+class JoinOnKeyOp(Op):
+    """Synchronization barrier that collects grouped (key, value) pairs into a dictionary {key: value}.
+
+    If count is specified, emits the joined dictionary whenever `count` unique keys have been collected,
+    then resets for the next barrier cycle.
+    If count is None, buffers all incoming (key, value) pairs until a FlushSignal is received,
+    then emits the complete joined dictionary.
+    """
+
+    def __init__(
+        self,
+        count: Optional[int] = None,
+        upstream: Optional[List[Node]] = None,
+    ):
+        super().__init__(upstream=upstream)
+        if count is not None and count <= 0:
+            raise ValueError(f"JoinOnKey count must be positive, got {count}")
+        self.count = count
+
+    def _accumulate_join(
+        self,
+        state: Dict[Any, Any],
+        new_item: Any,
+    ) -> Tuple[Dict[Any, Any], List[Any]]:
+        emitted: List[Any] = []
+
+        match new_item:
+            case FlushSignal():
+                if state:
+                    emitted.append(dict(state))
+                emitted.append(FLUSH)
+                return {}, emitted
+
+            case (k, v):
+                state = dict(state)
+                state[k] = v
+                if self.count is not None and len(state) >= self.count:
+                    emitted.append(state)
+                    return {}, emitted
+                return state, emitted
+
+            case _:
+                raise TypeError(
+                    f"JoinOnKeyOp expects (key, value) pairs, got {type(new_item).__name__}"
+                )
+
+    def transform(self, *streams: Stream) -> Stream:
+        return (
+            streams[0]
+            .accumulate(
+                self._accumulate_join,
+                start={},
+                returns_state=True,
+            )
+            .flatten()
+        )
 
 
 class GroupByOp(GroupedOp):
