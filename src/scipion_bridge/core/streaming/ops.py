@@ -80,9 +80,38 @@ class Op(Node):
         """Unroll lists, tuples, or struct.Set items into individual emissions."""
         return self.op(FlattenOp())
 
-    def group_by(self, key: Union[Callable[[Any], Any], str, int]) -> "GroupByOp":
-        """Group stream items by key, emitting (key, full_item) pairs."""
-        return self.op(GroupByOp(key))
+    @overload
+    def group_by(
+        self,
+        key: Union[Callable[[Any], Any], str, int],
+        pipeline: None = None,
+    ) -> "GroupByOp": ...
+
+    @overload
+    def group_by(
+        self,
+        key: Union[Callable[[Any], Any], str, int],
+        pipeline: Callable[["Op"], "Op"],
+    ) -> "GroupSubPipelineOp": ...
+
+    def group_by(
+        self,
+        key: Union[Callable[[Any], Any], str, int],
+        pipeline: Optional[Callable[["Op"], "Op"]] = None,
+    ) -> Union["GroupByOp", "GroupSubPipelineOp"]:
+        """Group stream items by key.
+
+        If pipeline is provided, routes items for each key through an independent sub-pipeline.
+        Otherwise, emits (key, full_item) pairs.
+        """
+        if pipeline is not None:
+            return self.op(
+                GroupSubPipelineOp(
+                    key=key,
+                    sub_pipeline_fn=pipeline,
+                ),
+            )
+        return self.op(GroupByOp(key=key))
 
     def as_keyed(self) -> "AsKeyedOp":
         """Promote a stream of (key, value) pairs to a GroupedOp without extra wrapping."""
@@ -92,9 +121,20 @@ class Op(Node):
         self,
         func: Callable[[Any, Any], Any],
         start: Any = _NO_DEFAULT,
+        emit_on_flush_only: bool = False,
     ) -> "ReduceOp":
-        """Reduce stream items using func into a single value, emitted upon FlushSignal."""
-        return self.op(ReduceOp(func, start=start))
+        """Reduce stream items using func.
+
+        Supports online streaming reductions (default, emitting intermediate results)
+        and classic terminal reductions (emit_on_flush_only=True).
+        """
+        return self.op(
+            ReduceOp(
+                func,
+                start=start,
+                emit_on_flush_only=emit_on_flush_only,
+            ),
+        )
 
     def sink(self, callback: Callable[[Any], Any]) -> Sink:
         """Attach a terminal Sink node and return it."""
@@ -654,43 +694,189 @@ class GroupedMapOp(MapOp, GroupedOp):
         return streams[0].map(self._map_func)
 
 
-class ReduceOp(Op):
+class SubSource(Op):
+    """Virtual root node passed into sub-pipeline definitions.
+
+    Serves as the entry point for per-key sub-streams.
     """
-    Folds stream elements using an accumulator function and emits the final reduced value upon FlushSignal.
+
+    def __init__(self, key: Any = None):
+        super().__init__(upstream=[])
+        self.key = key
+        self._stream: Stream = Stream()
+
+    def transform(self, *streams: Stream) -> Stream:
+        return self._stream
+
+
+class GroupSubPipelineOp(GroupedOp):
+    """Routes stream elements per key through isolated sub-pipeline instances.
+
+    Emits (key, sub_output) pairs whenever an inner sub-pipeline produces an output.
+    """
+
+    def __init__(
+        self,
+        key: Union[Callable[[Any], Any], str, int],
+        sub_pipeline_fn: Callable[[Op], Op],
+        upstream: Optional[List[Node]] = None,
+    ):
+        super().__init__(upstream=upstream)
+        self.key = key
+        self.sub_pipeline_fn = sub_pipeline_fn
+
+    def _extract_key(self, item: Any) -> Any:
+        if callable(self.key):
+            return self.key(item)
+        if isinstance(self.key, int):
+            return item[self.key]
+        if isinstance(self.key, str):
+            if isinstance(item, (dict, Mapping)) and self.key in item:
+                return item[self.key]
+            if hasattr(item, self.key):
+                return getattr(item, self.key)
+            if isinstance(item, (list, tuple)) and self.key.isdigit():
+                return item[int(self.key)]
+            if hasattr(item, "__getitem__"):
+                try:
+                    return item[self.key]  # type: ignore
+                except Exception:
+                    pass
+            raise KeyError(
+                f"Field or attribute '{self.key}' not found on {type(item).__name__}."
+            )
+        raise TypeError(
+            f"Unsupported key type '{type(self.key).__name__}'. Expected callable, str, or int."
+        )
+
+    def _accumulate_sub_pipelines(
+        self,
+        sub_pipelines: Dict[Any, Tuple[Stream, Stream, List[Any]]],
+        new_item: Any,
+    ) -> Tuple[Dict[Any, Tuple[Stream, Stream, List[Any]]], List[Any]]:
+        emitted: List[Any] = []
+
+        match new_item:
+            case FlushSignal():
+                for k, (in_stream, _, batch_buffer) in list(sub_pipelines.items()):
+                    batch_buffer.clear()
+                    in_stream.emit(FLUSH)
+                    emitted.extend(batch_buffer)
+                sub_pipelines.clear()
+                emitted.append(FLUSH)
+                return sub_pipelines, emitted
+
+            case _:
+                k = self._extract_key(new_item)
+                if k not in sub_pipelines:
+                    sub_source = SubSource(key=k)
+                    sub_tail = self.sub_pipeline_fn(sub_source)
+                    assert isinstance(
+                        sub_tail,
+                        Op,
+                    ), f"Sub-pipeline must return an Op, got {type(sub_tail).__name__}"
+                    batch_buffer: List[Any] = []
+
+                    def _on_sub_emit(
+                        val: Any,
+                        key: Any = k,
+                        buf: List[Any] = batch_buffer,
+                    ) -> None:
+                        if not isinstance(val, FlushSignal):
+                            buf.append((key, val))
+
+                    compiled_stream = sub_tail.compile(
+                        sources_map={},
+                        compile_cache={},
+                    )
+                    compiled_stream.sink(_on_sub_emit)
+                    sub_pipelines[k] = (
+                        sub_source._stream,
+                        compiled_stream,
+                        batch_buffer,
+                    )
+
+                in_stream, _, batch_buffer = sub_pipelines[k]
+                batch_buffer.clear()
+                in_stream.emit(new_item)
+                emitted.extend(batch_buffer)
+                return sub_pipelines, emitted
+
+    def transform(self, *streams: Stream) -> Stream:
+        return (
+            streams[0]
+            .accumulate(
+                self._accumulate_sub_pipelines,
+                start={},
+                returns_state=True,
+            )
+            .flatten()
+        )
+
+
+class ReduceOp(Op):
+    """Folds stream elements using an accumulator function.
+
+    Supports online streaming reductions (e.g. EMA with warmup) and terminal reductions.
     """
 
     def __init__(
         self,
         func: Callable[[Any, Any], Any],
         start: Any = _NO_DEFAULT,
+        emit_on_flush_only: bool = False,
         upstream: Optional[List[Node]] = None,
     ):
         super().__init__(upstream=upstream)
         self.func = func
         self.start = start
+        self.emit_on_flush_only = emit_on_flush_only
 
     def _reduce_step(
         self,
-        state: Tuple[Any, bool, bool],
+        state: Tuple[Any, bool, bool, Any],
         new_val: Any,
-    ) -> Tuple[Tuple[Any, bool, bool], List[Any]]:
-        acc, has_val, has_start = state
+    ) -> Tuple[Tuple[Any, bool, bool, Any], List[Any]]:
+        acc, has_val, has_start, last_emit = state
 
-        if isinstance(new_val, FlushSignal):
-            emitted: List[Any] = []
-            if has_val:
-                emitted.append(acc)
-            emitted.append(FLUSH)
-            reset_acc = self.start if has_start else None
-            return (reset_acc, has_start, has_start), emitted
+        match new_val:
+            case FlushSignal():
+                emitted: List[Any] = []
+                if has_val and self.emit_on_flush_only:
+                    if last_emit is not _NO_DEFAULT and last_emit is not None:
+                        emitted.append(last_emit)
+                    else:
+                        emitted.append(acc)
+                emitted.append(FLUSH)
+                reset_acc = self.start if has_start else None
+                return (reset_acc, has_start, has_start, _NO_DEFAULT), emitted
 
-        if not has_val:
-            acc = new_val
-            has_val = True
-        else:
-            acc = self.func(acc, new_val)
+            case _:
+                if not has_val and not has_start:
+                    acc = new_val
+                    return (acc, True, False, _NO_DEFAULT), []
 
-        return (acc, True, has_start), []
+                res = self.func(acc, new_val)
+                emitted_items: List[Any] = []
+
+                match res:
+                    case (next_acc, emit_val) if isinstance(res, tuple):
+                        acc = next_acc
+                        last_emit = emit_val
+                        if not self.emit_on_flush_only and emit_val is not None:
+                            emitted_items.append(emit_val)
+
+                    case None:
+                        # Suppress emission, keep current acc
+                        pass
+
+                    case next_acc:
+                        acc = next_acc
+                        last_emit = next_acc
+                        if not self.emit_on_flush_only:
+                            emitted_items.append(next_acc)
+
+                return (acc, True, has_start, last_emit), emitted_items
 
     def transform(self, *streams: Stream) -> Stream:
         has_start = self.start is not _NO_DEFAULT
@@ -699,7 +885,7 @@ class ReduceOp(Op):
             streams[0]
             .accumulate(
                 self._reduce_step,
-                start=(initial_acc, has_start, has_start),
+                start=(initial_acc, has_start, has_start, _NO_DEFAULT),
                 returns_state=True,
             )
             .flatten()

@@ -1,4 +1,4 @@
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import pytest
 
 import scipion_bridge as B
@@ -28,16 +28,18 @@ class ClassModel(B.Struct):
 def test_reduce_op_with_start():
     received = []
     source = Source("numbers")
-    sink_node = source.reduce(lambda acc, x: acc + x, start=10).sink(
-        lambda x: received.append(x)
-    )
+    sink_node = source.reduce(
+        lambda acc, x: acc + x,
+        start=10,
+        emit_on_flush_only=True,
+    ).sink(lambda x: received.append(x))
     pipeline = Pipeline.from_sink(sink_node)
 
     pipeline.send(numbers=1)
     pipeline.send(numbers=2)
     pipeline.send(numbers=3)
 
-    # In a reduction, nothing is emitted until flush
+    # In a reduction with emit_on_flush_only=True, nothing is emitted until flush
     assert len(received) == 0
 
     pipeline.flush()
@@ -48,9 +50,10 @@ def test_reduce_op_with_start():
 def test_reduce_op_without_start():
     received = []
     source = Source("words")
-    sink_node = source.reduce(lambda acc, x: f"{acc}-{x}").sink(
-        lambda x: received.append(x)
-    )
+    sink_node = source.reduce(
+        lambda acc, x: f"{acc}-{x}",
+        emit_on_flush_only=True,
+    ).sink(lambda x: received.append(x))
     pipeline = Pipeline.from_sink(sink_node)
 
     pipeline.send(words="a")
@@ -67,9 +70,11 @@ def test_reduce_op_without_start():
 def test_reduce_op_empty_stream():
     received_with_start = []
     source1 = Source("items")
-    sink1 = source1.reduce(lambda a, b: a + b, start=0).sink(
-        lambda x: received_with_start.append(x)
-    )
+    sink1 = source1.reduce(
+        lambda a, b: a + b,
+        start=0,
+        emit_on_flush_only=True,
+    ).sink(lambda x: received_with_start.append(x))
     pipeline1 = Pipeline.from_sink(sink1)
     pipeline1.flush()
     # If start was provided, empty stream emits start value
@@ -77,13 +82,101 @@ def test_reduce_op_empty_stream():
 
     received_no_start = []
     source2 = Source("items")
-    sink2 = source2.reduce(lambda a, b: a + b).sink(
-        lambda x: received_no_start.append(x)
-    )
+    sink2 = source2.reduce(
+        lambda a, b: a + b,
+        emit_on_flush_only=True,
+    ).sink(lambda x: received_no_start.append(x))
     pipeline2 = Pipeline.from_sink(sink2)
     pipeline2.flush()
     # If no start was provided, empty stream emits nothing
     assert received_no_start == []
+
+
+def test_reduce_online_scalar():
+    received = []
+    source = Source("numbers")
+    sink_node = source.reduce(
+        lambda acc, x: acc + x,
+        start=0,
+    ).sink(lambda x: received.append(x))
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(numbers=1)
+    assert received == [1]
+
+    pipeline.send(numbers=2)
+    assert received == [1, 3]
+
+    pipeline.send(numbers=3)
+    assert received == [1, 3, 6]
+
+    pipeline.flush()
+    assert received == [1, 3, 6]
+
+
+def test_reduce_decoupled_emission():
+    # State is (count, sum), emits average only every 2 items
+    def running_avg_every_2(
+        state: Tuple[int, float],
+        x: float,
+    ) -> Tuple[Tuple[int, float], Optional[float]]:
+        count, total = state
+        new_count = count + 1
+        new_total = total + x
+        if new_count % 2 == 0:
+            return (new_count, new_total), new_total / new_count
+        return (new_count, new_total), None
+
+    received = []
+    source = Source("values")
+    sink_node = source.reduce(
+        running_avg_every_2,
+        start=(0, 0.0),
+    ).sink(lambda x: received.append(x))
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(values=10.0)
+    assert received == []
+
+    pipeline.send(values=20.0)
+    assert received == [15.0]
+
+    pipeline.send(values=30.0)
+    assert received == [15.0]
+
+    pipeline.send(values=40.0)
+    assert received == [15.0, 25.0]
+
+    pipeline.flush()
+    assert received == [15.0, 25.0]
+
+
+def test_reduce_none_suppression():
+    # Function returns None to ignore certain inputs while preserving accumulator
+    def ignore_negatives(acc: int, x: int) -> Optional[int]:
+        if x < 0:
+            return None
+        return acc + x
+
+    received = []
+    source = Source("numbers")
+    sink_node = source.reduce(
+        ignore_negatives,
+        start=0,
+    ).sink(lambda x: received.append(x))
+    pipeline = Pipeline.from_sink(sink_node)
+
+    pipeline.send(numbers=10)
+    assert received == [10]
+
+    pipeline.send(numbers=-5)  # Ignored / suppressed
+    assert received == [10]
+
+    pipeline.send(numbers=20)  # 10 + 20 = 30
+    assert received == [10, 30]
+
+    pipeline.flush()
+    assert received == [10, 30]
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +416,7 @@ def test_2d_classification_pipeline_pattern():
         .group_by(lambda p: p.class_id)
         .chunk(2)
         .map(compute_class_alignment)
-        .reduce(accumulate_classes, start={})
+        .reduce(accumulate_classes, start={}, emit_on_flush_only=True)
         .sink(lambda x: received.append(x))
     )
     pipeline = Pipeline.from_sink(sink_node)

@@ -1,5 +1,6 @@
 from .ops import (
     Source,
+    SubSource,
     MapOp,
     ChunkOp,
     MinChunkOp,
@@ -8,6 +9,7 @@ from .ops import (
     CombineOp,
     FlattenOp,
     GroupByOp,
+    GroupSubPipelineOp,
     GroupedOp,
     GroupedMapOp,
     KeyedChunkOp,
@@ -24,6 +26,7 @@ from .pipeline import Pipeline
 
 __all__ = [
     "Source",
+    "SubSource",
     "MapOp",
     "ChunkOp",
     "MinChunkOp",
@@ -32,6 +35,7 @@ __all__ = [
     "CombineOp",
     "FlattenOp",
     "GroupByOp",
+    "GroupSubPipelineOp",
     "GroupedOp",
     "GroupedMapOp",
     "KeyedChunkOp",

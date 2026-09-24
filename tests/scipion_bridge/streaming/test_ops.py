@@ -602,10 +602,10 @@ def test_combine_latest_flush_barrier():
     received = []
     source_a = Source("a")
     source_b = Source("b")
-    # ReduceOp only emits its accumulated list upon receiving FlushSignal
+    # ReduceOp with emit_on_flush_only=True only emits its accumulated list upon receiving FlushSignal
     sink_node = (
         source_a.combine_latest(source_b)
-        .reduce(lambda acc, x: acc + [x], start=[])
+        .reduce(lambda acc, x: acc + [x], start=[], emit_on_flush_only=True)
         .sink(lambda x: received.append(x))
     )
     pipeline = Pipeline.from_sink(sink_node)
