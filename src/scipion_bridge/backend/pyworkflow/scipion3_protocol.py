@@ -58,6 +58,40 @@ def reduce_minibatch_to_persistent_output(
                     )
                     persistent_set.enableAppend()
                     existing_classes = {}
+
+                    input_particles = None
+                    if hasattr(protocol, "inputTypes"):
+                        for input_name in protocol.inputTypes:
+                            source = getattr(protocol, input_name, None)
+                            if (
+                                source is not None
+                                and hasattr(source, "hasValue")
+                                and source.hasValue()
+                            ):
+                                val = source.get()
+                                if isinstance(
+                                    val,
+                                    (emobj.SetOfParticles, emobj.SetOfParticlesFlex),
+                                ):
+                                    input_particles = val
+                                    break
+
+                    if input_particles is not None:
+                        persistent_set.setImages(input_particles)
+
+                    if (
+                        persistent_set.getImages() is None
+                        and minibatch_obj.getImages() is not None
+                    ):
+                        persistent_set.setImages(minibatch_obj.getImages())
+                    if (
+                        not persistent_set.getSamplingRate()
+                        and minibatch_obj.getSamplingRate()
+                        and persistent_set.getImages() is not None
+                    ):
+                        persistent_set.getImages().setSamplingRate(
+                            minibatch_obj.getSamplingRate(),
+                        )
                 case emobj.SetOfClasses2D():  # type: ignore
                     persistent_set.enableAppend()
                     existing_classes = persistent_set._getExistingItems()
@@ -65,6 +99,19 @@ def reduce_minibatch_to_persistent_output(
                         first_item = next(iter(existing_classes.values()))
                         persistent_set._getMapper().db.setupCommands(
                             first_item.getObjDict(includeClass=True),
+                        )
+                    if (
+                        persistent_set.getImages() is None
+                        and minibatch_obj.getImages() is not None
+                    ):
+                        persistent_set.setImages(minibatch_obj.getImages())
+                    if (
+                        not persistent_set.getSamplingRate()
+                        and minibatch_obj.getSamplingRate()
+                        and persistent_set.getImages() is not None
+                    ):
+                        persistent_set.getImages().setSamplingRate(
+                            minibatch_obj.getSamplingRate(),
                         )
                 case _:
                     raise TypeError(
@@ -77,6 +124,13 @@ def reduce_minibatch_to_persistent_output(
                     case emobj.Class2D() as target_cls:  # type: ignore
                         if mb_cls.hasRepresentative():
                             target_cls.setRepresentative(mb_cls.getRepresentative())
+                        if (
+                            mb_cls.getSamplingRate()
+                            and not target_cls.getSamplingRate()
+                        ):
+                            target_cls.setSamplingRate(mb_cls.getSamplingRate())
+                        if mb_cls.getDim() is not None and target_cls.getDim() is None:
+                            target_cls.setDim(mb_cls.getDim())
                         target_cls.enableAppend()
                         for p in mb_cls:
                             item = p.clone()
@@ -89,6 +143,10 @@ def reduce_minibatch_to_persistent_output(
                         new_cls = emobj.Class2D()  # type: ignore
                         new_cls.setObjId(cid)
                         new_cls.copyInfo(persistent_set)
+                        if mb_cls.getSamplingRate():
+                            new_cls.setSamplingRate(mb_cls.getSamplingRate())
+                        if mb_cls.getDim() is not None:
+                            new_cls.setDim(mb_cls.getDim())
                         if mb_cls.hasRepresentative():
                             new_cls.setRepresentative(mb_cls.getRepresentative())
                         else:
@@ -102,6 +160,20 @@ def reduce_minibatch_to_persistent_output(
                         new_cls._getMapper().commit()
                         persistent_set.update(new_cls)
                         existing_classes[cid] = new_cls
+
+            if (
+                persistent_set.getImages() is None
+                and minibatch_obj.getImages() is not None
+            ):
+                persistent_set.setImages(minibatch_obj.getImages())
+            if (
+                not persistent_set.getSamplingRate()
+                and minibatch_obj.getSamplingRate()
+                and persistent_set.getImages() is not None
+            ):
+                persistent_set.getImages().setSamplingRate(
+                    minibatch_obj.getSamplingRate()
+                )
 
             persistent_set.write()
             persistent_set._getMapper().commit()

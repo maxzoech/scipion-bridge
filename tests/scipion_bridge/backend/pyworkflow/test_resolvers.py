@@ -658,3 +658,148 @@ def test_scipion_protocol_wrapper_write_output_data_handler(tmp_path):
     bridge_verify = res.resolve_set_of_particles_to_bridge_particles(verify)
     assert bridge_verify[0].sampling_rate == pytest.approx(1.0)
     assert bridge_verify[1].sampling_rate == pytest.approx(2.0)
+
+
+def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
+    """Test that resolving Collection[Class2D] writes MRCs and populates all SQLite fields."""
+    import sqlite3
+    from pathlib import Path
+
+    class _MockPointer:
+        def __init__(self, val):
+            self._val = val
+
+        def get(self):
+            return self._val
+
+        def hasValue(self):
+            return True
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+            flex_set = emobj.SetOfParticlesFlex(filename=str(p / "input_parts.sqlite"))
+            flex_set.setSamplingRate(1.23)
+            self.inputTypes = ["inputParticles"]
+            self.inputParticles = _MockPointer(flex_set)
+
+        def _createSetOfClasses2D(self, suffix=""):
+            db_path = str(self.p / f"classes{suffix}.sqlite")
+            return emobj.SetOfClasses2D(filename=db_path)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+
+    # 1. Create a representative particle with pixels
+    rep_pixels = np.ones((16, 16), dtype=np.float32) * 5.0
+    rep = BParticle(pixels=rep_pixels, sampling_rate=1.23)
+
+    # 2. Create Particles with CTF, Coordinates, and pixels
+    p1 = BParticle(
+        pixels=np.ones((16, 16), dtype=np.float32) * 1.0,
+        sampling_rate=1.23,
+    )
+    p1.ctf.defocus_u = 10000.0
+    p1.ctf.defocus_v = 11000.0
+    p1.ctf.defocus_angle = 45.0
+    p1.coordinate.x = 100.0
+    p1.coordinate.y = 200.0
+
+    p2 = BParticle(
+        pixels=np.ones((16, 16), dtype=np.float32) * 2.0,
+        sampling_rate=1.23,
+    )
+    p2.ctf.defocus_u = 12000.0
+    p2.ctf.defocus_v = 13000.0
+    p2.ctf.defocus_angle = 30.0
+    p2.coordinate.x = 150.0
+    p2.coordinate.y = 250.0
+
+    part_set = B.Set[BParticle]([p1, p2])
+    cls1 = BClass2D(class_id=1, representative=rep, particles=part_set)
+
+    coll = B.Collection[BClass2D](size=2)
+    coll[0] = cls1
+
+    ctx = res.PyWorkflowResolutionContext(
+        protocol=proto,
+        output_name="test_classes",
+        append=False,
+    )
+    soc = res.resolve_collection_classes2d_to_set_of_classes2d(coll, metadata=ctx)
+    assert soc.getSamplingRate() == pytest.approx(1.23)
+    images_ref = soc.getImages()
+    db_file = soc.getFileName()
+    soc.close()
+
+    # Verify SQLite tables directly
+    conn = sqlite3.connect(db_file)
+    cur = conn.cursor()
+
+    # Check Objects table (classes)
+    cur.execute("SELECT * FROM Objects;")
+    obj_rows = cur.fetchall()
+    assert len(obj_rows) == 1
+
+    # Check representative filename in Objects table
+    cur.execute(
+        "SELECT column_name FROM Classes WHERE label_property='_representative._filename';"
+    )
+    rep_fn_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {rep_fn_col} FROM Objects;")
+    rep_fn_val = cur.fetchone()[0]
+    assert rep_fn_val is not None
+    assert rep_fn_val.endswith(".mrc")
+    assert (tmp_path / rep_fn_val).exists() or Path(rep_fn_val).exists()
+
+    # Check Class001_Objects table (particles in class 1)
+    cur.execute("SELECT * FROM Class001_Objects;")
+    part_rows = cur.fetchall()
+    assert len(part_rows) == 2
+
+    # Check particle filename
+    cur.execute(
+        "SELECT column_name FROM Class001_Classes WHERE label_property='_filename';"
+    )
+    part_fn_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {part_fn_col} FROM Class001_Objects;")
+    part_fn_vals = [r[0] for r in cur.fetchall()]
+    assert all(fn is not None and fn.endswith(".mrcs") for fn in part_fn_vals)
+    assert Path(part_fn_vals[0]).exists()
+
+    # Check Particle type in Class001_Classes
+    cur.execute("SELECT class_name FROM Class001_Classes WHERE column_name='c00';")
+    assert cur.fetchone()[0] == "Particle"
+
+    # Check CTF defocusU
+    cur.execute(
+        "SELECT column_name FROM Class001_Classes WHERE label_property='_ctfModel._defocusU';"
+    )
+    defocus_u_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {defocus_u_col} FROM Class001_Objects;")
+    defocus_vals = [r[0] for r in cur.fetchall()]
+    assert defocus_vals == [10000.0, 12000.0]
+
+    # Check coordinates
+    cur.execute(
+        "SELECT column_name FROM Class001_Classes WHERE label_property='_coordinate._x';"
+    )
+    coord_x_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {coord_x_col} FROM Class001_Objects;")
+    coord_x_vals = [r[0] for r in cur.fetchall()]
+    assert coord_x_vals == [100, 150]
+
+    conn.close()
+
+    # Reopen with Scipion and check sampling rate and dimensions
+    reopened = emobj.SetOfClasses2D(filename=db_file)
+    if images_ref is not None:
+        reopened.setImages(images_ref)
+        assert reopened.getSamplingRate() == pytest.approx(1.23)
+    first_cls = reopened.getFirstItem()
+    assert first_cls.getSamplingRate() == pytest.approx(1.23)
+    assert first_cls.getRepresentative().getSamplingRate() == pytest.approx(1.23)
+    assert first_cls.getRepresentative().getFileName() == rep_fn_val
+    reopened.close()

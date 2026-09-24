@@ -1,3 +1,4 @@
+import os
 import sys
 import uuid
 import numpy as np
@@ -260,18 +261,57 @@ if HAS_PWEM:
 
         return particle
 
+    def _populate_ctf_from_struct(particle: Any, ctf: spa.CTF) -> None:
+        ctf_model = emobj.CTFModel()  # type: ignore
+        has_ctf = False
+        for attr, setter in (
+            ("defocus_u", ctf_model.setDefocusU),
+            ("defocus_v", ctf_model.setDefocusV),
+            ("defocus_angle", ctf_model.setDefocusAngle),
+            ("phase_shift", ctf_model.setPhaseShift),
+            ("resolution", ctf_model.setResolution),
+            ("fit_quality", ctf_model.setFitQuality),
+        ):
+            if ctf.is_initialized(attr):
+                setter(float(getattr(ctf, attr)))
+                has_ctf = True
+        if has_ctf:
+            particle.setCTF(ctf_model)
+
+    def _populate_coord_from_struct(particle: Any, coord: spa.Coordinate) -> None:
+        coord_model = emobj.Coordinate()  # type: ignore
+        has_coord = False
+        if coord.is_initialized("x"):
+            coord_model.setX(int(coord.x))
+            has_coord = True
+        if coord.is_initialized("y"):
+            coord_model.setY(int(coord.y))
+            has_coord = True
+        if has_coord:
+            particle.setCoordinate(coord_model)
+
     @resolver
     def resolve_bridge_particle_to_scipion_particle(
         value: spa.Particle,
     ) -> Particle:
         """Convert a scipion-bridge Particle struct to a Scipion/pwem Particle object."""
         particle = emobj.Particle()  # type: ignore
+        is_flex = isinstance(value, spa.FlexParticle) and value.is_initialized(
+            "embeddings"
+        )
+        particle = ParticleFlex(progName=PROG_NAME) if is_flex else emobj.Particle()  # type: ignore
+        if is_flex:
+            particle.getFlexInfo().setProgName(PROG_NAME)
+            embeddings = np.asarray(value.embeddings)
+            particle.setZFlex(embeddings.tolist())
 
         try:
             sr = value.sampling_rate
             particle.setSamplingRate(float(sr))
         except UninitializedFieldError:
             pass
+        if value.is_initialized("sampling_rate"):
+            particle.setSamplingRate(float(value.sampling_rate))
 
         try:
             ctf_model = emobj.CTFModel()  # type: ignore
@@ -282,6 +322,8 @@ if HAS_PWEM:
             particle.setCTF(ctf_model)
         except UninitializedFieldError:
             pass
+        if value.is_initialized("ctf"):
+            _populate_ctf_from_struct(particle, value.ctf)
 
         try:
             coord = emobj.Coordinate()  # type: ignore
@@ -290,6 +332,8 @@ if HAS_PWEM:
             particle.setCoordinate(coord)
         except UninitializedFieldError:
             pass
+        if value.is_initialized("coordinate"):
+            _populate_coord_from_struct(particle, value.coordinate)
 
         return particle
 
@@ -312,7 +356,27 @@ if HAS_PWEM:
 
         if n == 0:
             return particle_set
+            return struct.Set[spa.Particle](capacity=0)
 
+        db = value._getMapper().db
+        zflex_col = _col(db, "_zFlex")
+        row_keys = set(raw_rows[0].keys()) if raw_rows else set()
+        if zflex_col and zflex_col in row_keys:
+            flex_set: struct.Set[spa.FlexParticle] = struct.Set[spa.FlexParticle](
+                capacity=n
+            )
+            flex_set["pixels"] = pixels
+            _fill_sampling_rate(flex_set, raw_rows, db)
+            _fill_ctf_columns(flex_set, raw_rows, db)
+            _fill_coordinate_columns(flex_set, raw_rows, db)
+            embeddings = np.array(
+                [np.fromstring(row[zflex_col], sep=",") for row in raw_rows],
+                dtype=np.float32,
+            )
+            flex_set["embeddings"] = embeddings
+            return flex_set  # type: ignore[return-value]
+
+        particle_set = struct.Set[spa.Particle](capacity=n)
         particle_set["pixels"] = pixels
 
         db = value._getMapper().db
@@ -516,6 +580,9 @@ if HAS_PWEM:
         bridge_cls: spa.Class2D,
         out_classes: SetOfClasses2D,
         default_id: Optional[int] = None,
+        metadata: Optional[PyWorkflowResolutionContext] = None,
+        output_name: Optional[str] = None,
+        unique_id: Optional[str] = None,
     ) -> Class2D:
         """Convert a single bridge spa.Class2D to a Scipion Class2D and append its particles."""
         scipion_cls = Class2D()
@@ -528,9 +595,32 @@ if HAS_PWEM:
         scipion_cls.copyInfo(out_classes)
 
         if bridge_cls.is_initialized("representative"):
-            rep = resolve_bridge_particle_to_scipion_particle(
-                bridge_cls.representative,
-            )
+            rep_bridge = bridge_cls.representative
+            rep = resolve_bridge_particle_to_scipion_particle(rep_bridge)
+            if (
+                metadata is not None
+                and metadata.protocol is not None
+                and hasattr(metadata.protocol, "_getExtraPath")
+                and rep_bridge.is_initialized("pixels")
+            ):
+                rep_path = os.path.join(
+                    metadata.protocol._getExtraPath(),
+                    f"output_{output_name}_{unique_id}_class_{cid}_rep.mrc",
+                )
+                Path(rep_path).parent.mkdir(parents=True, exist_ok=True)
+                rep_pixels = np.array(rep_bridge.pixels, dtype=np.float32)
+                mrcfile.write(rep_path, rep_pixels, overwrite=False)
+                rep.setLocation(1, rep_path)
+                if rep_pixels.ndim >= 2:
+                    scipion_cls.setDim(
+                        (int(rep_pixels.shape[-1]), int(rep_pixels.shape[-2]), 1),
+                    )
+
+            if rep_bridge.is_initialized("sampling_rate"):
+                sr = float(rep_bridge.sampling_rate)
+                rep.setSamplingRate(sr)
+                scipion_cls.setSamplingRate(sr)
+
             scipion_cls.setRepresentative(rep)
         else:
             scipion_cls.setRepresentative(emobj.Particle())  # type: ignore
@@ -539,13 +629,51 @@ if HAS_PWEM:
 
         if bridge_cls.is_initialized("particles"):
             particles_bridge: struct.Set[spa.Particle] = bridge_cls.particles
-            for i in range(len(particles_bridge)):
-                p = resolve_bridge_particle_to_scipion_particle(
-                    particles_bridge[i],
+            n_particles = len(particles_bridge)
+            if n_particles > 0:
+                has_pixels = (
+                    metadata is not None
+                    and metadata.protocol is not None
+                    and hasattr(metadata.protocol, "_getExtraPath")
+                    and _is_column_initialized(particles_bridge, "pixels")
                 )
-                scipion_cls.append(p)
-            scipion_cls.write()
-            scipion_cls._getMapper().commit()
+                stack_path = None
+                if has_pixels:
+                    stack_path = os.path.join(
+                        metadata.protocol._getExtraPath(),
+                        f"output_{output_name}_{unique_id}_class_{cid}_particles.mrcs",
+                    )
+                    Path(stack_path).parent.mkdir(parents=True, exist_ok=True)
+                    pixels_arr = np.array(particles_bridge["pixels"], dtype=np.float32)
+                    mrcfile.write(stack_path, pixels_arr, overwrite=False)
+                    if scipion_cls.getDim() is None and pixels_arr.ndim >= 3:
+                        scipion_cls.setDim(
+                            (int(pixels_arr.shape[-1]), int(pixels_arr.shape[-2]), 1),
+                        )
+
+                has_sr = _is_column_initialized(particles_bridge, "sampling_rate")
+                has_ctf = _is_column_initialized(particles_bridge, "ctf", "defocus_u")
+                has_coord = _is_column_initialized(particles_bridge, "coordinate", "x")
+
+                for i in range(n_particles):
+                    p = emobj.Particle()
+
+                    if stack_path is not None:
+                        p.setLocation(i + 1, stack_path)
+
+                    if has_sr:
+                        p.setSamplingRate(float(particles_bridge[i].sampling_rate))
+
+                    if has_ctf:
+                        _populate_ctf_from_struct(p, particles_bridge[i].ctf)
+
+                    if has_coord:
+                        _populate_coord_from_struct(p, particles_bridge[i].coordinate)
+
+                    scipion_cls.append(p)
+
+                scipion_cls.write()
+                scipion_cls._getMapper().commit()
 
         out_classes.update(scipion_cls)
         return scipion_cls
@@ -568,13 +696,46 @@ if HAS_PWEM:
         )
         out_classes.enableAppend()
 
+        input_particles = None
+        if hasattr(metadata.protocol, "inputTypes"):
+            for input_name in metadata.protocol.inputTypes:
+                source = getattr(metadata.protocol, input_name, None)
+                if (
+                    source is not None
+                    and hasattr(source, "hasValue")
+                    and source.hasValue()
+                ):
+                    val = source.get()
+                    if isinstance(
+                        val, (emobj.SetOfParticles, emobj.SetOfParticlesFlex)
+                    ):
+                        input_particles = val
+                        break
+
+        if input_particles is not None:
+            out_classes.setImages(input_particles)
+
+        first_cls_sr = None
         for idx in value.initialized_indices():
             bridge_cls = value[idx]
-            _resolve_bridge_to_scipion_class2d(
+            sc_cls = _resolve_bridge_to_scipion_class2d(
                 bridge_cls,
                 out_classes,
                 default_id=idx + 1,
+                metadata=metadata,
+                output_name=output_name,
+                unique_id=unique_id,
             )
+            if first_cls_sr is None and sc_cls.getSamplingRate():
+                first_cls_sr = sc_cls.getSamplingRate()
+
+        if out_classes.getImages() is None:
+            img_set = emobj.SetOfParticles(filename=":memory:")
+            if first_cls_sr is not None:
+                img_set.setSamplingRate(first_cls_sr)
+            out_classes.setImages(img_set)
+        elif first_cls_sr is not None and not out_classes.getSamplingRate():
+            out_classes.getImages().setSamplingRate(first_cls_sr)
 
         out_classes.write()
         out_classes._getMapper().commit()
