@@ -533,12 +533,17 @@ if HAS_PWEM:
     # Class2D resolvers
     # ---------------------------------------------------------------------------
 
-    def _resolve_class2d_to_bridge(cls2d: Class2D) -> spa.Class2D:
+    def _resolve_class2d_to_bridge(
+        cls2d: Class2D,
+        class_id: Optional[int] = None,
+    ) -> spa.Class2D:
         """Convert a single Scipion Class2D to a bridge spa.Class2D struct."""
         particles_bridge = resolve_set_of_particles_to_bridge_particles(cls2d)
+        cid = int(cls2d.getObjId() or 1)
+        bid = class_id if class_id is not None else cid - 1
         bridge_cls = spa.Class2D(
             particles=particles_bridge,
-            class_id=int(cls2d.getObjId() or 0),
+            class_id=bid,
         )
 
         if cls2d.hasRepresentative():
@@ -558,45 +563,46 @@ if HAS_PWEM:
         """Convert a Scipion SetOfClasses2D to a scipion-bridge Collection[Class2D]."""
         items: list[tuple[int, spa.Class2D]] = []
         for cls2d in value:  # type: ignore
-            cid = int(cls2d.getObjId() or 0)
-            bridge_cls = _resolve_class2d_to_bridge(cls2d)
-            items.append((cid, bridge_cls))
+            cid = int(cls2d.getObjId() or 1)
+            idx = cid - 1
+            bridge_cls = _resolve_class2d_to_bridge(cls2d, class_id=idx)
+            items.append((idx, bridge_cls))
 
         if not items:
             return struct.Collection[spa.Class2D](size=1)
 
-        ids = [cid for cid, _ in items]
-        is_one_based = 0 not in ids and min(ids) >= 1
-        size = max(ids) if is_one_based else max(ids) + 1
-        offset = 1 if is_one_based else 0
-
-        coll = struct.Collection[spa.Class2D](size=size)
-        for cid, bridge_cls in items:
-            coll[cid - offset] = bridge_cls
+        max_idx = max(idx for idx, _ in items)
+        coll = struct.Collection[spa.Class2D](size=max_idx + 1)
+        for idx, bridge_cls in items:
+            coll[idx] = bridge_cls
 
         return coll
 
     def _resolve_bridge_to_scipion_class2d(
         bridge_cls: spa.Class2D,
         out_classes: SetOfClasses2D,
-        default_id: Optional[int] = None,
+        class_id: Optional[int] = None,
         metadata: Optional[PyWorkflowResolutionContext] = None,
         output_name: Optional[str] = None,
         unique_id: Optional[str] = None,
     ) -> Class2D:
         """Convert a single bridge spa.Class2D to a Scipion Class2D and append its particles."""
         scipion_cls = Class2D()
-        cid = (
-            int(bridge_cls.class_id)
-            if bridge_cls.is_initialized("class_id") and int(bridge_cls.class_id) != 0
-            else (default_id if default_id is not None else 1)
-        )
+        match class_id:
+            case int():
+                cid = class_id
+            case _ if bridge_cls.is_initialized("class_id"):
+                cid = int(bridge_cls.class_id) + 1
+            case _:
+                cid = 1
+
         scipion_cls.setObjId(cid)
         scipion_cls.copyInfo(out_classes)
 
         if bridge_cls.is_initialized("representative"):
             rep_bridge = bridge_cls.representative
             rep = resolve_bridge_particle_to_scipion_particle(rep_bridge)
+            rep.setClassId(cid)
             if (
                 metadata is not None
                 and metadata.protocol is not None
@@ -623,7 +629,9 @@ if HAS_PWEM:
 
             scipion_cls.setRepresentative(rep)
         else:
-            scipion_cls.setRepresentative(emobj.Particle())  # type: ignore
+            rep = emobj.Particle()
+            rep.setClassId(cid)
+            scipion_cls.setRepresentative(rep)
 
         out_classes.append(scipion_cls)
 
@@ -657,6 +665,7 @@ if HAS_PWEM:
 
                 for i in range(n_particles):
                     p = emobj.Particle()
+                    p.setClassId(cid)
 
                     if stack_path is not None:
                         p.setLocation(i + 1, stack_path)
@@ -721,7 +730,7 @@ if HAS_PWEM:
             sc_cls = _resolve_bridge_to_scipion_class2d(
                 bridge_cls,
                 out_classes,
-                default_id=idx + 1,
+                class_id=idx + 1,
                 metadata=metadata,
                 output_name=output_name,
                 unique_id=unique_id,

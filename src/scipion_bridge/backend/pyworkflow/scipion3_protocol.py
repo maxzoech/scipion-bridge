@@ -123,7 +123,9 @@ def reduce_minibatch_to_persistent_output(
                 match existing_classes.get(cid):
                     case emobj.Class2D() as target_cls:  # type: ignore
                         if mb_cls.hasRepresentative():
-                            target_cls.setRepresentative(mb_cls.getRepresentative())
+                            rep = mb_cls.getRepresentative()
+                            rep.setClassId(cid)
+                            target_cls.setRepresentative(rep)
                         if (
                             mb_cls.getSamplingRate()
                             and not target_cls.getSamplingRate()
@@ -135,6 +137,7 @@ def reduce_minibatch_to_persistent_output(
                         for p in mb_cls:
                             item = p.clone()
                             item.setObjId(None)
+                            item.setClassId(cid)
                             target_cls.append(item)
                         target_cls.write()
                         target_cls._getMapper().commit()
@@ -148,13 +151,18 @@ def reduce_minibatch_to_persistent_output(
                         if mb_cls.getDim() is not None:
                             new_cls.setDim(mb_cls.getDim())
                         if mb_cls.hasRepresentative():
-                            new_cls.setRepresentative(mb_cls.getRepresentative())
+                            rep = mb_cls.getRepresentative()
+                            rep.setClassId(cid)
+                            new_cls.setRepresentative(rep)
                         else:
-                            new_cls.setRepresentative(emobj.Particle())  # type: ignore
+                            rep = emobj.Particle()
+                            rep.setClassId(cid)
+                            new_cls.setRepresentative(rep)
                         persistent_set.append(new_cls)
                         for p in mb_cls:
                             item = p.clone()
                             item.setObjId(None)
+                            item.setClassId(cid)
                             new_cls.append(item)
                         new_cls.write()
                         new_cls._getMapper().commit()

@@ -254,8 +254,8 @@ def test_set_of_classes2d_to_bridge(tmp_path):
     assert isinstance(bridge, B.Collection)
     assert len(bridge) == 2
     assert bridge.initialized_indices() == [0, 1]
-    assert bridge[0].class_id == 1
-    assert bridge[1].class_id == 2
+    assert bridge[0].class_id == 0
+    assert bridge[1].class_id == 1
     assert len(bridge[0].particles) == 3
     assert len(bridge[1].particles) == 3
 
@@ -298,7 +298,7 @@ def test_set_of_classes2d_variable_particles(tmp_path):
 
 
 def test_set_of_classes2d_sparse_ids(tmp_path):
-    """0-based sparse IDs map directly to slot indices without 1-based shift."""
+    """1-based Scipion IDs map directly to 0-based collection rows (cid - 1)."""
     import mrcfile
 
     mrcs_path = str(tmp_path / "sparse_particles.mrcs")
@@ -310,7 +310,7 @@ def test_set_of_classes2d_sparse_ids(tmp_path):
     soc = emobj.SetOfClasses2D(filename=db_path)
     soc.enableAppend()
 
-    sparse_ids = [0, 3, 7]
+    sparse_ids = [1, 4, 8]
     for i, cid in enumerate(sparse_ids):
         cls2d = emobj.Class2D()
         cls2d.setObjId(cid)
@@ -325,7 +325,7 @@ def test_set_of_classes2d_sparse_ids(tmp_path):
 
     bridge = res.resolve_set_of_classes2d_to_collection_classes2d(soc)
     assert isinstance(bridge, B.Collection)
-    assert len(bridge) == 8  # max(0, 3, 7) + 1
+    assert len(bridge) == 8  # max(1, 4, 8) -> size 8
     assert bridge.initialized_indices() == [0, 3, 7]
     assert bridge[0].class_id == 0
     assert bridge[3].class_id == 3
@@ -350,12 +350,12 @@ def test_resolve_collection_classes2d_to_set_of_classes2d(tmp_path):
     )
     coll = B.Collection[BClass2D](size=5)
     coll[0] = BClass2D(
-        class_id=1,
+        class_id=0,
         particles=B.Set[BParticle]([p1]),
         representative=p1,
     )
     coll[3] = BClass2D(
-        class_id=4,
+        class_id=3,
         particles=B.Set[BParticle]([p1]),
         representative=p1,
     )
@@ -372,6 +372,11 @@ def test_resolve_collection_classes2d_to_set_of_classes2d(tmp_path):
     # Check IDs of classes in the generated SetOfClasses2D
     class_ids = [cls2d.getObjId() for cls2d in soc]
     assert set(class_ids) == {1, 4}
+    for cls2d in soc:
+        cid = cls2d.getObjId()
+        assert cls2d.getRepresentative().getClassId() == cid
+        for p in cls2d:
+            assert p.getClassId() == cid
 
 
 def test_collection_classes2d_roundtrip(tmp_path):
@@ -433,12 +438,12 @@ def test_collection_classes2d_accumulation_output_handler(tmp_path):
     # Batch 1: slots 0, 3
     b1 = B.Collection[BClass2D](size=5)
     b1[0] = BClass2D(
-        class_id=1,
+        class_id=0,
         representative=p1,
         particles=B.Set[BParticle]([p1]),
     )
     b1[3] = BClass2D(
-        class_id=4,
+        class_id=3,
         representative=p1,
         particles=B.Set[BParticle]([p1]),
     )
@@ -456,12 +461,12 @@ def test_collection_classes2d_accumulation_output_handler(tmp_path):
     # Batch 2: slots 3, 7 (representative replaced with p2, new particle p2)
     b2 = B.Collection[BClass2D](size=8)
     b2[3] = BClass2D(
-        class_id=4,
+        class_id=3,
         representative=p2,
         particles=B.Set[BParticle]([p2]),
     )
     b2[7] = BClass2D(
-        class_id=8,
+        class_id=7,
         representative=p2,
         particles=B.Set[BParticle]([p2]),
     )
@@ -481,21 +486,31 @@ def test_collection_classes2d_accumulation_output_handler(tmp_path):
     proto.output_classes.close()
     db_path = str(tmp_path / "classes_output_classes.sqlite")
     verify_soc = emobj.SetOfClasses2D(filename=db_path)
-    classes = {c.getObjId(): c.clone() for c in verify_soc}
 
-    assert set(classes.keys()) == {1, 4, 8}
+    reps = {}
+    class_lens = {}
+    for c in verify_soc:
+        cid = c.getObjId()
+        reps[cid] = c.getRepresentative().clone()
+        class_lens[cid] = len(c)
+        for p in c:
+            assert p.getClassId() == cid
+
+    assert set(reps.keys()) == {1, 4, 8}
 
     # In class 1, original representative preserved (sr=1.0) and 1 particle
-    assert classes[1].getRepresentative().getSamplingRate() == pytest.approx(1.0)
+    assert reps[1].getSamplingRate() == pytest.approx(1.0)
+    assert reps[1].getClassId() == 1
 
     # In class 4, representative replaced (sr=2.0) and particles concatenated (len=2)
-    assert classes[4].getRepresentative().getSamplingRate() == pytest.approx(2.0)
+    assert reps[4].getSamplingRate() == pytest.approx(2.0)
+    assert reps[4].getClassId() == 4
 
     # In class 8, newly added class (sr=2.0, len=1)
-    assert classes[8].getRepresentative().getSamplingRate() == pytest.approx(2.0)
+    assert reps[8].getSamplingRate() == pytest.approx(2.0)
+    assert reps[8].getClassId() == 8
 
     # Verify particle counts on disk
-    class_lens = {c.getObjId(): len(c) for c in verify_soc}
     assert class_lens == {1: 1, 4: 2, 8: 1}
 
 
@@ -718,7 +733,7 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
     p2.coordinate.y = 250.0
 
     part_set = B.Set[BParticle]([p1, p2])
-    cls1 = BClass2D(class_id=1, representative=rep, particles=part_set)
+    cls1 = BClass2D(class_id=0, representative=rep, particles=part_set)
 
     coll = B.Collection[BClass2D](size=2)
     coll[0] = cls1
@@ -754,10 +769,26 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
     assert rep_fn_val.endswith(".mrc")
     assert (tmp_path / rep_fn_val).exists() or Path(rep_fn_val).exists()
 
+    # Check representative classId in Objects table
+    cur.execute(
+        "SELECT column_name FROM Classes WHERE label_property='_representative._classId';"
+    )
+    rep_cid_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {rep_cid_col} FROM Objects;")
+    assert cur.fetchone()[0] == 1
+
     # Check Class001_Objects table (particles in class 1)
     cur.execute("SELECT * FROM Class001_Objects;")
     part_rows = cur.fetchall()
     assert len(part_rows) == 2
+
+    # Check particle classId in Class001_Objects
+    cur.execute(
+        "SELECT column_name FROM Class001_Classes WHERE label_property='_classId';"
+    )
+    part_cid_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {part_cid_col} FROM Class001_Objects;")
+    assert [r[0] for r in cur.fetchall()] == [1, 1]
 
     # Check particle filename
     cur.execute(
@@ -793,13 +824,76 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
 
     conn.close()
 
-    # Reopen with Scipion and check sampling rate and dimensions
+    # Reopen with Scipion and check sampling rate, dimensions, and classId
     reopened = emobj.SetOfClasses2D(filename=db_file)
     if images_ref is not None:
         reopened.setImages(images_ref)
         assert reopened.getSamplingRate() == pytest.approx(1.23)
     first_cls = reopened.getFirstItem()
+    assert first_cls.getObjId() == 1
     assert first_cls.getSamplingRate() == pytest.approx(1.23)
     assert first_cls.getRepresentative().getSamplingRate() == pytest.approx(1.23)
+    assert first_cls.getRepresentative().getClassId() == 1
     assert first_cls.getRepresentative().getFileName() == rep_fn_val
+    for p in first_cls:
+        assert p.getClassId() == 1
     reopened.close()
+
+
+def test_collection_20_classes_to_scipion_no_collision(tmp_path):
+    """Verify that 20 0-based classes (0..19) resolve to exactly 20 1-based Scipion classes (1..20)."""
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfClasses2D(self, suffix=""):
+            db_path = str(self.p / f"classes20{suffix}.sqlite")
+            return emobj.SetOfClasses2D(filename=db_path)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+    coll = B.Collection[BClass2D](size=20)
+
+    for i in range(20):
+        rep = BParticle(
+            pixels=np.full((16, 16), float(i), dtype=np.float32),
+            sampling_rate=1.0,
+        )
+        p = BParticle(
+            pixels=np.full((16, 16), float(i + 100), dtype=np.float32),
+            sampling_rate=1.0,
+        )
+        coll[i] = BClass2D(
+            class_id=i,
+            representative=rep,
+            particles=B.Set[BParticle]([p]),
+        )
+
+    ctx = res.PyWorkflowResolutionContext(
+        protocol=proto,
+        output_name="twenty_classes",
+        append=False,
+    )
+    soc = res.resolve_collection_classes2d_to_set_of_classes2d(coll, metadata=ctx)
+    assert len(soc) == 20
+
+    class_ids = [c.getObjId() for c in soc]
+    assert sorted(class_ids) == list(range(1, 21))
+
+    for c in soc:
+        cid = c.getObjId()
+        assert c.getRepresentative().getClassId() == cid
+        for p in c:
+            assert p.getClassId() == cid
+
+    # Roundtrip back to bridge collection
+    coll_back = res.resolve_set_of_classes2d_to_collection_classes2d(soc)
+    assert len(coll_back) == 20
+    assert coll_back.initialized_indices() == list(range(20))
+    for i in range(20):
+        assert coll_back[i].class_id == i
+        assert len(coll_back[i].particles) == 1
+    soc.close()
