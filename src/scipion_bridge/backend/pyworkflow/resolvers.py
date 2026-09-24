@@ -100,6 +100,12 @@ if HAS_PWEM:
         metadata: Optional[PyWorkflowResolutionContext] = None,
     ) -> Tuple[List[Any], np.ndarray, set]:
         """Helper extracting raw database rows, pre-loaded pixels array, and row column keys."""
+        if hasattr(value, "loadAllProperties"):
+            try:
+                value.loadAllProperties()
+            except Exception:
+                pass
+
         ids = metadata.unprocessed_ids if metadata else None
         where_clause = _build_id_where_clause(ids) if ids else None
 
@@ -205,22 +211,117 @@ if HAS_PWEM:
         particle_set: "struct.Set[spa.Particle]",
         raw_rows: List[Any],
         db: Any,
+        container: Any = None,
     ) -> None:
-        """Populate sampling_rate on *particle_set* from *raw_rows* if the column exists."""
+        """Populate sampling_rate on *particle_set* from *raw_rows* with container fallback."""
+        n = len(raw_rows)
+        if n == 0:
+            return
+
         col = _col(db, "_samplingRate")
         row_keys = set(raw_rows[0].keys()) if raw_rows else set()
-        if not (col and col in row_keys):
-            return
+        vals = None
+        if col and col in row_keys:
+            raw_vals = [row[col] for row in raw_rows]
+            if not any(v is None for v in raw_vals):
+                vals = [float(v) for v in raw_vals]
 
-        vals = [row[col] for row in raw_rows]
-        if any(v is None for v in vals):
-            return
+        if (
+            vals is None
+            and container is not None
+            and hasattr(container, "getSamplingRate")
+        ):
+            sr = container.getSamplingRate()
+            if sr is not None and float(sr) > 0:
+                vals = [float(sr)] * n
+        elif (
+            vals is None
+            and container is not None
+            and hasattr(container, "getImages")
+            and container.getImages() is not None
+        ):
+            sr = container.getImages().getSamplingRate()
+            if sr is not None and float(sr) > 0:
+                vals = [float(sr)] * n
 
+        if vals is not None:
+            particle_set["sampling_rate"] = np.array(
+                vals,
+                dtype=np.float64,
+            ).reshape(n, 1)
+
+    def _has_any_acquisition(obj: Any) -> bool:
+        if hasattr(obj, "hasAcquisition") and obj.hasAcquisition():
+            return True
+        if hasattr(obj, "getAcquisition"):
+            acq = obj.getAcquisition()
+            if acq is not None and hasattr(acq, "equalAttributes"):
+                return not acq.equalAttributes(emobj.Acquisition())
+        return False
+
+    def _fill_acquisition_columns(
+        particle_set: "struct.Set[spa.Particle]",
+        raw_rows: List[Any],
+        db: Any,
+        container: Any = None,
+    ) -> None:
+        """Populate acquisition sub-columns on *particle_set* from *raw_rows* with container fallback."""
         n = len(raw_rows)
-        particle_set["sampling_rate"] = np.array(
-            vals,
-            dtype=np.float64,
-        ).reshape(n, 1)
+        if n == 0:
+            return
+
+        field_to_prop = {
+            "magnification": "_acquisition._magnification",
+            "voltage": "_acquisition._voltage",
+            "spherical_aberration": "_acquisition._sphericalAberration",
+            "amplitude_contrast": "_acquisition._amplitudeContrast",
+            "dose_initial": "_acquisition._doseInitial",
+            "dose_per_frame": "_acquisition._dosePerFrame",
+        }
+
+        prop_to_getter = {
+            "magnification": "getMagnification",
+            "voltage": "getVoltage",
+            "spherical_aberration": "getSphericalAberration",
+            "amplitude_contrast": "getAmplitudeContrast",
+            "dose_initial": "getDoseInitial",
+            "dose_per_frame": "getDosePerFrame",
+        }
+
+        container_acq = None
+        if container is not None and _has_any_acquisition(container):
+            container_acq = container.getAcquisition()
+        elif (
+            container is not None
+            and hasattr(container, "getImages")
+            and container.getImages() is not None
+            and _has_any_acquisition(container.getImages())
+        ):
+            container_acq = container.getImages().getAcquisition()
+
+        row_keys = set(raw_rows[0].keys()) if raw_rows else set()
+
+        for field, prop in field_to_prop.items():
+            col = _col(db, prop)
+            vals = None
+            if col and col in row_keys:
+                raw_vals = [row[col] for row in raw_rows]
+                if not any(v is None for v in raw_vals):
+                    vals = [float(v) for v in raw_vals]
+
+            if vals is None and container_acq is not None:
+                getter_name = prop_to_getter[field]
+                getter = getattr(container_acq, getter_name, None)
+                if getter is not None:
+                    c_val = getter()
+                    if c_val is not None:
+                        vals = [float(c_val)] * n
+
+            if vals is not None:
+                particle_set["acquisition"][field] = np.array(
+                    vals,
+                    dtype=np.float64,
+                ).reshape(n, 1)
 
     # ---------------------------------------------------------------------------
     # Single-particle resolvers
@@ -233,7 +334,7 @@ if HAS_PWEM:
         """Convert a Scipion/pwem Particle object to a scipion-bridge Particle struct."""
         if not value.getFileName():
             raise ValueError(
-                "Could not convert Scipion 3 particle to Scipion Bridge particle"
+                "Could not convert Scipion 3 particle to Scipion Bridge particle",
             )
 
         ih = ImageHandler()
@@ -259,7 +360,60 @@ if HAS_PWEM:
             particle.coordinate.x = float(coord.getX())  # type: ignore
             particle.coordinate.y = float(coord.getY())  # type: ignore
 
+        if value.hasAcquisition():
+            acq = value.getAcquisition()
+            if acq is not None:
+                if acq.getMagnification() is not None:
+                    particle.acquisition.magnification = float(acq.getMagnification())
+                if acq.getVoltage() is not None:
+                    particle.acquisition.voltage = float(acq.getVoltage())
+                if acq.getSphericalAberration() is not None:
+                    particle.acquisition.spherical_aberration = float(
+                        acq.getSphericalAberration()
+                    )
+                if acq.getAmplitudeContrast() is not None:
+                    particle.acquisition.amplitude_contrast = float(
+                        acq.getAmplitudeContrast()
+                    )
+                if acq.getDoseInitial() is not None:
+                    particle.acquisition.dose_initial = float(acq.getDoseInitial())
+                if acq.getDosePerFrame() is not None:
+                    particle.acquisition.dose_per_frame = float(acq.getDosePerFrame())
+
         return particle
+
+    def _populate_acquisition_from_struct(
+        target: Any,
+        acq: spa.Acquisition,
+    ) -> None:
+        """Populate Scipion Acquisition on target (Particle, Class2D, or SetOfParticles) from Acquisition struct."""
+        if not isinstance(acq, spa.Acquisition):
+            return
+
+        acq_obj = emobj.Acquisition()  # type: ignore
+        has_acq = False
+
+        if acq.is_initialized("magnification"):
+            acq_obj.setMagnification(float(acq.magnification))
+            has_acq = True
+        if acq.is_initialized("voltage"):
+            acq_obj.setVoltage(float(acq.voltage))
+            has_acq = True
+        if acq.is_initialized("spherical_aberration"):
+            acq_obj.setSphericalAberration(float(acq.spherical_aberration))
+            has_acq = True
+        if acq.is_initialized("amplitude_contrast"):
+            acq_obj.setAmplitudeContrast(float(acq.amplitude_contrast))
+            has_acq = True
+        if acq.is_initialized("dose_initial"):
+            acq_obj.setDoseInitial(float(acq.dose_initial))
+            has_acq = True
+        if acq.is_initialized("dose_per_frame"):
+            acq_obj.setDosePerFrame(float(acq.dose_per_frame))
+            has_acq = True
+
+        if has_acq and hasattr(target, "setAcquisition"):
+            target.setAcquisition(acq_obj)
 
     def _populate_ctf_from_struct(particle: Any, ctf: spa.CTF) -> None:
         ctf_model = emobj.CTFModel()  # type: ignore
@@ -295,9 +449,8 @@ if HAS_PWEM:
         value: spa.Particle,
     ) -> Particle:
         """Convert a scipion-bridge Particle struct to a Scipion/pwem Particle object."""
-        particle = emobj.Particle()  # type: ignore
         is_flex = isinstance(value, spa.FlexParticle) and value.is_initialized(
-            "embeddings"
+            "embeddings",
         )
         particle = ParticleFlex(progName=PROG_NAME) if is_flex else emobj.Particle()  # type: ignore
         if is_flex:
@@ -305,35 +458,17 @@ if HAS_PWEM:
             embeddings = np.asarray(value.embeddings)
             particle.setZFlex(embeddings.tolist())
 
-        try:
-            sr = value.sampling_rate
-            particle.setSamplingRate(float(sr))
-        except UninitializedFieldError:
-            pass
         if value.is_initialized("sampling_rate"):
             particle.setSamplingRate(float(value.sampling_rate))
 
-        try:
-            ctf_model = emobj.CTFModel()  # type: ignore
-            ctf_model.setDefocusU(float(value.ctf.defocus_u))
-            ctf_model.setDefocusV(float(value.ctf.defocus_v))
-            ctf_model.setDefocusAngle(float(value.ctf.defocus_angle))
-            ctf_model.setPhaseShift(float(value.ctf.phase_shift))
-            particle.setCTF(ctf_model)
-        except UninitializedFieldError:
-            pass
         if value.is_initialized("ctf"):
             _populate_ctf_from_struct(particle, value.ctf)
 
-        try:
-            coord = emobj.Coordinate()  # type: ignore
-            coord.setX(int(value.coordinate.x))
-            coord.setY(int(value.coordinate.y))
-            particle.setCoordinate(coord)
-        except UninitializedFieldError:
-            pass
         if value.is_initialized("coordinate"):
             _populate_coord_from_struct(particle, value.coordinate)
+
+        if value.is_initialized("acquisition"):
+            _populate_acquisition_from_struct(particle, value.acquisition)
 
         return particle
 
@@ -356,19 +491,19 @@ if HAS_PWEM:
 
         if n == 0:
             return particle_set
-            return struct.Set[spa.Particle](capacity=0)
 
         db = value._getMapper().db
         zflex_col = _col(db, "_zFlex")
         row_keys = set(raw_rows[0].keys()) if raw_rows else set()
         if zflex_col and zflex_col in row_keys:
             flex_set: struct.Set[spa.FlexParticle] = struct.Set[spa.FlexParticle](
-                capacity=n
+                capacity=n,
             )
             flex_set["pixels"] = pixels
-            _fill_sampling_rate(flex_set, raw_rows, db)
+            _fill_sampling_rate(flex_set, raw_rows, db, container=value)
             _fill_ctf_columns(flex_set, raw_rows, db)
             _fill_coordinate_columns(flex_set, raw_rows, db)
+            _fill_acquisition_columns(flex_set, raw_rows, db, container=value)
             embeddings = np.array(
                 [np.fromstring(row[zflex_col], sep=",") for row in raw_rows],
                 dtype=np.float32,
@@ -380,11 +515,33 @@ if HAS_PWEM:
         particle_set["pixels"] = pixels
 
         db = value._getMapper().db
-        _fill_sampling_rate(particle_set, raw_rows, db)
+        _fill_sampling_rate(particle_set, raw_rows, db, container=value)
         _fill_ctf_columns(particle_set, raw_rows, db)
         _fill_coordinate_columns(particle_set, raw_rows, db)
+        _fill_acquisition_columns(particle_set, raw_rows, db, container=value)
 
         return particle_set
+
+    def _find_input_particles(
+        metadata: Optional[PyWorkflowResolutionContext],
+    ) -> Optional[Any]:
+        if metadata is None or metadata.protocol is None:
+            return None
+        proto = metadata.protocol
+        if hasattr(proto, "inputTypes"):
+            for input_name in proto.inputTypes:
+                source = getattr(proto, input_name, None)
+                if (
+                    source is not None
+                    and hasattr(source, "hasValue")
+                    and source.hasValue()
+                ):
+                    val = source.get()
+                    if isinstance(
+                        val, (emobj.SetOfParticles, emobj.SetOfParticlesFlex)
+                    ):
+                        return val
+        return None
 
     @resolver
     def resolve_bridge_particles_to_set_of_particles(
@@ -402,6 +559,10 @@ if HAS_PWEM:
             suffix=f"_{output_name}_{unique_id}",
         )
 
+        input_particles = _find_input_particles(metadata)
+        if input_particles is not None:
+            out_set.copyInfo(input_particles)
+
         if len(value) == 0:
             out_set.write()
             out_set._getMapper().commit()
@@ -415,10 +576,14 @@ if HAS_PWEM:
         pixels_arr = np.array(value["pixels"], dtype=np.float32)
         mrcfile.write(stack_path, pixels_arr, overwrite=False)
 
+        if pixels_arr.ndim >= 3:
+            out_set.setDim((int(pixels_arr.shape[-1]), int(pixels_arr.shape[-2]), 1))
+
         # Determine which optional columns are initialized
         has_sr = _is_column_initialized(value, "sampling_rate")
         has_ctf = _is_column_initialized(value, "ctf", "defocus_u")
         has_coord = _is_column_initialized(value, "coordinate", "x")
+        has_acq = _is_column_initialized(value, "acquisition", "voltage")
 
         out_set.enableAppend()  # type: ignore
         mapper = out_set._getMapper()  # type: ignore
@@ -429,6 +594,8 @@ if HAS_PWEM:
 
             if has_sr:
                 p.setSamplingRate(float(value[i].sampling_rate))
+            elif input_particles is not None and input_particles.getSamplingRate():
+                p.setSamplingRate(float(input_particles.getSamplingRate()))
 
             if has_ctf:
                 ctf_model = emobj.CTFModel()  # type: ignore
@@ -444,7 +611,22 @@ if HAS_PWEM:
                 coord.setY(int(value[i].coordinate.y))
                 p.setCoordinate(coord)
 
+            if has_acq:
+                _populate_acquisition_from_struct(p, value[i].acquisition)
+            elif (
+                input_particles is not None
+                and hasattr(input_particles, "hasAcquisition")
+                and input_particles.hasAcquisition()
+            ):
+                p.setAcquisition(input_particles.getAcquisition().clone())
+
             out_set.append(p)  # type: ignore
+
+        if len(value) > 0:
+            if has_sr:
+                out_set.setSamplingRate(float(value[0].sampling_rate))
+            if has_acq:
+                _populate_acquisition_from_struct(out_set, value[0].acquisition)
 
         out_set.write()  # type: ignore
         mapper.commit()
@@ -475,6 +657,11 @@ if HAS_PWEM:
         particle_set["pixels"] = pixels
         particle_set["embeddings"] = embeddings
 
+        _fill_sampling_rate(particle_set, raw_rows, db, container=value)
+        _fill_acquisition_columns(particle_set, raw_rows, db, container=value)
+        _fill_ctf_columns(particle_set, raw_rows, db)
+        _fill_coordinate_columns(particle_set, raw_rows, db)
+
         return particle_set
 
     @resolver
@@ -495,6 +682,10 @@ if HAS_PWEM:
         )
         out_img_set.getFlexInfo().setProgName(PROG_NAME)
 
+        input_particles = _find_input_particles(metadata)
+        if input_particles is not None:
+            out_img_set.copyInfo(input_particles)
+
         if len(value) == 0:
             out_img_set.write()
             out_img_set._getMapper().commit()
@@ -512,7 +703,17 @@ if HAS_PWEM:
             overwrite=False,
         )
 
+        if pixels_arr.ndim >= 3:
+            out_img_set.setDim(
+                (int(pixels_arr.shape[-1]), int(pixels_arr.shape[-2]), 1)
+            )
+
         embeddings_list = np.array(value["embeddings"]).tolist()
+
+        has_sr = _is_column_initialized(value, "sampling_rate")
+        has_ctf = _is_column_initialized(value, "ctf", "defocus_u")
+        has_coord = _is_column_initialized(value, "coordinate", "x")
+        has_acq = _is_column_initialized(value, "acquisition", "voltage")
 
         out_img_set.enableAppend()
         mapper = out_img_set._getMapper()
@@ -522,7 +723,36 @@ if HAS_PWEM:
             out_particle.getFlexInfo().setProgName(PROG_NAME)
             out_particle.setLocation(i, stack_path)
             out_particle.setZFlex(z_flex_list)
+
+            if has_sr:
+                out_particle.setSamplingRate(float(value[i - 1].sampling_rate))
+            elif input_particles is not None and input_particles.getSamplingRate():
+                out_particle.setSamplingRate(float(input_particles.getSamplingRate()))
+
+            if has_ctf:
+                _populate_ctf_from_struct(out_particle, value[i - 1].ctf)
+
+            if has_coord:
+                _populate_coord_from_struct(out_particle, value[i - 1].coordinate)
+
+            if has_acq:
+                _populate_acquisition_from_struct(
+                    out_particle, value[i - 1].acquisition
+                )
+            elif (
+                input_particles is not None
+                and hasattr(input_particles, "hasAcquisition")
+                and input_particles.hasAcquisition()
+            ):
+                out_particle.setAcquisition(input_particles.getAcquisition().clone())
+
             out_img_set.append(out_particle)
+
+        if len(value) > 0:
+            if has_sr:
+                out_img_set.setSamplingRate(float(value[0].sampling_rate))
+            if has_acq:
+                _populate_acquisition_from_struct(out_img_set, value[0].acquisition)
 
         out_img_set.write()
         mapper.commit()
@@ -627,6 +857,10 @@ if HAS_PWEM:
                 rep.setSamplingRate(sr)
                 scipion_cls.setSamplingRate(sr)
 
+            if rep_bridge.is_initialized("acquisition"):
+                _populate_acquisition_from_struct(rep, rep_bridge.acquisition)
+                _populate_acquisition_from_struct(scipion_cls, rep_bridge.acquisition)
+
             scipion_cls.setRepresentative(rep)
         else:
             rep = emobj.Particle()
@@ -662,6 +896,14 @@ if HAS_PWEM:
                 has_sr = _is_column_initialized(particles_bridge, "sampling_rate")
                 has_ctf = _is_column_initialized(particles_bridge, "ctf", "defocus_u")
                 has_coord = _is_column_initialized(particles_bridge, "coordinate", "x")
+                has_acq = _is_column_initialized(
+                    particles_bridge, "acquisition", "voltage"
+                )
+
+                if has_acq and not scipion_cls.hasAcquisition():
+                    _populate_acquisition_from_struct(
+                        scipion_cls, particles_bridge[0].acquisition
+                    )
 
                 for i in range(n_particles):
                     p = emobj.Particle()
@@ -678,6 +920,11 @@ if HAS_PWEM:
 
                     if has_coord:
                         _populate_coord_from_struct(p, particles_bridge[i].coordinate)
+
+                    if has_acq:
+                        _populate_acquisition_from_struct(
+                            p, particles_bridge[i].acquisition
+                        )
 
                     scipion_cls.append(p)
 
@@ -705,26 +952,12 @@ if HAS_PWEM:
         )
         out_classes.enableAppend()
 
-        input_particles = None
-        if hasattr(metadata.protocol, "inputTypes"):
-            for input_name in metadata.protocol.inputTypes:
-                source = getattr(metadata.protocol, input_name, None)
-                if (
-                    source is not None
-                    and hasattr(source, "hasValue")
-                    and source.hasValue()
-                ):
-                    val = source.get()
-                    if isinstance(
-                        val, (emobj.SetOfParticles, emobj.SetOfParticlesFlex)
-                    ):
-                        input_particles = val
-                        break
-
+        input_particles = _find_input_particles(metadata)
         if input_particles is not None:
             out_classes.setImages(input_particles)
 
         first_cls_sr = None
+        first_cls_acq = None
         for idx in value.initialized_indices():
             bridge_cls = value[idx]
             sc_cls = _resolve_bridge_to_scipion_class2d(
@@ -738,13 +971,38 @@ if HAS_PWEM:
             if first_cls_sr is None and sc_cls.getSamplingRate():
                 first_cls_sr = sc_cls.getSamplingRate()
 
+            if first_cls_acq is None:
+                if bridge_cls.is_initialized(
+                    "representative"
+                ) and bridge_cls.representative.is_initialized("acquisition"):
+                    first_cls_acq = bridge_cls.representative.acquisition
+                elif (
+                    bridge_cls.is_initialized("particles")
+                    and len(bridge_cls.particles) > 0
+                    and _is_column_initialized(
+                        bridge_cls.particles, "acquisition", "voltage"
+                    )
+                ):
+                    first_cls_acq = bridge_cls.particles[0].acquisition
+
         if out_classes.getImages() is None:
             img_set = emobj.SetOfParticles(filename=":memory:")
             if first_cls_sr is not None:
                 img_set.setSamplingRate(first_cls_sr)
+            if first_cls_acq is not None:
+                _populate_acquisition_from_struct(img_set, first_cls_acq)
             out_classes.setImages(img_set)
-        elif first_cls_sr is not None and not out_classes.getSamplingRate():
-            out_classes.getImages().setSamplingRate(first_cls_sr)
+        else:
+            if first_cls_sr is not None and not out_classes.getSamplingRate():
+                out_classes.getImages().setSamplingRate(first_cls_sr)
+            if (
+                first_cls_acq is not None
+                and hasattr(out_classes.getImages(), "hasAcquisition")
+                and not out_classes.getImages().hasAcquisition()
+            ):
+                _populate_acquisition_from_struct(
+                    out_classes.getImages(), first_cls_acq
+                )
 
         out_classes.write()
         out_classes._getMapper().commit()

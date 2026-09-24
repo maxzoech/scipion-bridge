@@ -37,6 +37,64 @@ except ImportError:
     HAS_PWEM = False
 
 
+def _has_any_acquisition(obj: Any) -> bool:
+    if hasattr(obj, "hasAcquisition") and obj.hasAcquisition():
+        return True
+    if hasattr(obj, "getAcquisition"):
+        acq = obj.getAcquisition()
+        if acq is not None and hasattr(acq, "equalAttributes"):
+            return not acq.equalAttributes(emobj.Acquisition())
+    return False
+
+
+def _propagate_set_metadata(
+    protocol: Any,
+    persistent_set: Any,
+    minibatch_obj: Any,
+    is_new: bool,
+) -> None:
+    """Propagate sampling rate, acquisition, and dimensions from inputs or minibatch to persistent set."""
+    if is_new:
+        input_particles = None
+        if hasattr(protocol, "inputTypes"):
+            for input_name in protocol.inputTypes:
+                source = getattr(protocol, input_name, None)
+                if (
+                    source is not None
+                    and hasattr(source, "hasValue")
+                    and source.hasValue()
+                ):
+                    val = source.get()
+                    if isinstance(
+                        val, (emobj.SetOfParticles, emobj.SetOfParticlesFlex)
+                    ):
+                        input_particles = val
+                        break
+
+        if input_particles is not None:
+            persistent_set.copyInfo(input_particles)
+
+        if minibatch_obj.getSamplingRate():
+            persistent_set.setSamplingRate(minibatch_obj.getSamplingRate())
+
+        if _has_any_acquisition(minibatch_obj):
+            persistent_set.setAcquisition(minibatch_obj.getAcquisition().clone())
+
+        if minibatch_obj.getDim() is not None:
+            persistent_set.setDim(minibatch_obj.getDim())
+    else:
+        if not persistent_set.getSamplingRate() and minibatch_obj.getSamplingRate():
+            persistent_set.setSamplingRate(minibatch_obj.getSamplingRate())
+
+        if not _has_any_acquisition(persistent_set) and _has_any_acquisition(
+            minibatch_obj
+        ):
+            persistent_set.setAcquisition(minibatch_obj.getAcquisition().clone())
+
+        if persistent_set.getDim() is None and minibatch_obj.getDim() is not None:
+            persistent_set.setDim(minibatch_obj.getDim())
+
+
 def reduce_minibatch_to_persistent_output(
     protocol: Any,
     key: str,
@@ -131,6 +189,10 @@ def reduce_minibatch_to_persistent_output(
                             and not target_cls.getSamplingRate()
                         ):
                             target_cls.setSamplingRate(mb_cls.getSamplingRate())
+                        if _has_any_acquisition(mb_cls) and not _has_any_acquisition(
+                            target_cls
+                        ):
+                            target_cls.setAcquisition(mb_cls.getAcquisition().clone())
                         if mb_cls.getDim() is not None and target_cls.getDim() is None:
                             target_cls.setDim(mb_cls.getDim())
                         target_cls.enableAppend()
@@ -148,6 +210,8 @@ def reduce_minibatch_to_persistent_output(
                         new_cls.copyInfo(persistent_set)
                         if mb_cls.getSamplingRate():
                             new_cls.setSamplingRate(mb_cls.getSamplingRate())
+                        if _has_any_acquisition(mb_cls):
+                            new_cls.setAcquisition(mb_cls.getAcquisition().clone())
                         if mb_cls.getDim() is not None:
                             new_cls.setDim(mb_cls.getDim())
                         if mb_cls.hasRepresentative():
@@ -182,6 +246,15 @@ def reduce_minibatch_to_persistent_output(
                 persistent_set.getImages().setSamplingRate(
                     minibatch_obj.getSamplingRate()
                 )
+            if (
+                persistent_set.getImages() is not None
+                and not _has_any_acquisition(persistent_set.getImages())
+                and minibatch_obj.getImages() is not None
+                and _has_any_acquisition(minibatch_obj.getImages())
+            ):
+                persistent_set.getImages().setAcquisition(
+                    minibatch_obj.getImages().getAcquisition().clone()
+                )
 
             persistent_set.write()
             persistent_set._getMapper().commit()
@@ -200,6 +273,7 @@ def reduce_minibatch_to_persistent_output(
 
         case emobj.SetOfParticlesFlex():  # type: ignore
             persistent_set = getattr(protocol, key, None)
+            is_new = persistent_set is None
             match persistent_set:
                 case None:
                     from . import resolvers
@@ -216,6 +290,10 @@ def reduce_minibatch_to_persistent_output(
                     raise TypeError(
                         f"Unexpected persistent output type for {key}: {type(persistent_set)}"
                     )
+
+            _propagate_set_metadata(
+                protocol, persistent_set, minibatch_obj, is_new=is_new
+            )
 
             for p in minibatch_obj:
                 item = p.clone()
@@ -239,6 +317,7 @@ def reduce_minibatch_to_persistent_output(
 
         case emobj.SetOfParticles():  # type: ignore
             persistent_set = getattr(protocol, key, None)
+            is_new = persistent_set is None
             match persistent_set:
                 case None:
                     persistent_set = protocol._createSetOfParticles(
@@ -251,6 +330,10 @@ def reduce_minibatch_to_persistent_output(
                     raise TypeError(
                         f"Unexpected persistent output type for {key}: {type(persistent_set)}"
                     )
+
+            _propagate_set_metadata(
+                protocol, persistent_set, minibatch_obj, is_new=is_new
+            )
 
             for p in minibatch_obj:
                 item = p.clone()

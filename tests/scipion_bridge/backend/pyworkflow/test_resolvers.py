@@ -561,18 +561,21 @@ def test_set_of_particles_streaming_append(tmp_path):
     proto.particles.close()
     db_path = str(tmp_path / "particles_particles.sqlite")
     verify_sop = emobj.SetOfParticles(filename=db_path)
+    verify_sop.loadAllProperties()
     assert len(verify_sop) == 5
+    assert verify_sop.getSamplingRate() == pytest.approx(1.0)
+    assert "-999" not in str(verify_sop)
 
     # Check that particles read back properly
     bridge_sop = res.resolve_set_of_particles_to_bridge_particles(verify_sop)
     assert len(bridge_sop) == 5
     assert bridge_sop[0].sampling_rate == pytest.approx(1.0)
-    assert bridge_sop[3].sampling_rate == pytest.approx(1.5)
-    assert bridge_sop[4].sampling_rate == pytest.approx(1.5)
+    assert bridge_sop[3].sampling_rate == pytest.approx(1.0)
+    assert bridge_sop[4].sampling_rate == pytest.approx(1.0)
 
 
 def test_set_of_particles_flex_streaming_append(tmp_path):
-    """Test streaming batches of Set[FlexParticle] appended incrementally to disk."""
+    """Test streaming batches of Set[FlexParticle] appended incrementally to disk with acquisition."""
 
     class _MockProtocol:
         def __init__(self, p):
@@ -589,15 +592,25 @@ def test_set_of_particles_flex_streaming_append(tmp_path):
 
     proto = _MockProtocol(tmp_path)
 
-    # Batch 1: 2 flex particles
+    # Batch 1: 2 flex particles with sampling rate & acquisition
     fp1 = BFlexParticle(
         pixels=np.zeros((16, 16), dtype=np.float32),
+        sampling_rate=3.0,
         embeddings=np.array([0.1, 0.2], dtype=np.float32),
     )
+    fp1.acquisition.voltage = 300.0
+    fp1.acquisition.magnification = 105000.0
+    fp1.acquisition.spherical_aberration = 2.7
+
     fp2 = BFlexParticle(
         pixels=np.ones((16, 16), dtype=np.float32),
+        sampling_rate=3.0,
         embeddings=np.array([0.3, 0.4], dtype=np.float32),
     )
+    fp2.acquisition.voltage = 300.0
+    fp2.acquisition.magnification = 105000.0
+    fp2.acquisition.spherical_aberration = 2.7
+
     batch1 = B.Set[BFlexParticle]([fp1, fp2])
 
     ctx1 = res.PyWorkflowResolutionContext(
@@ -605,14 +618,23 @@ def test_set_of_particles_flex_streaming_append(tmp_path):
     )
     flex1 = res.resolve_embeddings_to_flex_particles(batch1, metadata=ctx1)
     assert len(flex1) == 2
+    assert flex1.getSamplingRate() == pytest.approx(3.0)
+    assert flex1.hasAcquisition()
+    assert "-999" not in str(flex1)
+    assert "3.00" in str(flex1)
+
     reduce_minibatch_to_persistent_output(proto, "flex_particles", flex1)
     assert len(proto.flex_particles) == 2
 
     # Batch 2: 1 flex particle
     fp3 = BFlexParticle(
         pixels=np.ones((16, 16), dtype=np.float32) * 2,
+        sampling_rate=3.0,
         embeddings=np.array([0.5, 0.6], dtype=np.float32),
     )
+    fp3.acquisition.voltage = 300.0
+    fp3.acquisition.magnification = 105000.0
+    fp3.acquisition.spherical_aberration = 2.7
     batch2 = B.Set[BFlexParticle]([fp3])
 
     ctx2 = res.PyWorkflowResolutionContext(
@@ -627,14 +649,90 @@ def test_set_of_particles_flex_streaming_append(tmp_path):
     proto.flex_particles.close()
     db_path = str(tmp_path / "flex_flex_particles.sqlite")
     verify_flex = emobj.SetOfParticlesFlex(filename=db_path)
+    verify_flex.loadAllProperties()
     assert len(verify_flex) == 3
+    assert verify_flex.getSamplingRate() == pytest.approx(3.0)
+    assert verify_flex.hasAcquisition()
+    assert verify_flex.getAcquisition().getVoltage() == pytest.approx(300.0)
+    assert "-999" not in str(verify_flex)
+    assert "3.00" in str(verify_flex)
 
-    # Check that particles read back properly
+    # Check that particles read back properly with all fields
     bridge_flex = res.resolve_set_of_particles_flex_to_bridge_particles(verify_flex)
     assert len(bridge_flex) == 3
     assert np.allclose(bridge_flex[0].embeddings, [0.1, 0.2])
     assert np.allclose(bridge_flex[1].embeddings, [0.3, 0.4])
     assert np.allclose(bridge_flex[2].embeddings, [0.5, 0.6])
+    assert bridge_flex[0].sampling_rate == pytest.approx(3.0)
+    assert bridge_flex[0].acquisition.voltage == pytest.approx(300.0)
+    assert bridge_flex[0].acquisition.magnification == pytest.approx(105000.0)
+    assert bridge_flex[0].acquisition.spherical_aberration == pytest.approx(2.7)
+
+
+def test_set_of_particles_flex_protocol_input_fallback(tmp_path):
+    """Test that FlexParticle output inherits sampling rate and acquisition from protocol input."""
+
+    class _MockPointer:
+        def __init__(self, val):
+            self._val = val
+
+        def get(self):
+            return self._val
+
+        def hasValue(self):
+            return True
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+            in_set = emobj.SetOfParticles(filename=str(p / "input_parts.sqlite"))
+            in_set.setSamplingRate(2.45)
+            acq = emobj.Acquisition()
+            acq.setVoltage(200.0)
+            acq.setMagnification(80000.0)
+            in_set.setAcquisition(acq)
+            self.inputTypes = ["inputParticles"]
+            self.inputParticles = _MockPointer(in_set)
+
+        def _createSetOfParticlesFlex(self, suffix="", progName=""):
+            db_path = str(self.p / f"fallback_flex{suffix}.sqlite")
+            s = emobj.SetOfParticlesFlex(filename=db_path)
+            s.getFlexInfo().setProgName(progName)
+            return s
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+
+    # Note: fp has NO explicit sampling_rate or acquisition set
+    fp = BFlexParticle(
+        pixels=np.zeros((16, 16), dtype=np.float32),
+        embeddings=np.array([0.42], dtype=np.float32),
+    )
+    batch = B.Set[BFlexParticle]([fp])
+
+    ctx = res.PyWorkflowResolutionContext(
+        protocol=proto, output_name="out_flex", append=False
+    )
+    out_flex = res.resolve_embeddings_to_flex_particles(batch, metadata=ctx)
+    assert out_flex.getSamplingRate() == pytest.approx(2.45)
+    assert out_flex.hasAcquisition()
+    assert out_flex.getAcquisition().getVoltage() == pytest.approx(200.0)
+    assert "-999" not in str(out_flex)
+    assert "2.45" in str(out_flex)
+
+    reduce_minibatch_to_persistent_output(proto, "out_flex", out_flex)
+    proto.out_flex.close()
+
+    db_path = str(tmp_path / "fallback_flex_out_flex.sqlite")
+    verify_flex = emobj.SetOfParticlesFlex(filename=db_path)
+    verify_flex.loadAllProperties()
+    assert verify_flex.getSamplingRate() == pytest.approx(2.45)
+    assert verify_flex.hasAcquisition()
+    assert verify_flex.getAcquisition().getVoltage() == pytest.approx(200.0)
+    assert "-999" not in str(verify_flex)
+    assert "2.45" in str(verify_flex)
 
 
 class _DummyParticleProtocol(Protocol):
@@ -672,7 +770,7 @@ def test_scipion_protocol_wrapper_write_output_data_handler(tmp_path):
     assert len(verify) == 2
     bridge_verify = res.resolve_set_of_particles_to_bridge_particles(verify)
     assert bridge_verify[0].sampling_rate == pytest.approx(1.0)
-    assert bridge_verify[1].sampling_rate == pytest.approx(2.0)
+    assert bridge_verify[1].sampling_rate == pytest.approx(1.0)
 
 
 def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
@@ -711,7 +809,14 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
     rep_pixels = np.ones((16, 16), dtype=np.float32) * 5.0
     rep = BParticle(pixels=rep_pixels, sampling_rate=1.23)
 
-    # 2. Create Particles with CTF, Coordinates, and pixels
+    rep.acquisition.voltage = 300.0
+    rep.acquisition.spherical_aberration = 2.7
+    rep.acquisition.magnification = 105000.0
+    rep.acquisition.amplitude_contrast = 0.1
+    rep.acquisition.dose_initial = 0.0
+    rep.acquisition.dose_per_frame = 1.5
+
+    # 2. Create Particles with CTF, Coordinates, Acquisition, and pixels
     p1 = BParticle(
         pixels=np.ones((16, 16), dtype=np.float32) * 1.0,
         sampling_rate=1.23,
@@ -721,6 +826,12 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
     p1.ctf.defocus_angle = 45.0
     p1.coordinate.x = 100.0
     p1.coordinate.y = 200.0
+    p1.acquisition.voltage = 300.0
+    p1.acquisition.spherical_aberration = 2.7
+    p1.acquisition.magnification = 105000.0
+    p1.acquisition.amplitude_contrast = 0.1
+    p1.acquisition.dose_initial = 0.0
+    p1.acquisition.dose_per_frame = 1.5
 
     p2 = BParticle(
         pixels=np.ones((16, 16), dtype=np.float32) * 2.0,
@@ -731,6 +842,12 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
     p2.ctf.defocus_angle = 30.0
     p2.coordinate.x = 150.0
     p2.coordinate.y = 250.0
+    p2.acquisition.voltage = 300.0
+    p2.acquisition.spherical_aberration = 2.7
+    p2.acquisition.magnification = 105000.0
+    p2.acquisition.amplitude_contrast = 0.1
+    p2.acquisition.dose_initial = 0.0
+    p2.acquisition.dose_per_frame = 1.5
 
     part_set = B.Set[BParticle]([p1, p2])
     cls1 = BClass2D(class_id=0, representative=rep, particles=part_set)
@@ -777,6 +894,22 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
     cur.execute(f"SELECT {rep_cid_col} FROM Objects;")
     assert cur.fetchone()[0] == 1
 
+    # Check representative acquisition in Objects table
+    cur.execute(
+        "SELECT column_name FROM Classes WHERE label_property='_representative._acquisition._voltage';"
+    )
+    rep_v_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {rep_v_col} FROM Objects;")
+    assert cur.fetchone()[0] == 300.0
+
+    # Check class acquisition in Objects table
+    cur.execute(
+        "SELECT column_name FROM Classes WHERE label_property='_acquisition._voltage';"
+    )
+    cls_v_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {cls_v_col} FROM Objects;")
+    assert cur.fetchone()[0] == 300.0
+
     # Check Class001_Objects table (particles in class 1)
     cur.execute("SELECT * FROM Class001_Objects;")
     part_rows = cur.fetchall()
@@ -789,6 +922,14 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
     part_cid_col = cur.fetchone()[0]
     cur.execute(f"SELECT {part_cid_col} FROM Class001_Objects;")
     assert [r[0] for r in cur.fetchall()] == [1, 1]
+
+    # Check particle acquisition in Class001_Objects
+    cur.execute(
+        "SELECT column_name FROM Class001_Classes WHERE label_property='_acquisition._voltage';"
+    )
+    part_v_col = cur.fetchone()[0]
+    cur.execute(f"SELECT {part_v_col} FROM Class001_Objects;")
+    assert [r[0] for r in cur.fetchall()] == [300.0, 300.0]
 
     # Check particle filename
     cur.execute(
@@ -824,19 +965,31 @@ def test_collection_classes2d_to_sqlite_full_fields(tmp_path):
 
     conn.close()
 
-    # Reopen with Scipion and check sampling rate, dimensions, and classId
+    # Reopen with Scipion and check sampling rate, dimensions, classId, and acquisition
     reopened = emobj.SetOfClasses2D(filename=db_file)
     if images_ref is not None:
         reopened.setImages(images_ref)
         assert reopened.getSamplingRate() == pytest.approx(1.23)
+        assert reopened.getImages().hasAcquisition()
+        assert reopened.getImages().getAcquisition().getVoltage() == pytest.approx(
+            300.0
+        )
     first_cls = reopened.getFirstItem()
     assert first_cls.getObjId() == 1
     assert first_cls.getSamplingRate() == pytest.approx(1.23)
+    assert first_cls.hasAcquisition()
+    assert first_cls.getAcquisition().getVoltage() == pytest.approx(300.0)
     assert first_cls.getRepresentative().getSamplingRate() == pytest.approx(1.23)
     assert first_cls.getRepresentative().getClassId() == 1
+    assert first_cls.getRepresentative().hasAcquisition()
+    assert first_cls.getRepresentative().getAcquisition().getVoltage() == pytest.approx(
+        300.0
+    )
     assert first_cls.getRepresentative().getFileName() == rep_fn_val
     for p in first_cls:
         assert p.getClassId() == 1
+        assert p.hasAcquisition()
+        assert p.getAcquisition().getVoltage() == pytest.approx(300.0)
     reopened.close()
 
 
@@ -897,3 +1050,151 @@ def test_collection_20_classes_to_scipion_no_collision(tmp_path):
         assert coll_back[i].class_id == i
         assert len(coll_back[i].particles) == 1
     soc.close()
+
+
+def test_set_of_particles_container_acquisition_and_sampling_rate_fallback(tmp_path):
+    """Test ingestion when sampling rate and acquisition are stored only at the SetOfParticles container level."""
+    import mrcfile
+
+    db_path = str(tmp_path / "container_acq.sqlite")
+    mrcs_path = str(tmp_path / "dummy.mrcs")
+    data = np.zeros((3, 16, 16), dtype=np.float32)
+    mrcfile.write(mrcs_path, data, overwrite=True)
+
+    sop = emobj.SetOfParticles(filename=db_path)
+    sop.enableAppend()
+
+    acq = emobj.Acquisition()
+    acq.setVoltage(300.0)
+    acq.setSphericalAberration(2.7)
+    acq.setMagnification(105000.0)
+    acq.setAmplitudeContrast(0.1)
+    acq.setDoseInitial(0.0)
+    acq.setDosePerFrame(1.5)
+
+    sop.setAcquisition(acq)
+    sop.setSamplingRate(1.23)
+
+    for i in range(3):
+        p = emobj.Particle()
+        p.setLocation(i + 1, mrcs_path)
+        # Note: not setting acquisition or samplingRate on individual particle rows!
+        sop.append(p)
+
+    sop.write()
+    sop._getMapper().commit()
+
+    bridge_set = res.resolve_set_of_particles_to_bridge_particles(sop)
+    assert len(bridge_set) == 3
+    assert np.allclose(bridge_set["sampling_rate"], 1.23)
+    assert np.allclose(bridge_set["acquisition"]["voltage"], 300.0)
+    assert np.allclose(bridge_set["acquisition"]["spherical_aberration"], 2.7)
+    assert np.allclose(bridge_set["acquisition"]["magnification"], 105000.0)
+    assert np.allclose(bridge_set["acquisition"]["amplitude_contrast"], 0.1)
+    assert np.allclose(bridge_set["acquisition"]["dose_initial"], 0.0)
+    assert np.allclose(bridge_set["acquisition"]["dose_per_frame"], 1.5)
+    sop.close()
+
+
+def test_set_of_particles_flex_container_acquisition_and_sampling_rate_fallback(
+    tmp_path,
+):
+    """Test ingestion when sampling rate and acquisition are stored at the SetOfParticlesFlex container level."""
+    import mrcfile
+
+    db_path = str(tmp_path / "container_flex_acq.sqlite")
+    mrcs_path = str(tmp_path / "dummy_flex.mrcs")
+    data = np.zeros((3, 16, 16), dtype=np.float32)
+    mrcfile.write(mrcs_path, data, overwrite=True)
+
+    flex_set = emobj.SetOfParticlesFlex(filename=db_path)
+    flex_set.getFlexInfo().setProgName(res.PROG_NAME)
+    flex_set.enableAppend()
+
+    acq = emobj.Acquisition()
+    acq.setVoltage(300.0)
+    acq.setSphericalAberration(2.7)
+    acq.setMagnification(105000.0)
+    acq.setAmplitudeContrast(0.1)
+    acq.setDoseInitial(0.0)
+    acq.setDosePerFrame(1.5)
+
+    flex_set.setAcquisition(acq)
+    flex_set.setSamplingRate(1.23)
+
+    for i in range(3):
+        p = emobj.ParticleFlex(progName=res.PROG_NAME)
+        p.setLocation(i + 1, mrcs_path)
+        p.setZFlex([0.1 * i, 0.2 * i])
+        flex_set.append(p)
+
+    flex_set.write()
+    flex_set._getMapper().commit()
+
+    bridge_set = res.resolve_set_of_particles_flex_to_bridge_particles(flex_set)
+    assert len(bridge_set) == 3
+    assert np.allclose(bridge_set["sampling_rate"], 1.23)
+    assert np.allclose(bridge_set["acquisition"]["voltage"], 300.0)
+    assert np.allclose(bridge_set["acquisition"]["spherical_aberration"], 2.7)
+    assert np.allclose(bridge_set["acquisition"]["magnification"], 105000.0)
+    assert np.allclose(bridge_set["acquisition"]["amplitude_contrast"], 0.1)
+    assert np.allclose(bridge_set["acquisition"]["dose_initial"], 0.0)
+    assert np.allclose(bridge_set["acquisition"]["dose_per_frame"], 1.5)
+    assert np.allclose(bridge_set[1].embeddings, [0.1, 0.2])
+    flex_set.close()
+
+
+def test_collection_classes2d_accumulation_with_acquisition(tmp_path):
+    """Test that acquisition persists and propagates during multi-batch reduction algebra."""
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfClasses2D(self, suffix=""):
+            db_path = str(self.p / f"classes_acq{suffix}.sqlite")
+            return emobj.SetOfClasses2D(filename=db_path)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+
+    p1 = BParticle(
+        pixels=np.zeros((16, 16), dtype=np.float32),
+        sampling_rate=1.0,
+    )
+    p1.acquisition.magnification = 105000.0
+    p1.acquisition.voltage = 300.0
+    p1.acquisition.spherical_aberration = 2.7
+
+    b1 = B.Collection[BClass2D](size=3)
+    b1[0] = BClass2D(
+        class_id=0,
+        representative=p1,
+        particles=B.Set[BParticle]([p1]),
+    )
+
+    ctx1 = res.PyWorkflowResolutionContext(
+        protocol=proto,
+        output_name="output_classes",
+        append=False,
+    )
+    soc1 = res.resolve_collection_classes2d_to_set_of_classes2d(b1, metadata=ctx1)
+    reduce_minibatch_to_persistent_output(proto, "output_classes", soc1)
+
+    proto.output_classes.close()
+    db_path = str(tmp_path / "classes_acq_output_classes.sqlite")
+    verify_soc = emobj.SetOfClasses2D(filename=db_path)
+
+    for c in verify_soc:
+        assert c.hasAcquisition()
+        assert c.getAcquisition().getVoltage() == pytest.approx(300.0)
+        assert c.getRepresentative().hasAcquisition()
+        assert c.getRepresentative().getAcquisition().getVoltage() == pytest.approx(
+            300.0
+        )
+        for p in c:
+            assert p.hasAcquisition()
+            assert p.getAcquisition().getVoltage() == pytest.approx(300.0)
+    verify_soc.close()

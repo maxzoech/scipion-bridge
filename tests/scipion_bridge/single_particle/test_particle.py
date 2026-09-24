@@ -10,6 +10,7 @@ from scipion_bridge.single_particle import (
     Particle,
     FlexParticle,
     Class2D,
+    Acquisition,
 )
 from scipion_bridge.core.struct.storage import UninitializedFieldError
 
@@ -18,16 +19,21 @@ from scipion_bridge.core.struct.storage import UninitializedFieldError
 # ---------------------------------------------------------------------------
 
 
+def test_acquisition_schema():
+    schema = Acquisition.schema()
+    expected_fields = {
+        "magnification",
+        "voltage",
+        "spherical_aberration",
+        "amplitude_contrast",
+        "dose_initial",
+        "dose_per_frame",
+    }
+    assert set(schema.fields.keys()) == expected_fields
+
+
 def test_ctf_schema():
     schema = CTF.schema()
-    expected_fields = {
-        "defocus_u",
-        "defocus_v",
-        "defocus_angle",
-        "phase_shift",
-        "resolution",
-        "fit_quality",
-    }
     expected_fields = {
         "defocus_u",
         "defocus_v",
@@ -46,7 +52,13 @@ def test_coordinate_schema():
 
 def test_particle_schema():
     schema = Particle.schema()
-    assert set(schema.fields.keys()) == {"pixels", "ctf", "coordinate", "sampling_rate"}
+    assert set(schema.fields.keys()) == {
+        "pixels",
+        "ctf",
+        "coordinate",
+        "sampling_rate",
+        "acquisition",
+    }
 
 
 def test_flex_particle_inherits_particle_fields():
@@ -55,6 +67,7 @@ def test_flex_particle_inherits_particle_fields():
     assert "ctf" in schema.fields
     assert "coordinate" in schema.fields
     assert "sampling_rate" in schema.fields
+    assert "acquisition" in schema.fields
     assert "embeddings" in schema.fields
 
 
@@ -117,6 +130,20 @@ def test_set_particle_nested_coordinate_write_read():
     assert np.allclose(s["coordinate"]["y"], ys)
 
 
+def test_set_particle_nested_acquisition_write_read():
+    n = 3
+    s = B.Set[Particle](capacity=n)
+    voltages = np.array([300.0, 200.0, 100.0]).reshape(n, 1)
+    spherical_aberrations = np.array([2.7, 2.0, 0.0]).reshape(n, 1)
+    s["acquisition"]["voltage"] = voltages
+    s["acquisition"]["spherical_aberration"] = spherical_aberrations
+
+    assert np.allclose(s["acquisition"]["voltage"], voltages)
+    assert np.allclose(s["acquisition"]["spherical_aberration"], spherical_aberrations)
+    assert s[0].acquisition.voltage == pytest.approx(300.0)
+    assert s[0].acquisition.spherical_aberration == pytest.approx(2.7)
+
+
 def test_set_particle_indexed_access():
     n = 4
     s = B.Set[Particle](capacity=n)
@@ -167,6 +194,15 @@ def test_uninitialized_sampling_rate_raises():
 
     with pytest.raises(UninitializedFieldError):
         _ = s[0].sampling_rate
+
+
+def test_uninitialized_acquisition_raises():
+    s = B.Set[Particle](capacity=2)
+    pixels = np.zeros((2, 8, 8), dtype=np.float32)
+    s["pixels"] = pixels
+
+    with pytest.raises(UninitializedFieldError):
+        _ = s[0].acquisition.voltage
 
 
 # ---------------------------------------------------------------------------

@@ -207,3 +207,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Ignore any sqlite or mrc files Scipion creates
+*.sqlite
+*.mrc
+*.mrcs
+*.star

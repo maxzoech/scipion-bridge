@@ -17,11 +17,21 @@ class Coordinate(Struct):
     y: float
 
 
+class Acquisition(Struct):
+    magnification: float
+    voltage: float
+    spherical_aberration: float
+    amplitude_contrast: float
+    dose_initial: float
+    dose_per_frame: float
+
+
 class Particle(Struct):
     pixels: Array[np.float32] = Array(shape=(None, None))
     ctf: CTF
     coordinate: Coordinate
     sampling_rate: float
+    acquisition: Acquisition
 
 
 class FlexParticle(Particle):
