@@ -445,7 +445,10 @@ def proxify(f: Callable[..., Any]) -> Callable[..., Any]:
         }
 
         resolved = [
-            (param.name, _resolve_proxy_arg(v, param)) for param, v in func_args.items()
+            (param.name, _resolve_proxy_arg(v, param))
+            for param, v 
+            in func_args.items()
+            if v is not None
         ]
 
         resolved_args = [v.str_rep for _, v in resolved[: len(args)]]
