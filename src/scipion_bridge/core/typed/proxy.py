@@ -625,3 +625,8 @@ def resolve_output_to_proxy(
 
     assert isinstance(new_proxy, Proxy)
     return new_proxy
+
+
+@resolver
+def resolve_proxy_group_to_func_param(value: ProxyGroup) -> FuncParam:
+    return FuncParam(str(value.path), type(value), managed_proxy=value.managed)
