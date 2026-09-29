@@ -25,9 +25,10 @@ class TempFileMock:
     def __init__(self):
         self.count = 0
 
-    def new_temporary_file(self, suffix: str) -> os.PathLike:
-
-        file = f"{temp_base_dir}/temp_file_{self.count}{suffix}"
+    def new_temporary_file(
+        self, suffix: Optional[str] = None, prefix: Optional[str] = None
+    ) -> os.PathLike:
+        file = f"{temp_base_dir}/{prefix or ''}temp_file_{self.count}{suffix or ''}"
         self.count += 1
 
         return Path(file)
@@ -546,6 +547,306 @@ def test_proxy_group_validation_and_mapping():
         TypeError, match="Expected field 'metadata' to be an instance of"
     ):
         sb.ParticleStackProxy(Path("/data/particles"), metadata=wrong_proxy)
+
+
+class Half1Volume(sb.Proxy):
+    @classmethod
+    def file_ext(cls) -> Optional[str]:
+        return ".mrc"
+
+    @classmethod
+    def suffix(cls) -> Optional[str]:
+        return "_half1"
+
+
+class Half2Volume(sb.Proxy):
+    @classmethod
+    def file_ext(cls) -> Optional[str]:
+        return ".mrc"
+
+    @classmethod
+    def suffix(cls) -> Optional[str]:
+        return "_half2"
+
+
+class CTFMicrographProxy(sb.Proxy):
+    @classmethod
+    def file_ext(cls) -> Optional[str]:
+        return ".star"
+
+    @classmethod
+    def prefix(cls) -> Optional[str]:
+        return "ctf_"
+
+
+class PrefixedSuffixedProxy(sb.Proxy):
+    @classmethod
+    def file_ext(cls) -> Optional[str]:
+        return ".vol"
+
+    @classmethod
+    def prefix(cls) -> Optional[str]:
+        return "job_"
+
+    @classmethod
+    def suffix(cls) -> Optional[str]:
+        return "_final"
+
+
+def test_proxy_prefix_and_suffix():
+    p1 = Half1Volume(Path("/data/exp_half1.mrc"))
+    assert p1.path == Path("/data/exp_half1.mrc")
+    assert Half1Volume.suffix() == "_half1"
+    assert Half1Volume.prefix() is None
+    assert Half1Volume.extension() == ".mrc"
+
+    p2 = CTFMicrographProxy(Path("/data/ctf_mic001.star"))
+    assert p2.path == Path("/data/ctf_mic001.star")
+    assert CTFMicrographProxy.prefix() == "ctf_"
+    assert CTFMicrographProxy.suffix() is None
+
+    p3 = PrefixedSuffixedProxy(Path("/data/job_run01_final.vol"))
+    assert p3.path == Path("/data/job_run01_final.vol")
+
+
+def test_proxy_metaclass_prefix_and_suffix_validation():
+    # Valid resolutions
+    p1 = current_registry().resolve(Path("/data/exp_half1.mrc"), Half1Volume)
+    assert isinstance(p1, Half1Volume)
+    assert p1.path == Path("/data/exp_half1.mrc")
+
+    p2 = current_registry().resolve(Path("/data/ctf_mic001.star"), CTFMicrographProxy)
+    assert isinstance(p2, CTFMicrographProxy)
+    assert p2.path == Path("/data/ctf_mic001.star")
+
+    # Mismatch suffix
+    with pytest.raises(TypeError, match="The file suffix did not match the proxy"):
+        current_registry().resolve(Path("/data/exp_half2.mrc"), Half1Volume)
+
+    # Mismatch prefix
+    with pytest.raises(TypeError, match="The file prefix did not match the proxy"):
+        current_registry().resolve(Path("/data/raw_mic001.star"), CTFMicrographProxy)
+
+    # Mismatch extension
+    with pytest.raises(TypeError, match="The file extension did not match the proxy"):
+        current_registry().resolve(Path("/data/exp_half1.vol"), Half1Volume)
+
+
+def test_untyped_to_prefixed_suffixed_proxy():
+    untyped = sb.Proxy(Path("/data/volume"), managed=False)
+
+    typed_half1 = untyped.typed(astype=Half1Volume, copy_data=False)
+    assert typed_half1.path == Path("/data/volume_half1.mrc")
+
+    typed_ctf = untyped.typed(astype=CTFMicrographProxy, copy_data=False)
+    assert typed_ctf.path == Path("/data/ctf_volume.star")
+
+    typed_both = untyped.typed(astype=PrefixedSuffixedProxy, copy_data=False)
+    assert typed_both.path == Path("/data/job_volume_final.vol")
+
+
+def test_new_temporary_proxy_with_prefix_and_suffix():
+    container = Container()
+    container.wire(
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
+    )
+
+    temp_file_mock = TempFileMock()
+    with container.temp_file_provider.override(temp_file_mock):
+        # Without base_path
+        p1 = Half1Volume.new_temporary_proxy()
+        assert str(p1.path) == f"{temp_base_dir}/temp_file_0_half1.mrc"
+
+        p2 = CTFMicrographProxy.new_temporary_proxy()
+        assert str(p2.path) == f"{temp_base_dir}/ctf_temp_file_1.star"
+
+        p3 = PrefixedSuffixedProxy.new_temporary_proxy()
+        assert str(p3.path) == f"{temp_base_dir}/job_temp_file_2_final.vol"
+
+        # With base_path
+        p4 = PrefixedSuffixedProxy.new_temporary_proxy(
+            base_path=Path("/custom/dir/experiment")
+        )
+        assert p4.path == Path("/custom/dir/job_experiment_final.vol")
+
+        del p1, p2, p3, p4
+
+
+class HalfMapsGroup(sb.ProxyGroup):
+    half1: Half1Volume
+    half2: Half2Volume
+
+    @property
+    def primary_proxy(self) -> sb.Proxy:
+        return self.half1
+
+
+class RefinementGroup(sb.ProxyGroup):
+    half1: Half1Volume
+    half2: Half2Volume
+
+    @classmethod
+    def prefix(cls) -> Optional[str]:
+        return "run_"
+
+    @classmethod
+    def suffix(cls) -> Optional[str]:
+        return "_it025"
+
+    @property
+    def primary_proxy(self) -> sb.Proxy:
+        return self.half1
+
+
+def test_proxy_group_with_child_suffixes():
+    group = HalfMapsGroup(Path("/data/job12/map"))
+    assert group.base_path == Path("/data/job12/map")
+    assert group.half1.path == Path("/data/job12/map_half1.mrc")
+    assert group.half2.path == Path("/data/job12/map_half2.mrc")
+    assert group.primary_proxy == group.half1
+    assert group.path == Path("/data/job12/map_half1.mrc")
+
+
+def test_proxy_group_with_group_prefix_and_suffix():
+    group = RefinementGroup(Path("/data/job12/map"))
+    assert group.base_path == Path("/data/job12/map")
+    # Formula: {child_prefix}{group_prefix}{base_stem}{group_suffix}{child_suffix}{ext}
+    assert group.half1.path == Path("/data/job12/run_map_it025_half1.mrc")
+    assert group.half2.path == Path("/data/job12/run_map_it025_half2.mrc")
+    assert group.path == Path("/data/job12/run_map_it025_half1.mrc")
+
+
+def test_proxy_group_new_temporary_proxy_with_suffixes():
+    container = Container()
+    container.wire(
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
+    )
+
+    temp_file_mock = TempFileMock()
+    with container.temp_file_provider.override(temp_file_mock):
+        group = RefinementGroup.new_temporary_proxy()
+        assert group.managed == True
+        assert (
+            str(group.half1.path) == f"{temp_base_dir}/run_temp_file_0_it025_half1.mrc"
+        )
+        assert (
+            str(group.half2.path) == f"{temp_base_dir}/run_temp_file_0_it025_half2.mrc"
+        )
+
+        assert arc_manager.get_count(group.half1.path) == 1
+        assert arc_manager.get_count(group.half2.path) == 1
+
+        del group
+
+
+def test_named_proxy_with_prefix_and_suffix():
+    CustomProxy = sb.namedproxy(
+        "CustomProxy",
+        file_ext=".dat",
+        prefix="raw_",
+        suffix="_filtered",
+    )
+
+    p = CustomProxy(Path("/data/raw_experiment_filtered.dat"))
+    assert p.path == Path("/data/raw_experiment_filtered.dat")
+    assert CustomProxy.file_ext() == ".dat"
+    assert CustomProxy.prefix() == "raw_"
+    assert CustomProxy.suffix() == "_filtered"
+
+
+def test_proxify_with_suffixed_proxy_group():
+    @sb.proxify
+    def refine_volumes(
+        half_in: sb.ResolveProxy[RefinementGroup],
+        half_out: sb.ResolveProxy = sb.Output(RefinementGroup),
+    ):
+        assert half_in == "/data/run_map_it025_half1.mrc"
+        assert "temp_file" in str(half_out)
+
+    container = Container()
+    container.wire(
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
+    )
+
+    temp_file_mock = TempFileMock()
+    with container.temp_file_provider.override(temp_file_mock):
+        in_group = RefinementGroup(Path("/data/map"))
+        out_group = refine_volumes(in_group)
+
+        assert isinstance(out_group, RefinementGroup)
+        assert out_group.managed == True
+        assert str(out_group.half1.path).endswith("_it025_half1.mrc")
+        assert str(out_group.half2.path).endswith("_it025_half2.mrc")
+
+
+def test_proxify_with_prefixed_suffixed_proxy_output():
+    @sb.proxify
+    def run_job(
+        inp: sb.ResolveProxy[PrefixedSuffixedProxy],
+        out: sb.ResolveProxy[PrefixedSuffixedProxy] = sb.Output(PrefixedSuffixedProxy),
+    ):
+        assert inp.startswith("/data/job_")
+        assert inp.endswith("_final.vol")
+        assert "job_" in str(out)
+        assert str(out).endswith("_final.vol")
+
+    container = Container()
+    container.wire(
+        modules=[
+            __name__,
+            "scipion_bridge.core.typed.proxy",
+            "scipion_bridge.core.utils.arc",
+        ]
+    )
+
+    temp_file_mock = TempFileMock()
+    with container.temp_file_provider.override(temp_file_mock):
+        # 1. Test default Output(PrefixedSuffixedProxy) resolution
+        input_proxy = PrefixedSuffixedProxy(Path("/data/job_sample_final.vol"))
+        output_result = run_job(input_proxy)
+
+        assert isinstance(output_result, PrefixedSuffixedProxy)
+        assert output_result.managed == True
+        assert output_result.path.name.startswith("job_")
+        assert output_result.path.name.endswith("_final.vol")
+
+        # 2. Test direct Output resolution from registry
+        resolved_output = current_registry().resolve(
+            sb.Output(PrefixedSuffixedProxy), astype=sb.Proxy
+        )
+        assert isinstance(resolved_output, PrefixedSuffixedProxy)
+        assert resolved_output.path.name.startswith("job_")
+        assert resolved_output.path.name.endswith("_final.vol")
+
+        # 3. Test overriding output with a valid explicit Path
+        custom_out_path = Path("/custom/job_run02_final.vol")
+        explicit_out_result = run_job(
+            Path("/data/job_sample_final.vol"), out=custom_out_path
+        )
+        assert isinstance(explicit_out_result, PrefixedSuffixedProxy)
+        assert explicit_out_result.path == custom_out_path
+        assert explicit_out_result.managed == False
+
+        # 4. Test passing an invalid Path that violates suffix/prefix raises TypeError
+        with pytest.raises(TypeError, match="The file suffix did not match"):
+            run_job(Path("/data/job_sample_wrong.vol"))
+
+        with pytest.raises(TypeError, match="The file prefix did not match"):
+            run_job(Path("/data/wrong_sample_final.vol"))
+
+        del output_result, resolved_output, explicit_out_result
 
 
 if __name__ == "__main__":

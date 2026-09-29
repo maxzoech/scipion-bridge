@@ -5,6 +5,7 @@ from scipion_bridge.core.utils.arc import FileReferenceCounter
 from scipion_bridge.backend.standalone.container import Container
 
 import pytest
+from typing import Optional
 
 
 class TempFileMock:
@@ -12,8 +13,10 @@ class TempFileMock:
     def __init__(self):
         self.count = 0
 
-    def new_temporary_file(self, suffix: str) -> os.PathLike:
-        file = f"/tmp/temp_file_{self.count}{suffix}"
+    def new_temporary_file(
+        self, suffix: Optional[str] = None, prefix: Optional[str] = None
+    ) -> os.PathLike:
+        file = f"/tmp/{prefix or ''}temp_file_{self.count}{suffix or ''}"
         self.count += 1
 
         return Path(file)

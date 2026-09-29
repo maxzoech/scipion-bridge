@@ -50,6 +50,7 @@ class _PyWorkflowExecProvider(ShellExecProvider):
         if domain.name == "XMIPP":
             try:
                 import xmipp3
+
                 xmipp_env = xmipp3.Plugin.getEnviron()
                 if env is None:
                     env = xmipp_env
@@ -75,13 +76,13 @@ class _PyWorkflowTempFileProvider(TemporaryFilesProvider):
 
         logging.info(f"Configure file with temporary path at: {self.temp_path}")
 
-    def new_temporary_file(self, suffix: Optional[str]) -> os.PathLike:
+    def new_temporary_file(
+        self, suffix: Optional[str] = None, prefix: Optional[str] = None
+    ) -> os.PathLike:
         N = 15
-        filename = "".join(random.choices(string.ascii_lowercase + string.digits, k=N))
+        rand_str = "".join(random.choices(string.ascii_lowercase + string.digits, k=N))
+        filename = f"{prefix or ''}{rand_str}{suffix or ''}"
         path = self.temp_path / filename
-
-        if suffix is not None:
-            path = path.with_suffix(suffix)
 
         logging.debug(f"Creating new temporary file at {path}")
         return path
