@@ -514,15 +514,35 @@ def test_flatten_op_flush_lifecycle():
     assert op._prepare_unroll(FLUSH) == [FLUSH]
 
 
+def test_flatten_op_unrolls_collection():
+    received = []
+
+    source = Source("items")
+    sink_node = source.flatten().sink(lambda x: received.append(x))
+    stream = Pipeline.from_sink(sink_node)
+
+    m1 = Metadata(foo=100)
+    m2 = Metadata(foo=200)
+
+    coll = B.Collection[Metadata](size=5, items={1: m1, 3: m2})
+
+    stream.send(items=coll)
+    assert len(received) == 2
+    assert received[0].foo == 100
+    assert received[1].foo == 200
+
+
 def test_flatten_op_invalid_type_raises():
     op = FlattenOp()
     with pytest.raises(
-        TypeError, match="FlattenOp expected an iterable or struct.Set, got int"
+        TypeError,
+        match="FlattenOp expected an iterable, struct.Set, or struct.Collection, got int",
     ):
         op._prepare_unroll(42)
 
     with pytest.raises(
-        TypeError, match="FlattenOp expected an iterable or struct.Set, got Particle"
+        TypeError,
+        match="FlattenOp expected an iterable, struct.Set, or struct.Collection, got Particle",
     ):
         p = Particle(
             pixels=np.zeros([256, 256], dtype=np.float32), metadata=Metadata(foo=1)

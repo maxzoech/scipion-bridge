@@ -607,7 +607,7 @@ def convert_protocol_to_scipion3_protocol(
                     inputSet, self.inputTypes[argname], metadata=ctx
                 )
 
-            if isinstance(bridgeSet, struct.Set):
+            if isinstance(bridgeSet, (struct.Set, struct.Collection)):
                 args = {argname: bridgeSet}
                 if self._stepsPipeline is not None:
                     self._stepsPipeline.send(**args)

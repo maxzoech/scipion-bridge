@@ -77,7 +77,7 @@ class Op(Node):
         return CombineLatestOp(self, *others)
 
     def flatten(self) -> "FlattenOp":
-        """Unroll lists, tuples, or struct.Set items into individual emissions."""
+        """Unroll lists, tuples, struct.Set, or struct.Collection items into individual emissions."""
         return self.op(FlattenOp())
 
     @overload
@@ -526,7 +526,7 @@ class CombineLatestOp(Op):
 
 class FlattenOp(Op):
     """
-    Unrolls iterable containers (list, tuple, struct.Set, etc.) into individual emissions.
+    Unrolls iterable containers (list, tuple, struct.Set, struct.Collection, etc.) into individual emissions.
     Passes FlushSignal through as [FLUSH] to preserve pipeline lifecycle.
     """
 
@@ -537,12 +537,12 @@ class FlattenOp(Op):
         if isinstance(x, FlushSignal):
             return [FLUSH]
 
-        if isinstance(x, (list, tuple, set, struct.Set)):
+        if isinstance(x, (list, tuple, set, struct.Set, struct.Collection)):
             return x
 
         # 4. If an unexpected non-iterable arrives, raise or wrap it
         raise TypeError(
-            f"FlattenOp expected an iterable or struct.Set, got {type(x).__name__}"
+            f"FlattenOp expected an iterable, struct.Set, or struct.Collection, got {type(x).__name__}"
         )
 
     def transform(self, *streams: Stream) -> Stream:

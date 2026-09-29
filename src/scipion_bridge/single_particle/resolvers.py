@@ -1,7 +1,24 @@
-from .proxies import ParticleStackProxy
+import numpy as np
+
+from .proxies import ParticleStackProxy, MRCStackProxy
 from .particle import Particle
 from ..core.typed.resolve import resolver
 from ..core import struct
+
+@resolver
+def resolve_mrc_stack_proxy(value: struct.Set[Particle]) -> MRCStackProxy:
+    """
+    Resolve an MRCStackProxy from a Particle Set.
+    """
+    import mrcfile
+
+    new_proxy = MRCStackProxy.new_temporary_proxy()
+    assert isinstance(new_proxy, MRCStackProxy)
+
+    pixel_data = np.asarray(value["pixels"])
+    mrcfile.write(new_proxy.path, pixel_data, overwrite=True)
+
+    return new_proxy
 
 
 @resolver
@@ -17,7 +34,7 @@ def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackPr
     assert isinstance(new_proxy, ParticleStackProxy)
 
     num_el = len(value)
-    pixel_data = value["pixels"]
+    pixel_data = np.asarray(value["pixels"])
 
     mrcfile.write(new_proxy.particle_stack.path, pixel_data, overwrite=True)
 

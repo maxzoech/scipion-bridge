@@ -46,10 +46,22 @@ class _PyWorkflowExecProvider(ShellExecProvider):
         del run_args
 
         cmd = " ".join(args)
+        env = self.backend._getEnviron()
+        if domain.name == "XMIPP":
+            try:
+                import xmipp3
+                xmipp_env = xmipp3.Plugin.getEnviron()
+                if env is None:
+                    env = xmipp_env
+                else:
+                    env.update(xmipp_env)
+            except Exception:
+                pass
+
         if domain.isolated:
-            self.backend.runJob(self._conda_activation_cmd, cmd, numberOfMpi=1)
+            self.backend.runJob(self._conda_activation_cmd, cmd, numberOfMpi=1, env=env)
         else:
-            self.backend.runJob(cmd, "", numberOfMpi=1)
+            self.backend.runJob(cmd, "", numberOfMpi=1, env=env)
 
         return 0
 
