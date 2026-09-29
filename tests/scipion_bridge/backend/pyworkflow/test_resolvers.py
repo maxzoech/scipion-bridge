@@ -1198,3 +1198,96 @@ def test_collection_classes2d_accumulation_with_acquisition(tmp_path):
             assert p.hasAcquisition()
             assert p.getAcquisition().getVoltage() == pytest.approx(300.0)
     verify_soc.close()
+
+
+def test_class2d_sqlite_table_initialization_on_resolution_and_reduction(tmp_path):
+    """Test that Class2D instances have their underlying particle SQLite tables created during resolution and reduction."""
+    import sqlite3
+
+    class _MockProtocol:
+        def __init__(self, p):
+            self.p = p
+
+        def _createSetOfClasses2D(self, suffix=""):
+            db_path = str(self.p / f"classes_init{suffix}.sqlite")
+            return emobj.SetOfClasses2D(filename=db_path,)
+
+        def _getExtraPath(self, path=""):
+            return str(self.p / path)
+
+    proto = _MockProtocol(tmp_path)
+
+    p1 = BParticle(
+        pixels=np.ones((16, 16), dtype=np.float32),
+        sampling_rate=1.0,
+    )
+    p2 = BParticle(
+        pixels=np.ones((16, 16), dtype=np.float32) * 2.0,
+        sampling_rate=1.0,
+    )
+
+    # Class 0 has particles, Class 1 is empty
+    b_coll = B.Collection[BClass2D](size=2)
+    b_coll[0] = BClass2D(
+        class_id=0,
+        representative=p1,
+        particles=B.Set[BParticle]([p1, p2]),
+    )
+    b_coll[1] = BClass2D(
+        class_id=1,
+        representative=p2,
+        particles=B.Set[BParticle](),
+    )
+
+    ctx = res.PyWorkflowResolutionContext(
+        protocol=proto,
+        output_name="output_classes",
+        append=False,
+    )
+
+    # 1. Resolve to SetOfClasses2D (minibatch)
+    soc_mb = res.resolve_collection_classes2d_to_set_of_classes2d(
+        b_coll,
+        metadata=ctx,
+    )
+
+    # 2. Iterate through minibatch classes and their particles to verify tables exist
+    for mb_cls in soc_mb:
+        particles_in_cls = list(mb_cls)
+        cid = mb_cls.getObjId()
+        if cid == 1:
+            assert len(particles_in_cls) == 2
+        elif cid == 2:
+            assert len(particles_in_cls) == 0
+
+    # 3. Reduce minibatch to persistent protocol output (case None: brand new classes)
+    reduce_minibatch_to_persistent_output(proto, "output_classes", soc_mb)
+    assert hasattr(proto, "output_classes")
+    assert len(proto.output_classes) == 2
+
+    # Verify iterating persistent classes and their particles works
+    for p_cls in proto.output_classes:
+        particles_in_pcls = list(p_cls)
+        cid = p_cls.getObjId()
+        if cid == 1:
+            assert len(particles_in_pcls) == 2
+        elif cid == 2:
+            assert len(particles_in_pcls) == 0
+
+    mb_db = soc_mb.getFileName()
+    pers_db = proto.output_classes.getFileName()
+
+    soc_mb.close()
+    proto.output_classes.close()
+
+    # 4. Verify directly in SQLite that ClassXXX_Classes tables exist
+    for db_path in (mb_db, pers_db):
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = {row[0] for row in cur.fetchall()}
+        conn.close()
+
+        assert "Class001_Classes" in tables
+        assert "Class002_Classes" in tables
+

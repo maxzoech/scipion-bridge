@@ -868,6 +868,7 @@ if HAS_PWEM:
             scipion_cls.setRepresentative(rep)
 
         out_classes.append(scipion_cls)
+        scipion_cls.enableAppend()
 
         if bridge_cls.is_initialized("particles"):
             particles_bridge: struct.Set[spa.Particle] = bridge_cls.particles

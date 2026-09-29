@@ -223,6 +223,7 @@ def reduce_minibatch_to_persistent_output(
                             rep.setClassId(cid)
                             new_cls.setRepresentative(rep)
                         persistent_set.append(new_cls)
+                        new_cls.enableAppend()
                         for p in mb_cls:
                             item = p.clone()
                             item.setObjId(None)
