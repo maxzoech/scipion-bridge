@@ -7,12 +7,26 @@ readme = "README.md"
 packages = [{ include = "scipion_bridge", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.8"
+python = ">=3.8, <3.13"
 dependency-injector = ">=4.48.1,<5.0.0"
-autopep8 = ">=2.3.0,<3.0.0"
-networkx = ">=3.1.0,<4.0.0"
+networkx = ">=3.0.0,<4.0.0"
 tabulate = "^0.9.0"
-xmipp_metadata = "^1.1.5"
+scipion-pyworkflow = { version = "^3.11", optional = true }
+scipion-em = { version = "^3.11", optional = true }
+zarr = { version = "^2.16.1", optional = true }
+xmipp-metadata = { version = ">=1.3.0", optional = true }
+numpy = [
+    { version = "^1.24.4", python = "3.8" },
+    { version = ">=1.26.0", python = ">=3.9" }
+]
+streamz = { version = "^0.6.4" }
+pyrsistent = { version = "^0.20.0" }
+mrcfile = { version = "^1.4.3" }
+starfile = { version = "^0.5.2" }
+tqdm = { version = "^4.70.0" }
+pyinstrument = "^5.1.3"
+pyarrow = ">=14.0.0"
+awkward = ">=2.6.0"
 
 [tool.poetry.group.test]
 optional = true
@@ -21,8 +35,29 @@ optional = true
 pytest = "^8.3.5"
 pytest-mock = "*"
 pytest-cov = "*"
-numpy = "*"
 
 [build-system]
 requires = ["poetry-core>=1.0.0,<2.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.extras]
+pyworkflow = ["scipion-pyworkflow", "scipion-em", "zarr", "xmipp-metadata"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def print_schema",
+    "def print_storage",
+    "def print_tree",
+]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+mypy_path = "src"
+explicit_package_bases = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+check_untyped_defs = false

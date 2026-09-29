@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "read_file(src/)",
+      "read_file(tests/)",
+      "write_file(tests/)"
+    ],
+    "deny": [
+      "write_file(src/)",
+      "write_file(src/*)",
+      "edit_file(src/)",
+      "edit_file(src/*)"
+    ]
+  },
+  "terminal": {
+    "executionPolicy": "review_destructive",
+    "deny": [
+      "command(rm -rf src/*)",
+      "command(* > src/*)"
+    ]
+  }
+}

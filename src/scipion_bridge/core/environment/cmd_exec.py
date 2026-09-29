@@ -1,8 +1,21 @@
+from abc import ABC, abstractmethod
 from typing import List
-from subprocess import Popen, PIPE
+from subprocess import Popen
+
+from .domain import Domain
 
 
-class ShellExecProvider:
+class ShellExecProvider(ABC):
+
+    @abstractmethod
+    def run(self, func_name, domain, args: List[str], run_args) -> int:
+        pass
+
+    def __call__(self, *args, **kwds):
+        return self.run(*args, **kwds)
+
+
+class StandaloneExecProvider(ShellExecProvider):
 
     def run(self, func_name, domain, args: List[str], run_args):
 
@@ -13,12 +26,9 @@ class ShellExecProvider:
         _, err = proc.communicate()  # Blocks until finished
         if proc.returncode != 0:
 
-            message = err.decode("utf-8")
+            message = err if err is not None else ""
             error_msg = f"{message}\nExternal call to {func_name} failed with exit code {proc.returncode}"
 
             raise RuntimeError(error_msg)
 
         return proc.returncode
-
-    def __call__(self, *args, **kwds):
-        return self.run(*args, **kwds)

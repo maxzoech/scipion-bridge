@@ -8,8 +8,12 @@ import logging
 
 class TemporaryFilesProvider:
 
-    def new_temporary_file(self, suffix: Optional[str]) -> os.PathLike:
-        new_file = tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name
+    def new_temporary_file(
+        self, suffix: Optional[str] = None, prefix: Optional[str] = None
+    ) -> os.PathLike:
+        new_file = tempfile.NamedTemporaryFile(
+            suffix=suffix, prefix=prefix, delete=False
+        ).name
         logging.debug(f"Creating new temporary file at {new_file}")
 
         return Path(new_file)

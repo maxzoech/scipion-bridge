@@ -1,2 +1,2 @@
 from . import resolve
-from . import common
+from . import core_resolvers

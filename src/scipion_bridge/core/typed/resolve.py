@@ -1,12 +1,15 @@
 import sys
 import inspect
-import textwrap
+from contextlib import contextmanager
+from contextvars import ContextVar
 import types
+import typing
 import networkx as nx
 import logging
 import warnings
 import time
 from collections import namedtuple
+from collections.abc import Generator
 from functools import wraps, partial
 
 from ..utils.func_params import extract_func_params
@@ -35,7 +38,7 @@ if sys.version_info < (3, 11):
         RuntimeWarning,
     )
 
-ResolveStep = namedtuple("ResolveStep", ("func", "description"))
+ResolveStep = namedtuple("ResolveStep", ("func", "requires_metadata", "description"))
 ResolveContext = namedtuple(
     "ResolveContext", ("registry", "namespaces", "caller_namespace", "recursion_level")
 )
@@ -48,6 +51,7 @@ Intermediate = TypeVar("Intermediate", default=Any)
 if TYPE_CHECKING:
     Resolve = Union[Target, Intermediate]
 else:
+
     class Resolve(Generic[Target, Intermediate]):
         pass  # Marker Type
 
@@ -56,7 +60,7 @@ def _downcast(x):
     return x
 
 
-def _passthrough(x):
+def _passthrough(x, metadata=None):
     return x
 
 
@@ -164,35 +168,30 @@ def build_default_container(
     )
 
 
-class resolution_context:
+@contextmanager
+def resolution_context(
+    registry: "Registry", namespace: Set[str], caller_namespace: str
+) -> Generator[ResolveContext]:
+    parent_ctx = _current_ctx.get()
 
-    def __init__(
-        self, registry: "Registry", namespace: Set[str], caller_namespace: str
-    ):
+    if parent_ctx is None:
+        new_ctx = ResolveContext(
+            registry, namespace, caller_namespace, recursion_level=0
+        )
 
-        global CURRENT_CTX
-        self._old_context: Optional[ResolveContext] = CURRENT_CTX
+    else:
+        new_ctx = ResolveContext(
+            parent_ctx.registry,
+            parent_ctx.namespaces,
+            parent_ctx.caller_namespace,
+            recursion_level=parent_ctx.recursion_level + 1,
+        )
 
-        if self._old_context is None:
-            CURRENT_CTX = ResolveContext(
-                registry, namespace, caller_namespace, recursion_level=0
-            )
-        else:
-            CURRENT_CTX = ResolveContext(
-                self._old_context.registry,
-                self._old_context.namespaces,
-                self._old_context.caller_namespace,
-                recursion_level=self._old_context.recursion_level + 1,
-            )
-
-    def __enter__(self):
-        global CURRENT_CTX
-
-        return CURRENT_CTX
-
-    def __exit__(self, *args, **kws):
-        global CURRENT_CTX
-        CURRENT_CTX = self._old_context
+    token = _current_ctx.set(new_ctx)
+    try:
+        yield new_ctx
+    finally:
+        _current_ctx.reset(token)
 
 
 class Registry:
@@ -223,9 +222,10 @@ class Registry:
     def add_resolver(
         self,
         origin: Type[Origin],
-        target: Type[Origin],
+        target: Type[Target],
         resolver: Callable,
         namespace: Optional[str] = None,
+        requires_metadata: bool = False,
     ):
 
         if namespace is None:
@@ -235,6 +235,7 @@ class Registry:
             namespace = Registry._namespace_from_symbol(
                 module=module, qualname=_get_qualname(frame.f_code), strip_last=True
             )
+            del frame
 
         if self.graph.has_edge(origin, target):
             edge = self.graph.edges[(origin, target)]
@@ -247,7 +248,7 @@ class Registry:
                 return
 
         def _add_downcasts(subclass: Type):
-            for weight, dtype in enumerate(subclass.__mro__):
+            for weight, dtype in enumerate(inspect.getmro(subclass)):
                 if subclass == dtype:
                     continue
 
@@ -259,10 +260,13 @@ class Registry:
                     module=__package__,
                 )
 
-                # print(f"Add downcast: {subclass} -> {dtype} in {__package__}, {weight}")
-
         self.graph.add_edge(
-            origin, target, resolver=resolver, weight=0, module=namespace
+            origin,
+            target,
+            resolver=resolver,
+            weight=0,
+            module=namespace,
+            requires_metadata=requires_metadata,
         )
 
         # Add edges to downcast data
@@ -283,10 +287,14 @@ class Registry:
             u, v = edge
             fn = data["resolver"]
             mod = data["module"]
+            metadata = data.get("requires_metadata", False)
+
+            metadata_desc = " (requires metadata)" if metadata else ""
 
             return ResolveStep(
                 fn,
-                f"{u.__qualname__} -> {v.__qualname__}: {fn.__qualname__} ({mod})",
+                metadata,
+                f"{u.__qualname__} -> {v.__qualname__}: {fn.__qualname__} ({mod}{metadata_desc})",
             )
 
         if origin == target:
@@ -294,7 +302,7 @@ class Registry:
 
         selected_edges = [
             (u, v, e)
-            for u, v, e in self.graph.edges(data=True) # type: ignore
+            for u, v, e in self.graph.edges(data=True)  # type: ignore
             if e["module"] in namespace
         ]
         subgraph = nx.DiGraph(selected_edges)
@@ -330,7 +338,7 @@ class Registry:
             for u, v in zip(path, path[1:])
         ]
 
-        def resolver_fn(value: Origin) -> Target:
+        def resolver_fn(value: Origin, *, metadata: Optional[Any] = None) -> Target:
             if not isinstance(value, origin):
                 raise TypeError("The input value for did not match origin data type")
 
@@ -338,16 +346,22 @@ class Registry:
             for step in steps:
                 logging.debug(step.description)
 
-                x = step.func(x)  # type: ignore
+                # Pass the metadata if the resolver requires it
+                if step.requires_metadata:
+                    x = step.func(x, metadata=metadata)  # type: ignore
+                else:
+                    x = step.func(x)  # type: ignore
 
-            if not isinstance(x, target):
+            target_check = get_origin(target) or target
+            if not isinstance(x, target_check):
                 resolve_desc = "\n".join([step.description for step in steps])
+                target_name = getattr(target, "__qualname__", str(target))
 
                 raise TypeError(
-                    f"The resolved output with type '{type(x).__qualname__}' did not match target data type '{target.__qualname__}'; this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\nResolvers used:\n{resolve_desc}"
+                    f"The resolved output with type '{type(x).__qualname__}' did not match target data type '{target_name}'; this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\nResolvers used:\n{resolve_desc}"
                 )
 
-            return x
+            return x  # type: ignore
 
         return resolver_fn
 
@@ -356,6 +370,7 @@ class Registry:
         value,
         astype: Type[Target],
         intermediate: Optional[Type[Intermediate]] = None,
+        metadata: Optional[Any] = None,
     ) -> Target:
 
         def _find_module(value: Any) -> Optional[str]:
@@ -403,8 +418,13 @@ class Registry:
         visible_modules = {
             v for v in map(_find_module, frame.f_globals.values()) if v is not None
         }
+        del frame
 
         visible_modules.add(calling_namespace)
+
+        if __package__:
+            visible_modules.add(__package__)
+
         visible_modules = visible_modules.union(associated_namespace)
 
         # Expand namespaces: "foo.bar.func" -> {foo, foo.bar, foo.bar.func}
@@ -452,19 +472,19 @@ class Registry:
             search_time = end_search - start
             search_time_ms = search_time * 1_000
 
-            resolved = resolve_fn(value)
+            resolved = resolve_fn(value, metadata=metadata)
             end = time.time()
 
         total = end - start
         total_ms = total * 1_000
-        search_percentage = int((search_time / total) * 100)
+        search_percentage = int((search_time / total) * 100) if total > 0 else 0
 
         logging.info(
             f"Resolving from '{type(value).__qualname__}' to '{astype.__qualname__}' took {total_ms:2f}ms ({search_time_ms:2f}ms ({search_percentage}%) path finding)"
         )
 
         return resolved
-        
+
     def lift_resolvers(self, origin_module_name: str, target_module_name: str):
         # Assert that the target module is actually imports the module from which
         # we want to lift the resolvers from.
@@ -476,7 +496,7 @@ class Registry:
         # the parent module is always visible when resolving types
         assert origin_module_name.startswith(target_module_name)
 
-        for _, _, attr in self.graph.edges(data=True): # type: ignore
+        for _, _, attr in self.graph.edges(data=True):  # type: ignore
             if attr["module"] == origin_module_name:
                 attr["module"] = target_module_name
 
@@ -510,22 +530,24 @@ class Registry:
 
 
 DEFAULT_REGISTRY = Registry()
-CURRENT_CTX: Optional[ResolveContext] = None
+_current_ctx: ContextVar[Optional[ResolveContext]] = ContextVar(
+    "_current_ctx", default=None
+)
+
 
 def current_registry() -> Registry:
-    global CURRENT_CTX
-
-    if CURRENT_CTX:
-        return CURRENT_CTX.registry
-    else:
-        return DEFAULT_REGISTRY
+    ctx = _current_ctx.get()
+    return ctx.registry if ctx is not None else DEFAULT_REGISTRY
 
 
 def resolver(f):
 
     # TODO: Input validation
-    in_dtype = f.__annotations__["value"]
-    out_dtype = f.__annotations__["return"]
+    hints = typing.get_type_hints(f)
+    in_dtype = hints["value"]
+    out_dtype = hints["return"]
+
+    requires_metadata = "metadata" in hints
 
     namespace = Registry._namespace_from_symbol(
         module=f.__module__,
@@ -533,18 +555,32 @@ def resolver(f):
         strip_last=True,
     )
 
-    current_registry().add_resolver(in_dtype, out_dtype, f, namespace)
+    # print(f"Registering resolver {f.__qualname__} for {in_dtype.__qualname__} -> {out_dtype.__qualname__} in namespace '{namespace}'")
+
+    current_registry().add_resolver(
+        in_dtype, out_dtype, f, namespace, requires_metadata
+    )
 
     return f
 
-def resolve(
-        value,
-        astype: Type[Target],
-        intermediate: Optional[Type[Intermediate]] = None,
-    ) -> Target:
-    return current_registry().resolve(value, astype=astype, intermediate=intermediate)
 
-def lift_resolvers(*modules: types.ModuleType, target: Optional[types.ModuleType] = None):
+def resolve(
+    value,
+    astype: Type[Target],
+    intermediate: Optional[Type[Intermediate]] = None,
+    metadata: Optional[Any] = None,
+) -> Target:
+    return current_registry().resolve(
+        value,
+        astype=astype,
+        intermediate=intermediate,
+        metadata=metadata,
+    )
+
+
+def lift_resolvers(
+    *modules: types.ModuleType, target: Optional[types.ModuleType] = None
+):
     if target is None:
         # Get the calling module
         frame = inspect.currentframe()
@@ -559,6 +595,7 @@ def lift_resolvers(*modules: types.ModuleType, target: Optional[types.ModuleType
     reg = current_registry()
     for module in modules:
         reg.lift_resolvers(module.__name__, target_module_name)
+
 
 def resolve_params(f: Callable):
 
@@ -584,14 +621,15 @@ def resolve_params(f: Callable):
     def wrapper(*args, **kwargs):
         func_params = extract_func_params(args, kwargs, signature)
 
-        args = list(func_params.items())[: len(args)]
-        kwargs = list(func_params.items())[len(args) :]
+        n_positional = len(args)
+        positional = list(func_params.items())[:n_positional]
+        keyword = list(func_params.items())[n_positional:]
 
-        args = [_resolve_arg(a) for a in args]
-        args = [v for _, v in args]
+        positional = [_resolve_arg(a) for a in positional]
+        args = tuple(v for _, v in positional)
 
-        kwargs = [_resolve_arg(a) for a in kwargs]
-        kwargs = {k.name: v for k, v in kwargs}
+        keyword = [_resolve_arg(a) for a in keyword]
+        kwargs = {k.name: v for k, v in keyword}
 
         return f(*args, **kwargs)
 

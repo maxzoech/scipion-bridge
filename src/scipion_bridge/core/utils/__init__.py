@@ -1,1 +1,6 @@
-from .external_call import foreign_function, Domain
+from .shell import shell_command, Domain
+
+__all__ = [
+    "shell_command",
+    "Domain",
+]

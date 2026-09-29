@@ -5,6 +5,10 @@ import scipion_bridge as sb
 import scipion_bridge.core.typed.resolve as resolve
 from scipion_bridge.core.typed.resolve import ScopedPathfindingContainer as Container
 
+from typing import Optional
+import awkward as ak
+import numpy as np
+
 import pytest
 
 
@@ -266,9 +270,7 @@ def test_resolve_namespaces_recursive():
 
     @sb.resolver
     def resolve_tuple_to_str_underline(value: tuple) -> str:
-        return "_".join(
-            [sb.resolve(v, astype=str) for v in value]
-        )
+        return "_".join([sb.resolve(v, astype=str) for v in value])
 
     def bar():
         @sb.resolver
@@ -293,6 +295,113 @@ def test_resolve_namespaces_recursive():
     assert r == "42.0_40.0_5.0"
 
 
+class MetaSource:
+    def __init__(self, data: int):
+        self.data = data
+
+
+class MetaTarget:
+    def __init__(self, result: str):
+        self.result = result
+
+
+class DummyContext:
+    def __init__(self, prefix: str, factor: int):
+        self.prefix = prefix
+        self.factor = factor
+
+
+def test_resolver_with_metadata_option():
+    @sb.resolver
+    def resolve_meta_source_to_target(
+        value: MetaSource, metadata: Optional[DummyContext] = None
+    ) -> MetaTarget:
+        if metadata is not None:
+            res_str = f"{metadata.prefix}:{value.data * metadata.factor}"
+        else:
+            res_str = f"no_meta:{value.data}"
+        return MetaTarget(result=res_str)
+
+    # 1. Resolve with metadata passed
+    ctx = DummyContext(prefix="TEST", factor=3)
+    res_with_meta = sb.resolve(MetaSource(10), astype=MetaTarget, metadata=ctx)
+    assert res_with_meta.result == "TEST:30"
+
+    # 2. Resolve without metadata (defaults to None)
+    res_no_meta = sb.resolve(MetaSource(10), astype=MetaTarget)
+    assert res_no_meta.result == "no_meta:10"
+
+
+def test_resolver_with_metadata_multistep():
+    class StepA:
+        def __init__(self, val: int):
+            self.val = val
+
+    class StepB:
+        def __init__(self, val: int, meta_info: str):
+            self.val = val
+            self.meta_info = meta_info
+
+    class StepC:
+        def __init__(self, text: str):
+            self.text = text
+
+    # StepA -> StepB uses metadata
+    @sb.resolver
+    def resolve_step_a_to_b(value: StepA, metadata: Optional[dict] = None) -> StepB:
+        tag = metadata.get("tag", "default") if metadata else "none"
+        return StepB(val=value.val * 2, meta_info=tag)
+
+    # StepB -> StepC does not use metadata
+    @sb.resolver
+    def resolve_step_b_to_c(value: StepB) -> StepC:
+        return StepC(text=f"{value.meta_info}_{value.val}")
+
+    meta_dict = {"tag": "custom_tag"}
+    res = sb.resolve(StepA(5), astype=StepC, metadata=meta_dict)
+    assert res.text == "custom_tag_10"
+
+
+def test_resolve_awkward_to_ndarray():
+    class Item(sb.Struct):
+        embeddings: sb.Array[float] = sb.Array(shape=(None,))
+
+    s = sb.Set[Item](capacity=2)
+    s[0].embeddings = np.array([1.0, 2.0, 3.0])
+    s[1].embeddings = np.array([4.0, 5.0, 6.0])
+
+    ragged = s["embeddings"]
+    assert isinstance(ragged, ak.Array)
+
+    expected = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+    # Direct resolution from ak.Array to np.ndarray
+    resolved = sb.resolve(ragged, astype=np.ndarray)
+    assert isinstance(resolved, np.ndarray)
+    assert np.allclose(resolved, expected)
+
+    # Test ak.to_numpy()
+    assert np.allclose(ak.to_numpy(ragged), expected)
+
+
+def test_awkward_irregular_lengths_raise():
+    class Item(sb.Struct):
+        embeddings: sb.Array[float] = sb.Array(shape=(None,))
+
+    s = sb.Set[Item](capacity=2)
+    s[0].embeddings = np.array([1.0, 2.0])
+    s[1].embeddings = np.array([3.0, 4.0, 5.0])
+
+    ragged = s["embeddings"]
+    with pytest.raises(ValueError):
+        ak.to_numpy(ragged)
+
+    with pytest.raises(ValueError):
+        sb.resolve(ragged, astype=np.ndarray)
+
+
 if __name__ == "__main__":
     # logging.basicConfig(level=logging.DEBUG)
     test_resolve_namespaces_recursive()
+    test_resolver_with_metadata_option()
+    test_resolver_with_metadata_multistep()

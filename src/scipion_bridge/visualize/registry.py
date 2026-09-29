@@ -1,7 +1,6 @@
 import typing
 from .base import Visualizer
 
-
 visualizers: typing.Dict[str, Visualizer] = {}
 
 

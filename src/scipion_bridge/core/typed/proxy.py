@@ -8,23 +8,39 @@ from functools import partial, wraps
 import shutil
 
 from dependency_injector.wiring import Provide, inject
-from ..environment.container import Container
+from ...backend.standalone.container import Container
 from ..environment.temp_files import TemporaryFilesProvider
 from ..utils.arc import manager as arc_manager
 from ..utils.func_params import extract_func_params
 
-from ..utils.arc import manager as arc_manager
-
 from .resolve import current_registry, resolve_params, resolver, Registry
-from typing import Optional, Generic, Protocol, Type, Union, TYPE_CHECKING, Any, cast
-from typing_extensions import TypeAlias, TypeVar, get_args, get_origin
-
+from abc import ABC, ABCMeta, abstractmethod
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Generic,
+    Protocol,
+    Type,
+    Union,
+    TYPE_CHECKING,
+    Any,
+    cast,
+    Callable,
+    get_type_hints,
+    Mapping,
+    Iterator,
+)
+from typing_extensions import TypeAlias, TypeVar, get_args, get_origin, ParamSpec
 
 Casted = TypeVar("Casted", bound="Proxy")
 T = TypeVar("T")
 
 Intermediate = TypeVar("Intermediate", default=Any)
 Origin = TypeVar("Origin", default=Any)
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class FuncParam:
@@ -36,27 +52,50 @@ class FuncParam:
         self.managed_proxy = managed_proxy
 
         if managed_proxy:
-            arc_manager.add_reference(Path(str_rep))
+            if dtype and issubclass(dtype, Proxy):
+                for path in dtype.get_referenced_paths(self.str_rep):
+                    arc_manager.add_reference(path)
+            else:
+                arc_manager.add_reference(Path(self.str_rep))
 
     def __repr__(self) -> str:
         return f"{FuncParam.__name__} ({self.str_rep}, dtype={self.dtype}, managed_proxy={self.managed_proxy})"
 
     def __del__(self):
         if self.managed_proxy:
-            arc_manager.remove_reference(Path(self.str_rep))
+            try:
+                if self.dtype and issubclass(self.dtype, Proxy):
+                    for path in self.dtype.get_referenced_paths(self.str_rep):
+                        arc_manager.remove_reference(path)
+                else:
+                    arc_manager.remove_reference(Path(self.str_rep))
+            except Exception:
+                pass
 
 
-class ProxyMetaclass(type):
+class ProxyMetaclass(ABCMeta):
     def __new__(cls, name, bases, dct):
         x = super().__new__(cls, name, bases, dct)
 
         def resolve_path_proxy(value: Path):
-            proxy_ext: str = x.extension()  # type: ignore
+            proxy_ext: Optional[str] = x.extension()  # type: ignore
             path_ext = value.suffix
 
-            if not proxy_ext == path_ext:
+            if proxy_ext is not None and proxy_ext != path_ext:
                 raise TypeError(
                     f"The file extension did not match the proxy (Expected {proxy_ext} but received {path_ext})"
+                )
+
+            proxy_prefix: Optional[str] = x.prefix()  # type: ignore
+            if proxy_prefix is not None and not value.name.startswith(proxy_prefix):
+                raise TypeError(
+                    f"The file prefix did not match the proxy (Expected prefix '{proxy_prefix}' on '{value.name}')"
+                )
+
+            proxy_suffix: Optional[str] = x.suffix()  # type: ignore
+            if proxy_suffix is not None and not value.stem.endswith(proxy_suffix):
+                raise TypeError(
+                    f"The file suffix did not match the proxy (Expected suffix '{proxy_suffix}' on '{value.stem}')"
                 )
 
             return x(value, managed=False)
@@ -71,7 +110,7 @@ class ProxyMetaclass(type):
 
         current_registry().add_resolver(
             Path,
-            x,
+            cast(Type[Any], x),
             resolver=resolve_path_proxy,
             namespace=default_resolver_namespace,
         )
@@ -83,16 +122,28 @@ class Proxy(metaclass=ProxyMetaclass):
 
     def __init__(self, path: os.PathLike, managed=False, *args, **kwargs):
 
-        self.path = Path(path)
+        self._path = Path(path)
         self.managed = managed
 
-        if self.managed == True:
-            arc_manager.add_reference(self.path)
+        if self.managed:
+            arc_manager.add_reference(self._path)
 
         super().__init__(*args, **kwargs)
 
+    @property
+    def path(self) -> Path:
+        return self._path
+
     @classmethod
     def file_ext(cls) -> Optional[str]:
+        return None
+
+    @classmethod
+    def prefix(cls) -> Optional[str]:
+        return None
+
+    @classmethod
+    def suffix(cls) -> Optional[str]:
         return None
 
     @classmethod
@@ -105,35 +156,73 @@ class Proxy(metaclass=ProxyMetaclass):
             return ext
 
     @classmethod
-    def new_temporary_proxy(cls) -> "Proxy":
-        file_ext = cls.file_ext()
-        file_ext = file_ext if file_ext is not None else ""
+    def get_referenced_paths(cls, path_str: str) -> List[Path]:
+        """Return the list of filesystem paths associated with this proxy class."""
+        return [Path(path_str)]
 
-        temp_file = arc_manager.new_managed_file(file_ext)
+    @classmethod
+    def from_func_param(cls, param: FuncParam) -> "Proxy":
+        """Instantiate a proxy from a FuncParam."""
+        return cls(Path(param.str_rep), managed=param.managed_proxy)
+
+    @classmethod
+    def from_proxy(
+        cls: Type[Casted], source: "Proxy", copy_data: bool = True
+    ) -> Casted:
+        """Create a typed proxy instance from another proxy instance."""
+        if source.file_ext() is not None:
+            raise TypeError(
+                f"Cannot add type to proxy with existing type {source.file_ext()}"
+            )
+
+        assert issubclass(cls, Proxy)
+
+        parent = source.path.parent
+        stem = source.path.name
+        prefix = cls.prefix() or ""
+        suffix = cls.suffix() or ""
+        ext = cls.extension() or ""
+
+        new_name = f"{prefix}{stem}{suffix}{ext}"
+        new_path = parent / new_name
+        if copy_data:
+            shutil.copy(str(source.path), str(new_path))
+
+        return cls(new_path, managed=source.managed)
+
+    @classmethod
+    @inject
+    def new_temporary_proxy(
+        cls,
+        base_path: Optional[os.PathLike] = None,
+        temp_file_provider: TemporaryFilesProvider = Provide[
+            Container.temp_file_provider
+        ],
+    ) -> "Proxy":
+        file_ext = cls.extension() or cls.file_ext() or ""
+        file_suffix = cls.suffix() or ""
+        file_prefix = cls.prefix() or ""
+
+        if base_path is not None:
+            base_path = Path(base_path)
+            parent = base_path.parent
+            stem = base_path.name
+            temp_file = parent / f"{file_prefix}{stem}{file_suffix}{file_ext}"
+            arc_manager.register_temporary_file(temp_file)
+        else:
+            combined_suffix = f"{file_suffix}{file_ext}"
+            temp_file = Path(
+                temp_file_provider.new_temporary_file(
+                    suffix=combined_suffix, prefix=file_prefix or None
+                )
+            )
+            arc_manager.register_temporary_file(temp_file)
 
         return cls(temp_file, managed=True)
 
     def typed(self, *, astype: Type[Casted], copy_data=True) -> Casted:
-        if self.file_ext() is not None:
-            raise TypeError(
-                f"Cannot add type to proxy with existing type {self.file_ext()}"
-            )
-
         assert issubclass(astype, Proxy)
-
-        new_ext = astype.file_ext()
-        assert isinstance(new_ext, str)
-
-        new_path = self.path.with_name(f"{self.path.name}{new_ext}")
-        if copy_data:
-            shutil.copy(str(self.path), str(new_path))
-
-        new_proxy = astype(
-            new_path,
-            managed=self.managed,
-        )
-
-        return new_proxy
+        return astype.from_proxy(self, copy_data=copy_data)
 
     @inject
     def __del__(
@@ -144,16 +233,228 @@ class Proxy(metaclass=ProxyMetaclass):
     ):
 
         try:
-            if self.managed == True:
-                arc_manager.remove_reference(self.path)
+            if getattr(self, "managed", False):
+                arc_manager.remove_reference(self._path)
 
         except Exception as e:
-            logging.warning(f"Failed to delete file at {self.path}: {e}")
+            logging.warning(
+                f"Failed to delete file at {getattr(self, '_path', None)}: {e}"
+            )
             pass  # Fail silently
 
     def __str__(self):
+        is_owned = "managed" if getattr(self, "managed", False) else "unmanaged"
+        return f"<{self.__class__.__name__} for {getattr(self, 'path', None)} ({is_owned})>"
+
+
+class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
+    """Abstract base class representing a grouped collection of Proxy objects.
+
+    Subclasses must annotate child proxy fields with Proxy types and implement
+    the primary_proxy abstract property.
+    """
+
+    def __init__(
+        self, base_path: os.PathLike, managed: bool = False, **kwargs: Any
+    ) -> None:
+        base_path = Path(base_path)
+        if base_path.suffix != "":
+            raise ValueError(
+                f"ProxyGroup base_path must not have an extension, but received '{base_path}'"
+            )
+
+        super().__init__(base_path, managed=False)
+
+        self.base_path = base_path
+        self.managed = managed
+        self._proxies: dict[str, Proxy] = {}
+
+        proxy_fields = self.get_proxy_fields()
+
+        extra_keys = set(kwargs.keys()) - set(proxy_fields.keys())
+        if extra_keys:
+            raise TypeError(
+                f"Unexpected keyword argument(s) for {self.__class__.__name__}: "
+                f"{', '.join(sorted(extra_keys))}"
+            )
+
+        field_paths = self.get_field_paths(self.base_path)
+
+        for field_name, proxy_cls in proxy_fields.items():
+            child_path = field_paths[field_name]
+            if field_name in kwargs:
+                child_proxy = kwargs[field_name]
+
+                if not isinstance(child_proxy, proxy_cls):
+                    raise TypeError(
+                        f"Expected field '{field_name}' to be an instance of "
+                        f"{proxy_cls.__name__}, got {type(child_proxy).__name__}"
+                    )
+            else:
+                child_proxy = proxy_cls(child_path, managed=self.managed)
+
+            self._proxies[field_name] = child_proxy
+            setattr(self, field_name, child_proxy)
+
+    @classmethod
+    def get_proxy_fields(cls) -> Dict[str, Type[Proxy]]:
+        """Return a dictionary mapping child proxy field names to their Proxy subclass types."""
+        hints = get_type_hints(cls)
+        return {
+            field_name: proxy_cls
+            for field_name, proxy_cls in hints.items()
+            if isinstance(proxy_cls, type) and issubclass(proxy_cls, Proxy)
+        }
+
+    @classmethod
+    def get_field_paths(cls, base_path: os.PathLike) -> Dict[str, Path]:
+        """Return a dictionary mapping each proxy field name to its corresponding Path."""
+        base_path = Path(base_path)
+        parent = base_path.parent
+        stem = base_path.name
+
+        group_prefix = cls.prefix() or ""
+        group_suffix = cls.suffix() or ""
+        effective_stem = f"{group_prefix}{stem}{group_suffix}"
+
+        proxy_fields = cls.get_proxy_fields()
+        return {
+            field_name: parent
+            / f"{proxy_cls.prefix() or ''}{effective_stem}{proxy_cls.suffix() or ''}{proxy_cls.extension() or ''}"
+            for field_name, proxy_cls in proxy_fields.items()
+        }
+
+    @classmethod
+    def extract_base_path(cls, primary_path: os.PathLike) -> Path:
+        """Extract the canonical base_path from a primary proxy path by stripping
+        group/child prefixes, suffixes, and extensions.
+        """
+        primary_path = Path(primary_path)
+        parent = primary_path.parent
+        name = primary_path.name
+
+        proxy_fields = cls.get_proxy_fields()
+        primary_cls: Optional[Type[Proxy]] = None
+        prop = getattr(cls, "primary_proxy", None)
+        if isinstance(prop, property) and prop.fget is not None:
+            try:
+
+                class _DummyGroup:
+                    def __getattr__(self, attr):
+                        return attr
+
+                field_name = prop.fget(_DummyGroup())
+                if isinstance(field_name, str) and field_name in proxy_fields:
+                    primary_cls = proxy_fields[field_name]
+            except Exception:
+                pass
+
+        if primary_cls is None and proxy_fields:
+            primary_cls = next(iter(proxy_fields.values()))
+
+        if primary_cls is not None:
+            ext = primary_cls.extension() or primary_cls.file_ext()
+            if ext and name.endswith(ext):
+                name = name[: -len(ext)]
+
+            child_suffix = primary_cls.suffix()
+            if child_suffix and name.endswith(child_suffix):
+                name = name[: -len(child_suffix)]
+
+        group_suffix = cls.suffix()
+        if group_suffix and name.endswith(group_suffix):
+            name = name[: -len(group_suffix)]
+
+        if primary_cls is not None:
+            child_prefix = primary_cls.prefix()
+            if child_prefix and name.startswith(child_prefix):
+                name = name[len(child_prefix) :]
+
+        group_prefix = cls.prefix()
+        if group_prefix and name.startswith(group_prefix):
+            name = name[len(group_prefix) :]
+
+        return parent / name
+
+    @classmethod
+    def get_referenced_paths(cls, path_str: str) -> List[Path]:
+        """Return the list of child proxy paths associated with this ProxyGroup class."""
+        base_path = cls.extract_base_path(Path(path_str))
+        return list(cls.get_field_paths(base_path).values())
+
+    @classmethod
+    def from_func_param(cls, param: FuncParam) -> "ProxyGroup":
+        """Instantiate a ProxyGroup from a FuncParam."""
+        base_path = cls.extract_base_path(Path(param.str_rep))
+        return cls(base_path, managed=param.managed_proxy)
+
+    @classmethod
+    def from_proxy(
+        cls: Type[Casted], source: "Proxy", copy_data: bool = True
+    ) -> Casted:
+        del copy_data  # Unused parameter
+
+        """Create a ProxyGroup from an existing Proxy."""
+        return cls(source.path, managed=source.managed)
+
+    @property
+    @abstractmethod
+    def primary_proxy(self) -> Proxy:
+        """Return the primary proxy instance for this group."""
+        ...
+
+    @property
+    def path(self) -> Path:
+        return self.primary_proxy.path
+
+    @classmethod
+    @inject
+    def new_temporary_proxy(
+        cls,
+        base_path: Optional[os.PathLike] = None,
+        temp_file_provider: TemporaryFilesProvider = Provide[
+            Container.temp_file_provider
+        ],
+    ) -> "ProxyGroup":
+        if base_path is not None:
+            base_path = Path(base_path)
+        else:
+            base_temp_file = temp_file_provider.new_temporary_file(suffix="")
+            base_path = Path(base_temp_file)
+
+        field_paths = cls.get_field_paths(base_path)
+        children = {}
+        for field_name, proxy_cls in cls.get_proxy_fields().items():
+            child_path = field_paths[field_name]
+            arc_manager.register_temporary_file(child_path)
+            children[field_name] = proxy_cls(child_path, managed=True)
+
+        group = cls(base_path, managed=True, **children)
+        return group
+
+    def __getitem__(self, key: str) -> Proxy:
+        return self._proxies[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._proxies)
+
+    def __len__(self) -> int:
+        return len(self._proxies)
+
+    def __repr__(self) -> str:
         is_owned = "managed" if self.managed else "unmanaged"
-        return f"<{self.__class__.__name__} for {self.path} ({is_owned})>"
+        children = ", ".join(f"{k}={v!r}" for k, v in self._proxies.items())
+        return f"<{self.__class__.__name__} base='{self.base_path}' ({children}) [{is_owned}]>"
+
+    def __str__(self) -> str:
+        is_owned = "managed" if self.managed else "unmanaged"
+        children = ", ".join(f"{k}={v.path.name}" for k, v in self._proxies.items())
+        return f"<{self.__class__.__name__} base='{self.base_path}' ({children}) [{is_owned}]>"
+
+    def __del__(self, *args: Any, **kwargs: Any):
+        # ProxyGroup does not directly manage the base_path via ARC.
+        # Child proxies handle their own reference-counted cleanup.
+        pass
 
 
 class Output(Generic[T]):
@@ -163,24 +464,46 @@ class Output(Generic[T]):
 
         current_registry().add_resolver(Output, dtype, resolver=resolve_output_to_proxy)
 
+
 class ProxyProtocol(Protocol):
     @classmethod
     def file_ext(cls) -> Optional[str]: ...
+    @classmethod
+    def prefix(cls) -> Optional[str]: ...
+    @classmethod
+    def suffix(cls) -> Optional[str]: ...
 
-def namedproxy(typename: str, *, file_ext: str) -> Type[ProxyProtocol]:
+
+def namedproxy(
+    typename: str,
+    *,
+    file_ext: str,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+) -> Type[ProxyProtocol]:
     if not typename.isidentifier():
         raise ValueError("The typename must be a valid identifier")
 
     if not file_ext.startswith("."):
         raise ValueError("The file extension must start with a .")
-    
+
     _ext = file_ext
+    _prefix = prefix
+    _suffix = suffix
 
     class ProxySubclass(Proxy):
-        
+
         @classmethod
         def file_ext(cls) -> Optional[str]:
             return _ext
+
+        @classmethod
+        def prefix(cls) -> Optional[str]:
+            return _prefix
+
+        @classmethod
+        def suffix(cls) -> Optional[str]:
+            return _suffix
 
     ProxySubclass.__name__ = typename
     ProxySubclass.__qualname__ = typename
@@ -188,38 +511,41 @@ def namedproxy(typename: str, *, file_ext: str) -> Type[ProxyProtocol]:
 
 
 if TYPE_CHECKING:
-
-    # class ProxyParam():
-    #     pass  # Marker Type
-
-    ProxyParam = Union[Output[Intermediate], Intermediate, Origin]
+    ResolveProxy: TypeAlias = Union[Output[Intermediate], Intermediate, Origin]
 else:
 
-    class ProxyParam(Generic[Intermediate, Origin]):
+    class ResolveProxy(Generic[Intermediate, Origin]):
         pass  # Marker Type
 
 
-def proxify(f):
+def proxify(f: Callable[..., Any]) -> Callable[..., Any]:
 
     signature = inspect.signature(f)
 
     def _proxy_from_func_param(param: FuncParam):
-        cls: Type[Proxy] = cast(
-            Type[Proxy],
-            param.dtype if param.dtype is not None else Proxy
-        )  # Create new untyped proxy if we only pass a path here
-        assert issubclass(cls, Proxy)
+        cls = param.dtype if param.dtype is not None else Proxy
 
-        return cls(Path(param.str_rep), managed=param.managed_proxy)
+        if issubclass(cls, Proxy):
+            return cast(Type[Proxy], cls).from_func_param(param)
+        else:
+            raise TypeError(
+                f"Cannot create proxy from FuncParam with dtype {cls.__name__}"
+            )
 
     def _resolve_proxy_arg(value, param: inspect.Parameter) -> FuncParam:
         intermediate = None
 
-        if param.annotation is not None and get_origin(param.annotation) == ProxyParam:
+        if (
+            param.annotation is not None
+            and get_origin(param.annotation) == ResolveProxy
+        ):
             args = get_args(param.annotation)
             if args:
                 arg = args[0]
                 intermediate = arg if not arg == Any else None
+
+        if isinstance(value, Output):
+            intermediate = value.dtype
 
         return current_registry().resolve(
             value, astype=FuncParam, intermediate=intermediate
@@ -235,7 +561,9 @@ def proxify(f):
         }
 
         resolved = [
-            (param.name, _resolve_proxy_arg(v, param)) for param, v in func_args.items()
+            (param.name, _resolve_proxy_arg(v, param))
+            for param, v in func_args.items()
+            if v is not None
         ]
 
         resolved_args = [v.str_rep for _, v in resolved[: len(args)]]
@@ -266,7 +594,7 @@ def proxify(f):
         else:
             return tuple(return_vals)
 
-    return wrapped
+    return cast(Callable[..., Any], wrapped)
 
 
 @resolver
@@ -297,3 +625,8 @@ def resolve_output_to_proxy(
 
     assert isinstance(new_proxy, Proxy)
     return new_proxy
+
+
+@resolver
+def resolve_proxy_group_to_func_param(value: ProxyGroup) -> FuncParam:
+    return FuncParam(str(value.path), type(value), managed_proxy=value.managed)
