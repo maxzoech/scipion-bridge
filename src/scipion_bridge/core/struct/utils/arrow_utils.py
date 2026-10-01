@@ -7,11 +7,13 @@ import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
 import pyarrow as pa
-import pyarrow.compute as pc
+import pyarrow.compute as _pc
 
 from ..schema import Schema, ArrayEntryBase, RaggedArraySetEntry
 from ..key_path import IndexType, KeyPath
 from ..exceptions import UninitializedFieldError
+
+pc: Any = _pc
 
 
 def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
@@ -207,7 +209,10 @@ def extract_field_from_arrow(col: pa.Array, field_name: str) -> pa.Array:
 def get_nested_arrow_field(col: pa.Array, path: KeyPath) -> pa.Array:
     """Traverse nested StructArray / ListArray layers along a KeyPath to resolve the leaf field array."""
     for seg in path:
-        col = extract_field_from_arrow(col, seg)
+        field_name = seg[0]
+        if field_name == "root":
+            continue
+        col = extract_field_from_arrow(col, field_name)
     return col
 
 

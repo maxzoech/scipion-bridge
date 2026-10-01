@@ -1,75 +1,46 @@
 from __future__ import annotations
 from typing import (
-    TypeVar,
-    Generic,
     Optional,
     Any,
-    Callable,
-    Dict,
     List,
-    Union,
-    Type,
 )
+from dependency_injector.wiring import Provide, inject
 
-from scipion_bridge.core.struct import Struct, Set
-from .ops import Source, FlushSignal, FLUSH
-from .sink import Sink
-from .node import Node, Stream
-
-T = TypeVar("T", bound=Union[Struct, Set, Any])
+from .backend import CompiledPipeline, StreamingBackendProvider
+from .node import Node, lower
 
 
 class Pipeline:
     """
-    Compiled streaming engine backed by streamz.
+    Compiled streaming engine backed by a StreamingBackendProvider (e.g. Ray).
     """
 
-    def __init__(
-        self,
-        sinks: List[Sink],
-        sources: Dict[str, Source],
-        backend_sources: Dict[str, Stream],
-    ):
-        self.sinks = sinks
-        self.sources = sources
-        self._backend_sources = backend_sources
+    def __init__(self, compiled: CompiledPipeline):
+        self._compiled = compiled
 
     @classmethod
-    def from_sink(cls, *nodes: Sink) -> Pipeline:
+    @inject
+    def from_sink(
+        cls,
+        *nodes: Node,
+        backend: Optional[StreamingBackendProvider] = Provide[
+            "streaming_backend"
+        ],
+    ) -> Pipeline:
         """
-        Factory method: Discovers sources, compiles the DAG starting from target nodes,
-        and returns a fully built Pipeline instance.
+        Factory method: Lowers the DAG starting from target nodes and compiles
+        it into an executable pipeline using the configured streaming backend.
         """
         if not nodes:
             raise ValueError("Pipeline.from_sink() requires at least one target Node.")
 
-        sources: Dict[str, Source] = {}
-        visited = set()
+        # Lower the declarative DAG into IR ops
+        ir_sinks = lower(list(nodes))
 
-        def _find_sources(n: Node):
-            if n in visited:
-                return
-            visited.add(n)
-            if isinstance(n, Source):
-                assert (
-                    n.name is not None
-                ), f"Source node {n} must have a name assigned before building the pipeline."
-                sources[n.name] = n
-
-            for up in n.upstream:
-                _find_sources(up)
-
-        for node in nodes:
-            _find_sources(node)
-
-        backend_sources = {name: Stream(stream_name=name) for name in sources.keys()}
-
-        compile_cache: Dict[Node, Stream] = {}
-        for node in nodes:
-            node.compile(backend_sources, compile_cache)
-
-        sinks = [n for n in nodes if isinstance(n, Sink)]
-        return cls(sinks=sinks, sources=sources, backend_sources=backend_sources)
+        # Compile with the backend
+        assert backend is not None, "Backend must not be None"
+        compiled = backend.compile(ir_sinks)
+        return cls(compiled=compiled)
 
     def send(self, **kwargs: Any) -> None:
         """
@@ -88,20 +59,13 @@ class Pipeline:
                 raise TypeError(
                     f"Python lists are not supported for input '{name}'. Use core.struct.Set instead."
                 )
-
-            if name in self._backend_sources:
-                self._backend_sources[name].emit(value)
-            else:
-                raise KeyError(
-                    f"Input source '{name}' is not registered in this pipeline."
-                )
+            self._compiled.send(name, value)
 
     def flush(self) -> None:
         """
         Flush all stateful operations in the pipeline by sending a FLUSH sentinel to all input sources.
         """
-        for stream in self._backend_sources.values():
-            stream.emit(FLUSH)
+        self._compiled.flush()
 
     def __enter__(self) -> Pipeline:
         return self

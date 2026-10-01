@@ -1,31 +1,38 @@
+"""Base class for all nodes in the streaming computational graph."""
+
+from __future__ import annotations
+
 import abc
-from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING
-import streamz
+from typing import Any, List, Dict, Optional
 
-if TYPE_CHECKING:
 
-    class Stream:
-        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
-        def accumulate(
-            self,
-            func: Callable[..., Any],
-            start: Any = ...,
-            returns_state: bool = ...,
-            **kwargs: Any,
-        ) -> "Stream": ...
-        def map(
-            self, func: Callable[[Any], Any], *args: Any, **kwargs: Any
-        ) -> "Stream": ...
-        def flatten(self) -> "Stream": ...
-        def filter(self, predicate: Callable[[Any], bool]) -> "Stream": ...
-        def sink(self, func: Callable[[Any], Any], **kwargs: Any) -> Any: ...
-        def emit(self, x: Any, asynchronous: bool = ...) -> Any: ...
-        def zip(self, *others: "Stream") -> "Stream": ...
-        def combine_latest(self, *others: "Stream", **kwargs: Any) -> "Stream": ...
-        def destroy(self) -> None: ...
+from .ir import IROp, IRSource
+from .node import Node
 
-else:
-    from streamz import Stream
+
+class LoweringContext:
+    """Context coordinator that manages memoization and DAG wiring during lowering."""
+
+    def __init__(self) -> None:
+        self.memo: Dict[int, IROp] = {}
+        self.sources: Dict[str, IRSource] = {}
+
+    def lower_node(self, node: "Node") -> IROp:
+        """Recursively lowers a Node using polymorphism and wires DAG dependencies."""
+        node_id = id(node)
+        if node_id in self.memo:
+            return self.memo[node_id]
+
+        # Polymorphic lowering dispatch to the node's own implementation
+        ir_node = node.lower(self)
+        self.memo[node_id] = ir_node
+
+        # Recursively lower upstream nodes and wire DAG edges
+        for up in node.upstream:
+            up_ir = self.lower_node(up)
+            up_ir.add_downstream(ir_node)
+
+        return ir_node
 
 
 class FlushSignal:
@@ -39,12 +46,11 @@ FLUSH = FlushSignal()
 
 
 class Node(metaclass=abc.ABCMeta):
-    """
-    Base class for all nodes in the streaming computational graph.
-    """
+    """Base class for all nodes in the streaming computational graph."""
 
-    def __init__(self, upstream: Optional[List["Node"]] = None):
+    def __init__(self, upstream: Optional[List[Node]] = None):
         self.upstream: List[Node] = upstream if upstream is not None else []
+        self.downstream: List[Node] = []
 
     def __hash__(self) -> int:
         return id(self)
@@ -53,30 +59,16 @@ class Node(metaclass=abc.ABCMeta):
         return self is other
 
     @abc.abstractmethod
-    def transform(self, *streams: Stream) -> Stream:
-        """
-        Transforms upstream streamz stream(s) into a new streamz stream operator.
-        Must be implemented by subclasses.
-        """
+    def lower(self, ctx: "LoweringContext") -> IROp:
+        """Polymorphically lower this surface Node to its low-level IR representation."""
+        ...
 
-    def compile(
-        self,
-        sources_map: Dict[str, Stream],
-        compile_cache: Optional[Dict["Node", Stream]] = None,
-    ) -> Stream:
-        """
-        Recursively compile this node and its upstream dependencies into a streamz stream.
-        """
-        if compile_cache is None:
-            compile_cache = {}
 
-        if self in compile_cache:
-            return compile_cache[self]
+def lower(nodes: List["Node"]) -> List[IROp]:
+    """Lower one or more DAG root/sink nodes into lowered IR nodes.
 
-        upstream_streams = [
-            up.compile(sources_map, compile_cache) for up in self.upstream
-        ]
-        compiled = self.transform(*upstream_streams)
-
-        compile_cache[self] = compiled
-        return compiled
+    Returns:
+        List of lowered IROp nodes corresponding to the input nodes.
+    """
+    ctx = LoweringContext()
+    return [ctx.lower_node(node) for node in nodes]

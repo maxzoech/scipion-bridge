@@ -11,6 +11,36 @@ def setup_test_container():
     yield _test_container
 
 
+@pytest.fixture(scope="session", autouse=True)
+def init_ray_session():
+    """Initialize Ray session with comprehensive PYTHONPATH for test modules and Struct definitions."""
+    import os
+    import sys
+    import ray
+
+    if ray.is_initialized():
+        ray.shutdown()
+
+    extra_paths = [os.getcwd(), os.path.abspath("src")]
+    tests_dir = os.path.abspath("tests")
+    if os.path.exists(tests_dir):
+        for root, _, _ in os.walk(tests_dir):
+            extra_paths.append(root)
+
+    all_paths = list(
+        dict.fromkeys(extra_paths + [os.path.abspath(p) for p in sys.path if p])
+    )
+    python_path = ":".join(all_paths)
+    ray.init(
+        ignore_reinit_error=True,
+        num_cpus=2,
+        runtime_env={"env_vars": {"PYTHONPATH": python_path}},
+    )
+    yield
+    if ray.is_initialized():
+        ray.shutdown()
+
+
 @pytest.fixture(
     params=["staging"]
 )  # TODO: add "arrow_frozen", "arrow_from_batch" when implemented

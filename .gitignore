@@ -214,3 +214,5 @@ __marimo__/
 *.mrc
 *.mrcs
 *.star
+
+.agents

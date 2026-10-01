@@ -22,6 +22,7 @@ from typing_extensions import Self, TypeGuard
 import numpy as np
 from numpy.typing import NDArray
 import awkward as ak
+import pyarrow as pa
 
 from .struct import Struct, Arg, Trait
 from .schema import (
@@ -200,19 +201,29 @@ class Set(Marker[T], SchemaConvertible):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        if cls._dtype is None:
-            raise TypeError(
-                "Cannot convert unsubscripted Set to a schema. "
-                "Please provide an element type (e.g., Set[Struct] or dtype=Struct)."
-            )
-
-        if not (isinstance(cls._dtype, type) and issubclass(cls._dtype, Struct)):
-            raise TypeError(f"Element of a set has to be a Struct, got '{cls._dtype}'")
-
-        cls._bridge_schema = cls._dtype._bridge_schema.to_set_schema()
+        if cls._dtype is not None:
+            if not (isinstance(cls._dtype, type) and issubclass(cls._dtype, Struct)):
+                raise TypeError(
+                    f"Element of a set has to be a Struct, got '{cls._dtype}'"
+                )
+            if hasattr(cls._dtype, "_bridge_schema"):
+                cls._bridge_schema = cls._dtype._bridge_schema.to_set_schema()
 
     @classmethod
     def schema(cls) -> Schema:
+        if cls._bridge_schema is None:
+            if cls._dtype is None:
+                raise TypeError(
+                    "Cannot convert unsubscripted Set to a schema. "
+                    "Please provide an element type (e.g., Set[Struct] or dtype=Struct)."
+                )
+
+            if not (isinstance(cls._dtype, type) and issubclass(cls._dtype, Struct)):
+                raise TypeError(
+                    f"Element of a set has to be a Struct, got '{cls._dtype}'"
+                )
+            cls._bridge_schema = cls._dtype._bridge_schema.to_set_schema()
+
         return cls._bridge_schema
 
     @classmethod
@@ -530,6 +541,19 @@ class Set(Marker[T], SchemaConvertible):
                 raise TypeError(
                     f"Invalid Set index type '{type(key).__name__}'. Expected int, slice, str, or integer/boolean sequence."
                 )
+
+    def to_arrow(self) -> pa.RecordBatch:
+        """Export Set to Apache Arrow RecordBatch."""
+        raise NotImplementedError(
+            "Arrow conversion is pending ArrowEngine implementation"
+        )
+
+    @classmethod
+    def from_arrow(cls, dtype: Any, batch: Any) -> Any:
+        """Construct Set from Apache Arrow RecordBatch."""
+        raise NotImplementedError(
+            "Arrow conversion is pending ArrowEngine implementation"
+        )
 
 
 def concat(sets: Sequence[Set[T]]) -> Set[T]:

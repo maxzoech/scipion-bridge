@@ -6,9 +6,9 @@ import mrcfile
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, Any, List, Tuple, Sequence, cast
+from typing import Optional, Any, List, Tuple, Sequence, cast, TYPE_CHECKING
 
-try:
+if TYPE_CHECKING:
     import pwem.objects as emobj  # type: ignore
     from pwem.objects import (  # type: ignore
         Particle,
@@ -19,51 +19,78 @@ try:
         Class2D,
         CTFModel,
         Coordinate,
+        Acquisition,
     )
     from pwem.protocols import ProtFlexBase  # type: ignore
     from pwem.emlib.image import ImageHandler  # type: ignore
 
     HAS_PWEM = True
-except ImportError:
-    HAS_PWEM = False
+else:
+    try:
+        import pwem.objects as emobj  # type: ignore
+        from pwem.objects import (  # type: ignore
+            Particle,
+            SetOfParticles,
+            SetOfParticlesFlex,
+            ParticleFlex,
+            SetOfClasses2D,
+            Class2D,
+            CTFModel,
+            Coordinate,
+            Acquisition,
+        )
+        from pwem.protocols import ProtFlexBase  # type: ignore
+        from pwem.emlib.image import ImageHandler  # type: ignore
 
-    class _DynamicStub:
-        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
-        def __getattr__(self, item: str) -> Any:
-            return None
+        HAS_PWEM = True
+    except ImportError:
+        HAS_PWEM = False
 
-        def __len__(self) -> int:
-            return 0
+        class _DynamicStub:
+            def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+            def __getattr__(self, item: str) -> Any:
+                return None
 
-    class Particle(_DynamicStub):
-        pass  # type: ignore
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return _DynamicStub()
 
-    class SetOfParticles(_DynamicStub):
-        pass  # type: ignore
+            def __len__(self) -> int:
+                return 0
 
-    class SetOfParticlesFlex(_DynamicStub):
-        pass  # type: ignore
+        class Particle(_DynamicStub):
+            pass  # type: ignore
 
-    class ParticleFlex(_DynamicStub):
-        pass  # type: ignore
+        class SetOfParticles(_DynamicStub):
+            pass  # type: ignore
 
-    class SetOfClasses2D(_DynamicStub):
-        pass  # type: ignore
+        class SetOfParticlesFlex(SetOfParticles):
+            pass  # type: ignore
 
-    class Class2D(_DynamicStub):
-        pass  # type: ignore
+        class ParticleFlex(Particle):
+            pass  # type: ignore
 
-    class CTFModel(_DynamicStub):
-        pass  # type: ignore
+        class SetOfClasses2D(_DynamicStub):
+            pass  # type: ignore
 
-    class Coordinate(_DynamicStub):
-        pass  # type: ignore
+        class Class2D(SetOfParticles):
+            pass  # type: ignore
 
-    class ProtFlexBase(_DynamicStub):
-        pass  # type: ignore
+        class CTFModel(_DynamicStub):
+            pass  # type: ignore
 
-    class ImageHandler(_DynamicStub):
-        pass  # type: ignore
+        class Coordinate(_DynamicStub):
+            pass  # type: ignore
+
+        class Acquisition(_DynamicStub):
+            pass  # type: ignore
+
+        class ProtFlexBase(_DynamicStub):
+            pass  # type: ignore
+
+        class ImageHandler(_DynamicStub):
+            pass  # type: ignore
+
+        emobj: Any = _DynamicStub()
 
 
 PROG_NAME = "scipion_bridge"
@@ -72,7 +99,7 @@ PROG_NAME = "scipion_bridge"
 @dataclass
 class PyWorkflowResolutionContext:
 
-    protocol: ProtFlexBase  # type: ignore
+    protocol: Any
     output_name: Optional[str] = None
     append: bool = False
     unprocessed_ids: Optional[Sequence[int]] = None
@@ -109,7 +136,9 @@ if HAS_PWEM:
         ids = metadata.unprocessed_ids if metadata else None
         where_clause = _build_id_where_clause(ids) if ids else None
 
-        db = value._getMapper().db
+        mapper = value._getMapper()
+        assert mapper is not None and mapper.db is not None
+        db = mapper.db
         raw_rows = db.selectAll(where=where_clause, iterate=False)
 
         num_particles = len(raw_rows)
@@ -150,7 +179,7 @@ if HAS_PWEM:
             return None
 
     def _fill_ctf_columns(
-        particle_set: "struct.Set[spa.Particle]",
+        particle_set: "struct.Set[Any]",
         raw_rows: List[Any],
         db: Any,
     ) -> None:
@@ -181,7 +210,7 @@ if HAS_PWEM:
             ).reshape(n, 1)
 
     def _fill_coordinate_columns(
-        particle_set: "struct.Set[spa.Particle]",
+        particle_set: "struct.Set[Any]",
         raw_rows: List[Any],
         db: Any,
     ) -> None:
@@ -208,7 +237,7 @@ if HAS_PWEM:
         ).reshape(n, 1)
 
     def _fill_sampling_rate(
-        particle_set: "struct.Set[spa.Particle]",
+        particle_set: "struct.Set[Any]",
         raw_rows: List[Any],
         db: Any,
         container: Any = None,
@@ -256,11 +285,11 @@ if HAS_PWEM:
         if hasattr(obj, "getAcquisition"):
             acq = obj.getAcquisition()
             if acq is not None and hasattr(acq, "equalAttributes"):
-                return not acq.equalAttributes(emobj.Acquisition())
+                return not acq.equalAttributes(Acquisition())
         return False
 
     def _fill_acquisition_columns(
-        particle_set: "struct.Set[spa.Particle]",
+        particle_set: "struct.Set[Any]",
         raw_rows: List[Any],
         db: Any,
         container: Any = None,
@@ -343,8 +372,9 @@ if HAS_PWEM:
 
         particle = spa.Particle(pixels=pixel_data)
 
-        if value.getSamplingRate():
-            particle.sampling_rate = float(value.getSamplingRate())
+        sr = value.getSamplingRate()
+        if sr:
+            particle.sampling_rate = float(sr)
 
         if value.hasCTF():
             ctf_model = value.getCTF()
@@ -452,11 +482,14 @@ if HAS_PWEM:
         is_flex = isinstance(value, spa.FlexParticle) and value.is_initialized(
             "embeddings",
         )
-        particle = ParticleFlex(progName=PROG_NAME) if is_flex else emobj.Particle()  # type: ignore
-        if is_flex:
-            particle.getFlexInfo().setProgName(PROG_NAME)
+        if is_flex and isinstance(value, spa.FlexParticle):
+            flex_particle = ParticleFlex(progName=PROG_NAME)
+            flex_particle.getFlexInfo().setProgName(PROG_NAME)
             embeddings = np.asarray(value.embeddings)
-            particle.setZFlex(embeddings.tolist())
+            flex_particle.setZFlex(embeddings.tolist())
+            particle: Any = flex_particle
+        else:
+            particle = Particle()
 
         if value.is_initialized("sampling_rate"):
             particle.setSamplingRate(float(value.sampling_rate))
@@ -492,7 +525,9 @@ if HAS_PWEM:
         if n == 0:
             return particle_set
 
-        db = value._getMapper().db
+        mapper = value._getMapper()
+        assert mapper is not None and mapper.db is not None
+        db = mapper.db
         zflex_col = _col(db, "_zFlex")
         row_keys = set(raw_rows[0].keys()) if raw_rows else set()
         if zflex_col and zflex_col in row_keys:
@@ -514,7 +549,6 @@ if HAS_PWEM:
         particle_set = struct.Set[spa.Particle](capacity=n)
         particle_set["pixels"] = pixels
 
-        db = value._getMapper().db
         _fill_sampling_rate(particle_set, raw_rows, db, container=value)
         _fill_ctf_columns(particle_set, raw_rows, db)
         _fill_coordinate_columns(particle_set, raw_rows, db)
@@ -565,7 +599,9 @@ if HAS_PWEM:
 
         if len(value) == 0:
             out_set.write()
-            out_set._getMapper().commit()
+            mapper = out_set._getMapper()
+            if mapper is not None:
+                mapper.commit()
             return out_set
 
         stack_path = metadata.protocol._getExtraPath(
@@ -629,7 +665,9 @@ if HAS_PWEM:
                 _populate_acquisition_from_struct(out_set, value[0].acquisition)
 
         out_set.write()  # type: ignore
-        mapper.commit()
+        mapper = out_set._getMapper()
+        if mapper is not None:
+            mapper.commit()
 
         return out_set  # type: ignore
 
@@ -645,7 +683,9 @@ if HAS_PWEM:
         if num_particles == 0:
             return struct.Set[spa.FlexParticle](capacity=0)
 
-        db = value._getMapper().db
+        mapper = value._getMapper()
+        assert mapper is not None and mapper.db is not None
+        db = mapper.db
         zflex_key = db._getRealCol("_zFlex")
 
         embeddings = np.array(
@@ -688,7 +728,9 @@ if HAS_PWEM:
 
         if len(value) == 0:
             out_img_set.write()
-            out_img_set._getMapper().commit()
+            mapper = out_img_set._getMapper()
+            if mapper is not None:
+                mapper.commit()
             return out_img_set
 
         stack_path = metadata.protocol._getExtraPath(
@@ -755,7 +797,9 @@ if HAS_PWEM:
                 _populate_acquisition_from_struct(out_img_set, value[0].acquisition)
 
         out_img_set.write()
-        mapper.commit()
+        mapper = out_img_set._getMapper()
+        if mapper is not None:
+            mapper.commit()
 
         return out_img_set
 
@@ -863,7 +907,7 @@ if HAS_PWEM:
 
             scipion_cls.setRepresentative(rep)
         else:
-            rep = emobj.Particle()
+            rep = Particle()
             rep.setClassId(cid)
             scipion_cls.setRepresentative(rep)
 
@@ -874,14 +918,13 @@ if HAS_PWEM:
             particles_bridge: struct.Set[spa.Particle] = bridge_cls.particles
             n_particles = len(particles_bridge)
             if n_particles > 0:
-                has_pixels = (
+                stack_path = None
+                if (
                     metadata is not None
                     and metadata.protocol is not None
                     and hasattr(metadata.protocol, "_getExtraPath")
                     and _is_column_initialized(particles_bridge, "pixels")
-                )
-                stack_path = None
-                if has_pixels:
+                ):
                     stack_path = os.path.join(
                         metadata.protocol._getExtraPath(),
                         f"output_{output_name}_{unique_id}_class_{cid}_particles.mrcs",
@@ -907,7 +950,7 @@ if HAS_PWEM:
                     )
 
                 for i in range(n_particles):
-                    p = emobj.Particle()
+                    p = Particle()
                     p.setClassId(cid)
 
                     if stack_path is not None:
@@ -929,8 +972,19 @@ if HAS_PWEM:
 
                     scipion_cls.append(p)
 
-                scipion_cls.write()
-                scipion_cls._getMapper().commit()
+        cls_mapper = scipion_cls._getMapper()
+        if (
+            cls_mapper is not None
+            and getattr(cls_mapper, "doCreateTables", False)
+            and getattr(cls_mapper, "db", None) is not None
+        ):
+            cls_mapper.db.createTables(Particle().getObjDict(includeClass=True))
+            cls_mapper.doCreateTables = False
+
+        scipion_cls.write()
+        mapper = scipion_cls._getMapper()
+        if mapper is not None:
+            mapper.commit()
 
         out_classes.update(scipion_cls)
         return scipion_cls
@@ -986,8 +1040,9 @@ if HAS_PWEM:
                 ):
                     first_cls_acq = bridge_cls.particles[0].acquisition
 
-        if out_classes.getImages() is None:
-            img_set = emobj.SetOfParticles(filename=":memory:")
+        images = out_classes.getImages()
+        if images is None:
+            img_set = SetOfParticles(filename=":memory:")
             if first_cls_sr is not None:
                 img_set.setSamplingRate(first_cls_sr)
             if first_cls_acq is not None:
@@ -995,18 +1050,18 @@ if HAS_PWEM:
             out_classes.setImages(img_set)
         else:
             if first_cls_sr is not None and not out_classes.getSamplingRate():
-                out_classes.getImages().setSamplingRate(first_cls_sr)
+                images.setSamplingRate(first_cls_sr)
             if (
                 first_cls_acq is not None
-                and hasattr(out_classes.getImages(), "hasAcquisition")
-                and not out_classes.getImages().hasAcquisition()
+                and hasattr(images, "hasAcquisition")
+                and not images.hasAcquisition()
             ):
-                _populate_acquisition_from_struct(
-                    out_classes.getImages(), first_cls_acq
-                )
+                _populate_acquisition_from_struct(images, first_cls_acq)
 
         out_classes.write()
-        out_classes._getMapper().commit()
+        mapper = out_classes._getMapper()
+        if mapper is not None:
+            mapper.commit()
 
         return out_classes
 

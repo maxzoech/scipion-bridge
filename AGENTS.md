@@ -90,6 +90,24 @@ def foo(a):
 
 Code should fail early and consistently.
 
+### Avoid tricks to prevent circular imports
+Circular import errors in Python should be avoided by the structure of the
+project, not through tricks such as guarding using TYPE_CHECKING and inline
+imports. **Avoid:**
+```
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import some_module # Avoid importing modules in TYPE_CHECKING guard
+
+class Foo:
+
+    def bar(self):
+        import some_module # Import is delayed to avoid circular import
+
+```
+
+All imports should be kept at the top level of the module
+
 ### Prefer match-case over if-else when possible
 Instead of using large if-else blocks, use pattern matching. An example of this
 is the __get_item__ method inside sets.

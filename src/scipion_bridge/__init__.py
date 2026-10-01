@@ -25,7 +25,7 @@ from .core.protocol import Protocol, Field, Input
 from .core import struct
 from .core.struct import Struct, Set, Collection, concat, Array, Arg, Dim
 
-from .core.streaming.ops import Op, FlushSignal, FLUSH
+from .core.streaming import Op, FlushSignal, FLUSH
 
 from .core.typed import core_resolvers
 

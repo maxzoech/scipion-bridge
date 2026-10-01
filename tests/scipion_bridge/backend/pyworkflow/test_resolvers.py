@@ -1210,7 +1210,9 @@ def test_class2d_sqlite_table_initialization_on_resolution_and_reduction(tmp_pat
 
         def _createSetOfClasses2D(self, suffix=""):
             db_path = str(self.p / f"classes_init{suffix}.sqlite")
-            return emobj.SetOfClasses2D(filename=db_path,)
+            return emobj.SetOfClasses2D(
+                filename=db_path,
+            )
 
         def _getExtraPath(self, path=""):
             return str(self.p / path)
@@ -1290,4 +1292,3 @@ def test_class2d_sqlite_table_initialization_on_resolution_and_reduction(tmp_pat
 
         assert "Class001_Classes" in tables
         assert "Class002_Classes" in tables
-

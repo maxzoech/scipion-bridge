@@ -15,26 +15,97 @@ from ...core.streaming import Pipeline, Sink
 
 from .workflow_container import configure_pyworkflow_env
 
-from typing import Optional, get_args, Dict, List, Any, get_type_hints, Type, Union
+from typing import (
+    Optional,
+    get_args,
+    Dict,
+    List,
+    Any,
+    get_type_hints,
+    Type,
+    Union,
+    Literal,
+    TYPE_CHECKING,
+)
 
 from enum import Enum
 
-try:
+if TYPE_CHECKING:
     import pwem.objects as emobj  # type: ignore
     from pwem.objects import (  # type: ignore
         SetOfParticles,
         SetOfParticlesFlex,
+        Particle,
         ParticleFlex,
         SetOfVolumes,
         Volume,
         SetOfClasses2D,
         Class2D,
+        Acquisition,
     )
     import pyworkflow.object as pywfobj  # type: ignore
 
     HAS_PWEM = True
-except ImportError:
-    HAS_PWEM = False
+else:
+    try:
+        import pwem.objects as emobj  # type: ignore
+        from pwem.objects import (  # type: ignore
+            SetOfParticles,
+            SetOfParticlesFlex,
+            Particle,
+            ParticleFlex,
+            SetOfVolumes,
+            Volume,
+            SetOfClasses2D,
+            Class2D,
+            Acquisition,
+        )
+        import pyworkflow.object as pywfobj  # type: ignore
+
+        HAS_PWEM = True
+    except ImportError:
+        HAS_PWEM = False
+
+        class _DynamicStub:
+            def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+            def __getattr__(self, item: str) -> Any:
+                return None
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                return _DynamicStub()
+
+            def __len__(self) -> int:
+                return 0
+
+        class SetOfParticles(_DynamicStub):
+            pass  # type: ignore
+
+        class SetOfParticlesFlex(SetOfParticles):
+            pass  # type: ignore
+
+        class Particle(_DynamicStub):
+            pass  # type: ignore
+
+        class ParticleFlex(Particle):
+            pass  # type: ignore
+
+        class SetOfVolumes(_DynamicStub):
+            pass  # type: ignore
+
+        class Volume(_DynamicStub):
+            pass  # type: ignore
+
+        class SetOfClasses2D(_DynamicStub):
+            pass  # type: ignore
+
+        class Class2D(SetOfParticles):
+            pass  # type: ignore
+
+        class Acquisition(_DynamicStub):
+            pass  # type: ignore
+
+        emobj: Any = _DynamicStub()
+        pywfobj: Any = _DynamicStub()
 
 
 def _has_any_acquisition(obj: Any) -> bool:
@@ -43,7 +114,7 @@ def _has_any_acquisition(obj: Any) -> bool:
     if hasattr(obj, "getAcquisition"):
         acq = obj.getAcquisition()
         if acq is not None and hasattr(acq, "equalAttributes"):
-            return not acq.equalAttributes(emobj.Acquisition())
+            return not acq.equalAttributes(Acquisition())
     return False
 
 
@@ -65,9 +136,7 @@ def _propagate_set_metadata(
                     and source.hasValue()
                 ):
                     val = source.get()
-                    if isinstance(
-                        val, (emobj.SetOfParticles, emobj.SetOfParticlesFlex)
-                    ):
+                    if isinstance(val, (SetOfParticles, SetOfParticlesFlex)):
                         input_particles = val
                         break
 
@@ -77,7 +146,10 @@ def _propagate_set_metadata(
         if minibatch_obj.getSamplingRate():
             persistent_set.setSamplingRate(minibatch_obj.getSamplingRate())
 
-        if _has_any_acquisition(minibatch_obj):
+        if (
+            _has_any_acquisition(minibatch_obj)
+            and minibatch_obj.getAcquisition() is not None
+        ):
             persistent_set.setAcquisition(minibatch_obj.getAcquisition().clone())
 
         if minibatch_obj.getDim() is not None:
@@ -86,8 +158,10 @@ def _propagate_set_metadata(
         if not persistent_set.getSamplingRate() and minibatch_obj.getSamplingRate():
             persistent_set.setSamplingRate(minibatch_obj.getSamplingRate())
 
-        if not _has_any_acquisition(persistent_set) and _has_any_acquisition(
-            minibatch_obj
+        if (
+            not _has_any_acquisition(persistent_set)
+            and _has_any_acquisition(minibatch_obj)
+            and minibatch_obj.getAcquisition() is not None
         ):
             persistent_set.setAcquisition(minibatch_obj.getAcquisition().clone())
 
@@ -129,7 +203,7 @@ def reduce_minibatch_to_persistent_output(
                                 val = source.get()
                                 if isinstance(
                                     val,
-                                    (emobj.SetOfParticles, emobj.SetOfParticlesFlex),
+                                    (SetOfParticles, SetOfParticlesFlex),
                                 ):
                                     input_particles = val
                                     break
@@ -137,17 +211,17 @@ def reduce_minibatch_to_persistent_output(
                     if input_particles is not None:
                         persistent_set.setImages(input_particles)
 
+                    images = persistent_set.getImages()
+                    mb_images = minibatch_obj.getImages()
+                    if images is None and mb_images is not None:
+                        persistent_set.setImages(mb_images)
+                        images = mb_images
                     if (
-                        persistent_set.getImages() is None
-                        and minibatch_obj.getImages() is not None
-                    ):
-                        persistent_set.setImages(minibatch_obj.getImages())
-                    if (
-                        not persistent_set.getSamplingRate()
+                        images is not None
+                        and not persistent_set.getSamplingRate()
                         and minibatch_obj.getSamplingRate()
-                        and persistent_set.getImages() is not None
                     ):
-                        persistent_set.getImages().setSamplingRate(
+                        images.setSamplingRate(
                             minibatch_obj.getSamplingRate(),
                         )
                 case emobj.SetOfClasses2D():  # type: ignore
@@ -155,20 +229,22 @@ def reduce_minibatch_to_persistent_output(
                     existing_classes = persistent_set._getExistingItems()
                     if existing_classes:
                         first_item = next(iter(existing_classes.values()))
-                        persistent_set._getMapper().db.setupCommands(
-                            first_item.getObjDict(includeClass=True),
-                        )
+                        mapper = persistent_set._getMapper()
+                        if mapper is not None and mapper.db is not None:
+                            mapper.db.setupCommands(
+                                first_item.getObjDict(includeClass=True),
+                            )
+                    images = persistent_set.getImages()
+                    mb_images = minibatch_obj.getImages()
+                    if images is None and mb_images is not None:
+                        persistent_set.setImages(mb_images)
+                        images = mb_images
                     if (
-                        persistent_set.getImages() is None
-                        and minibatch_obj.getImages() is not None
-                    ):
-                        persistent_set.setImages(minibatch_obj.getImages())
-                    if (
-                        not persistent_set.getSamplingRate()
+                        images is not None
+                        and not persistent_set.getSamplingRate()
                         and minibatch_obj.getSamplingRate()
-                        and persistent_set.getImages() is not None
                     ):
-                        persistent_set.getImages().setSamplingRate(
+                        images.setSamplingRate(
                             minibatch_obj.getSamplingRate(),
                         )
                 case _:
@@ -192,7 +268,9 @@ def reduce_minibatch_to_persistent_output(
                         if _has_any_acquisition(mb_cls) and not _has_any_acquisition(
                             target_cls
                         ):
-                            target_cls.setAcquisition(mb_cls.getAcquisition().clone())
+                            acq = mb_cls.getAcquisition()
+                            if acq is not None:
+                                target_cls.setAcquisition(acq.clone())
                         if mb_cls.getDim() is not None and target_cls.getDim() is None:
                             target_cls.setDim(mb_cls.getDim())
                         target_cls.enableAppend()
@@ -202,16 +280,20 @@ def reduce_minibatch_to_persistent_output(
                             item.setClassId(cid)
                             target_cls.append(item)
                         target_cls.write()
-                        target_cls._getMapper().commit()
+                        target_cls_mapper = target_cls._getMapper()
+                        if target_cls_mapper is not None:
+                            target_cls_mapper.commit()
                         persistent_set.update(target_cls)
                     case None:
-                        new_cls = emobj.Class2D()  # type: ignore
+                        new_cls = Class2D()  # type: ignore
                         new_cls.setObjId(cid)
                         new_cls.copyInfo(persistent_set)
                         if mb_cls.getSamplingRate():
                             new_cls.setSamplingRate(mb_cls.getSamplingRate())
                         if _has_any_acquisition(mb_cls):
-                            new_cls.setAcquisition(mb_cls.getAcquisition().clone())
+                            acq = mb_cls.getAcquisition()
+                            if acq is not None:
+                                new_cls.setAcquisition(acq.clone())
                         if mb_cls.getDim() is not None:
                             new_cls.setDim(mb_cls.getDim())
                         if mb_cls.hasRepresentative():
@@ -219,46 +301,60 @@ def reduce_minibatch_to_persistent_output(
                             rep.setClassId(cid)
                             new_cls.setRepresentative(rep)
                         else:
-                            rep = emobj.Particle()
+                            rep = Particle()
                             rep.setClassId(cid)
                             new_cls.setRepresentative(rep)
                         persistent_set.append(new_cls)
                         new_cls.enableAppend()
-                        for p in mb_cls:
-                            item = p.clone()
-                            item.setObjId(None)
-                            item.setClassId(cid)
-                            new_cls.append(item)
+                        items = list(mb_cls)
+                        if len(items) == 0:
+                            new_cls_mapper = new_cls._getMapper()
+                            if (
+                                new_cls_mapper is not None
+                                and getattr(new_cls_mapper, "doCreateTables", False)
+                                and getattr(new_cls_mapper, "db", None) is not None
+                            ):
+                                new_cls_mapper.db.createTables(
+                                    Particle().getObjDict(includeClass=True),
+                                )
+                                new_cls_mapper.doCreateTables = False
+                        else:
+                            for p in items:
+                                item = p.clone()
+                                item.setObjId(None)
+                                item.setClassId(cid)
+                                new_cls.append(item)
                         new_cls.write()
-                        new_cls._getMapper().commit()
+                        new_cls_mapper = new_cls._getMapper()
+                        if new_cls_mapper is not None:
+                            new_cls_mapper.commit()
                         persistent_set.update(new_cls)
                         existing_classes[cid] = new_cls
 
-            if (
-                persistent_set.getImages() is None
-                and minibatch_obj.getImages() is not None
-            ):
-                persistent_set.setImages(minibatch_obj.getImages())
-            if (
-                not persistent_set.getSamplingRate()
-                and minibatch_obj.getSamplingRate()
-                and persistent_set.getImages() is not None
-            ):
-                persistent_set.getImages().setSamplingRate(
-                    minibatch_obj.getSamplingRate()
-                )
-            if (
-                persistent_set.getImages() is not None
-                and not _has_any_acquisition(persistent_set.getImages())
-                and minibatch_obj.getImages() is not None
-                and _has_any_acquisition(minibatch_obj.getImages())
-            ):
-                persistent_set.getImages().setAcquisition(
-                    minibatch_obj.getImages().getAcquisition().clone()
-                )
+            images = persistent_set.getImages()
+            mb_images = minibatch_obj.getImages()
+            if images is None and mb_images is not None:
+                persistent_set.setImages(mb_images)
+                images = mb_images
+            if images is not None:
+                if (
+                    not persistent_set.getSamplingRate()
+                    and minibatch_obj.getSamplingRate()
+                ):
+                    images.setSamplingRate(minibatch_obj.getSamplingRate())
+                if (
+                    not _has_any_acquisition(images)
+                    and mb_images is not None
+                    and _has_any_acquisition(mb_images)
+                ):
+                    acq = mb_images.getAcquisition()
+                    if acq is not None:
+                        images.setAcquisition(acq.clone())
 
             persistent_set.write()
-            persistent_set._getMapper().commit()
+            mapper = persistent_set._getMapper()
+            if mapper is not None:
+                mapper.commit()
 
             if hasattr(protocol, "_updateOutputSet"):
                 protocol._updateOutputSet(
@@ -302,7 +398,9 @@ def reduce_minibatch_to_persistent_output(
                 persistent_set.append(item)
 
             persistent_set.write()
-            persistent_set._getMapper().commit()
+            mapper = persistent_set._getMapper()
+            if mapper is not None:
+                mapper.commit()
 
             if hasattr(protocol, "_updateOutputSet"):
                 protocol._updateOutputSet(
@@ -342,7 +440,9 @@ def reduce_minibatch_to_persistent_output(
                 persistent_set.append(item)
 
             persistent_set.write()
-            persistent_set._getMapper().commit()
+            mapper = persistent_set._getMapper()
+            if mapper is not None:
+                mapper.commit()
 
             if hasattr(protocol, "_updateOutputSet"):
                 protocol._updateOutputSet(
@@ -482,6 +582,9 @@ def convert_protocol_to_scipion3_protocol(
         _possibleOutputs = Outputs
         stepsExecutionMode = cons.STEPS_PARALLEL
 
+        def allowsDelete(self, obj: Any = None) -> Literal[False]:
+            return False
+
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
 
@@ -543,11 +646,17 @@ def convert_protocol_to_scipion3_protocol(
             protocol.setup()
 
         def _createSetOfClasses2D(self, imgSet=None, suffix=""):
-            classes = self._EMProtocol__createSet(
-                emobj.SetOfClasses2D,
-                "classes2D%s.sqlite",
-                suffix,
+            create_fn = getattr(self, "_EMProtocol__createSet", None) or getattr(
+                self, "_createSet", None
             )
+            if create_fn is not None:
+                classes = create_fn(
+                    SetOfClasses2D,
+                    "classes2D%s.sqlite",
+                    suffix,
+                )
+            else:
+                classes = SetOfClasses2D(filename=":memory:")
             if imgSet is not None:
                 classes.setImages(imgSet)
             return classes
@@ -740,7 +849,18 @@ def convert_protocol_to_scipion3_protocol(
                     previousDataStepDeps.append(dataStep)
                     stepDeps.append(dataStep)
 
-                time.sleep(self.__scipion_bridge_param_polling_freq.get())
+                polling_freq_attr = getattr(
+                    self,
+                    "_ScipionProtocolWrapper__scipion_bridge_param_polling_freq",
+                    getattr(self, "__scipion_bridge_param_polling_freq", None),
+                )
+                polling_freq = (
+                    polling_freq_attr.get()
+                    if polling_freq_attr is not None
+                    and hasattr(polling_freq_attr, "get")
+                    else 0.1
+                )
+                time.sleep(polling_freq)
 
                 for inputSet in inputs.values():
                     if (

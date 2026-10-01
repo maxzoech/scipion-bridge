@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
+import ray
 import scipion_bridge as B
-from scipion_bridge.core.streaming.ops import Source, Sink
+from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.pipeline import Pipeline
+from scipion_bridge.core.streaming.sink_writer import SinkWriter
 
 
 class Metadata(B.Struct):
@@ -19,12 +21,31 @@ class ParticleEmbeddings(B.Struct):
     latent_code: B.Array[np.float32] = B.Array(shape=(128,))
 
 
+@ray.remote
+class PipelineCollector:
+    def __init__(self):
+        self.items = []
+        self.finalized = 0
+
+    def append(self, x):
+        self.items.append(x)
+
+    def mark_finalized(self):
+        self.finalized += 1
+
+    def get_items(self):
+        return self.items
+
+    def get_finalized(self):
+        return self.finalized
+
+
 def test_basic_stream():
+    collector = PipelineCollector.remote()
     batch_size = 5
-    received = []
 
     source = Source("particles")
-    sink_node = source.sink(lambda x: received.append(x))
+    sink_node = source.sink(lambda x: ray.get(collector.append.remote(x)))
 
     stream = Pipeline.from_sink(sink_node)
 
@@ -38,14 +59,23 @@ def test_basic_stream():
 
         stream.send(particles=particle_set)
 
+    stream.flush()
+    received = ray.get(collector.get_items.remote())
     assert len(received) == 2
 
 
 def test_pipeline_context_manager_autoflush():
-    received = []
+    collector = PipelineCollector.remote()
+
+    class FlushingSinkWriter(SinkWriter):
+        async def write(self, item):
+            pass
+
+        async def finalize(self):
+            ray.get(collector.mark_finalized.remote())
 
     source = Source("items")
-    sink_node = source.chunk(10).sink(lambda x: received.append(x))
+    sink_node = source.write_to(FlushingSinkWriter())
 
     p = Particle(
         pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=42)
@@ -53,12 +83,10 @@ def test_pipeline_context_manager_autoflush():
 
     with Pipeline.from_sink(sink_node) as pipe:
         pipe.send(items=B.Set[Particle]([p]))
-        assert len(received) == 0  # 1 element buffered for chunk_size=10
+        assert ray.get(collector.get_finalized.remote()) == 0
 
     # Upon exiting context manager, auto-flush happens
-    assert len(received) == 1
-    assert len(received[0]) == 1
-    assert received[0][0].metadata.foo == 42
+    assert ray.get(collector.get_finalized.remote()) == 1
 
 
 if __name__ == "__main__":

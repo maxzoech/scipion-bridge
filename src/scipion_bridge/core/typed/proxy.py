@@ -77,6 +77,9 @@ class ProxyMetaclass(ABCMeta):
     def __new__(cls, name, bases, dct):
         x = super().__new__(cls, name, bases, dct)
 
+        if getattr(x, "__abstractmethods__", None):
+            return x
+
         def resolve_path_proxy(value: Path):
             proxy_ext: Optional[str] = x.extension()  # type: ignore
             path_ext = value.suffix
@@ -546,9 +549,17 @@ def proxify(f: Callable[..., Any]) -> Callable[..., Any]:
 
         if isinstance(value, Output):
             intermediate = value.dtype
+        elif (
+            isinstance(value, Path)
+            and isinstance(param.default, Output)
+            and intermediate is None
+        ):
+            intermediate = param.default.dtype
 
         return current_registry().resolve(
-            value, astype=FuncParam, intermediate=intermediate
+            value,
+            astype=FuncParam,
+            intermediate=intermediate,
         )
 
     @wraps(f)
