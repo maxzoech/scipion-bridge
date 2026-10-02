@@ -849,6 +849,97 @@ def test_proxify_with_prefixed_suffixed_proxy_output():
         del output_result, resolved_output, explicit_out_result
 
 
+class SizedChildProxyA(sb.Proxy):
+    @classmethod
+    def file_ext(cls) -> Optional[str]:
+        return ".a"
+
+    @property
+    def estimated_item_nbytes(self) -> Optional[int]:
+        return 1024
+
+
+class SizedChildProxyB(sb.Proxy):
+    @classmethod
+    def file_ext(cls) -> Optional[str]:
+        return ".b"
+
+    @property
+    def estimated_item_nbytes(self) -> Optional[int]:
+        return 2048
+
+
+class UnsitedChildProxy(sb.Proxy):
+    @classmethod
+    def file_ext(cls) -> Optional[str]:
+        return ".u"
+
+
+class SizedGroup(sb.ProxyGroup):
+    part_a: SizedChildProxyA
+    part_b: SizedChildProxyB
+
+    @property
+    def primary_proxy(self) -> sb.Proxy:
+        return self.part_a
+
+
+class MixedGroup(sb.ProxyGroup):
+    part_a: SizedChildProxyA
+    part_u: UnsitedChildProxy
+
+    @property
+    def primary_proxy(self) -> sb.Proxy:
+        return self.part_a
+
+
+def test_proxy_estimated_item_nbytes_default():
+    """Verify that base Proxy.estimated_item_nbytes defaults to None."""
+    p = sb.Proxy(Path("/data/test_file"))
+    assert p.estimated_item_nbytes is None
+
+
+def test_proxy_subclass_estimated_item_nbytes():
+    """Verify that Proxy subclass can override estimated_item_nbytes."""
+    p = SizedChildProxyA(Path("/data/test_file.a"))
+    assert p.estimated_item_nbytes == 1024
+
+
+def test_proxy_group_estimated_item_nbytes_aggregation():
+    """Verify ProxyGroup.estimated_item_nbytes sums child estimates, and returns None if any is None."""
+    # SizedGroup: 1024 + 2048 = 3072
+    group = SizedGroup(Path("/data/item"))
+    assert group.estimated_item_nbytes == 3072
+
+    # MixedGroup: 1024 + None = None
+    mixed = MixedGroup(Path("/data/item"))
+    assert mixed.estimated_item_nbytes is None
+
+
+def test_estimate_optimal_chunk_size():
+    """Verify chunk size calculation across edge cases."""
+    # Default fallback when None or <= 0
+    assert sb.estimate_optimal_chunk_size(None) == 100
+    assert sb.estimate_optimal_chunk_size(0) == 100
+    assert sb.estimate_optimal_chunk_size(-50) == 100
+    assert sb.estimate_optimal_chunk_size(None, default_chunk_size=50) == 50
+
+    # 32MB target = 33,554,432 bytes
+    # Item size 1MB (1,048,576 bytes) -> chunk_size = 32
+    assert sb.estimate_optimal_chunk_size(1024 * 1024) == 32
+
+    # Item size 256KB (262,144 bytes) -> chunk_size = 128
+    assert sb.estimate_optimal_chunk_size(256 * 1024) == 128
+
+    # Target bytes custom: 10MB (10,485,760 bytes), item size 1MB -> chunk_size = 10
+    assert (
+        sb.estimate_optimal_chunk_size(1024 * 1024, target_bytes=10 * 1024 * 1024) == 10
+    )
+
+    # Item larger than target: 64MB item with 32MB target -> chunk_size = 1 (not 0)
+    assert sb.estimate_optimal_chunk_size(64 * 1024 * 1024) == 1
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     test_proxify_with_proxy_group()

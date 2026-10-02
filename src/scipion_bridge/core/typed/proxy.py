@@ -274,6 +274,14 @@ class Proxy(metaclass=ProxyMetaclass):
             )
             pass  # Fail silently
 
+    @property
+    def estimated_item_nbytes(self) -> Optional[int]:
+        """Estimated size in bytes for a single logical item contained in this proxy.
+
+        Returns None if size cannot be determined without reading the data.
+        """
+        return None
+
     def __str__(self):
         is_owned = "managed" if getattr(self, "managed", False) else "unmanaged"
         return f"<{self.__class__.__name__} for {getattr(self, 'path', None)} ({is_owned})>"
@@ -499,10 +507,46 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         children = ", ".join(f"{k}={v.path.name}" for k, v in self._proxies.items())
         return f"<{self.__class__.__name__} base='{self.base_path}' ({children}) [{is_owned}]>"
 
+    @property
+    def estimated_item_nbytes(self) -> Optional[int]:
+        """Estimated total size in bytes for a single logical item across all child proxies.
+
+        Returns the sum of all child proxy estimates, or None if any child cannot estimate its size.
+        """
+        if not self._proxies:
+            return None
+
+        total = 0
+        for child in self._proxies.values():
+            child_nbytes = child.estimated_item_nbytes
+            if child_nbytes is None:
+                return None
+            total += child_nbytes
+        return total
+
     def __del__(self, *args: Any, **kwargs: Any):
         # ProxyGroup does not directly manage the base_path via ARC.
         # Child proxies handle their own reference-counted cleanup.
         pass
+
+
+def estimate_optimal_chunk_size(
+    item_nbytes: Optional[int],
+    target_bytes: int = 32 * 1024 * 1024,
+    default_chunk_size: int = 100,
+) -> int:
+    """Calculate an optimal batch/chunk size targeting a memory footprint (default 32MB).
+
+    If item_nbytes is None or <= 0, returns default_chunk_size.
+    Otherwise returns max(1, target_bytes // item_nbytes).
+    """
+    if item_nbytes is None or item_nbytes <= 0:
+        return default_chunk_size
+
+    chunk_size = target_bytes // item_nbytes
+    if chunk_size < 1:
+        return 1
+    return chunk_size
 
 
 class Output(Generic[T]):

@@ -15,6 +15,7 @@ from .core.typed.proxy import (
     Output,
     ResolveProxy,
     namedproxy,
+    estimate_optimal_chunk_size,
 )
 from .single_particle.proxies import ParticleStackProxy, StarfileProxy, MRCStackProxy
 from .core.environment.domain import Domain
@@ -49,6 +50,7 @@ __all__ = [
     "Output",
     "ResolveProxy",
     "namedproxy",
+    "estimate_optimal_chunk_size",
     "shell_command",
     "Domain",
     "protocol",
