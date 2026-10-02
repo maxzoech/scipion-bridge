@@ -111,19 +111,24 @@ def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackPr
 @resolver
 def resolve_particle_stack_to_particles(
     value: ParticleStackProxy,
+    *,
+    slice: Optional[slice] = None,
 ) -> struct.Set[Particle]:
     """
     Resolve a Set[Particle] from a ParticleStackProxy.
     """
-    with mrcfile.open(value.particle_stack.path) as mrc:
-        data = np.asarray(mrc.data, dtype=np.float32)
+    with mrcfile.mmap(value.particle_stack.path, mode="r") as mrc:
+        assert mrc.data is not None
+        raw = mrc.data
+        if raw.ndim == 2:
+            raw = raw[np.newaxis, ...]
+        elif raw.ndim != 3:
+            raise ValueError(
+                f"Expected 2D or 3D image data in MRC stack '{value.particle_stack.path}', got shape {raw.shape}",
+            )
 
-    if data.ndim == 2:
-        data = data[np.newaxis, ...]
-    elif data.ndim != 3:
-        raise ValueError(
-            f"Expected 2D or 3D image data in MRC stack '{value.particle_stack.path}', got shape {data.shape}",
-        )
+        sliced_raw = raw[slice] if slice is not None else raw
+        data = np.asarray(sliced_raw, dtype=np.float32)
 
     particle_set = struct.Set[Particle](capacity=len(data))
     particle_set["pixels"] = data
@@ -157,22 +162,26 @@ def resolve_particle_stack_to_particles(
     n = len(data)
 
     if df_particles is not None:
+        df_sliced = (
+            df_particles.iloc[slice] if slice is not None else df_particles.iloc[:n]
+        )
+
         for col in ("rlnDetectorPixelSize", "rlnImagePixelSize", "rlnPixelSize"):
-            if col in df_particles.columns:
+            if col in df_sliced.columns:
                 particle_set["sampling_rate"] = np.asarray(
-                    df_particles[col][:n],
+                    df_sliced[col][:n],
                     dtype=np.float64,
                 )
                 break
 
-        if "rlnCoordinateX" in df_particles.columns:
+        if "rlnCoordinateX" in df_sliced.columns:
             particle_set["coordinate"]["x"] = np.asarray(
-                df_particles["rlnCoordinateX"][:n],
+                df_sliced["rlnCoordinateX"][:n],
                 dtype=np.float64,
             )
-        if "rlnCoordinateY" in df_particles.columns:
+        if "rlnCoordinateY" in df_sliced.columns:
             particle_set["coordinate"]["y"] = np.asarray(
-                df_particles["rlnCoordinateY"][:n],
+                df_sliced["rlnCoordinateY"][:n],
                 dtype=np.float64,
             )
 
@@ -187,9 +196,9 @@ def resolve_particle_stack_to_particles(
             "rlnCtfFitQuality": "fit_quality",
         }
         for star_col, ctf_field in ctf_mappings.items():
-            if star_col in df_particles.columns:
+            if star_col in df_sliced.columns:
                 particle_set["ctf"][ctf_field] = np.asarray(
-                    df_particles[star_col][:n],
+                    df_sliced[star_col][:n],
                     dtype=np.float64,
                 )
 
@@ -202,9 +211,9 @@ def resolve_particle_stack_to_particles(
             "rlnDosePerFrame": "dose_per_frame",
         }
         for star_col, acq_field in acq_mappings.items():
-            if star_col in df_particles.columns:
+            if star_col in df_sliced.columns:
                 particle_set["acquisition"][acq_field] = np.asarray(
-                    df_particles[star_col][:n],
+                    df_sliced[star_col][:n],
                     dtype=np.float64,
                 )
 

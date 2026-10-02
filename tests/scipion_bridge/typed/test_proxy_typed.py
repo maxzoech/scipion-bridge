@@ -524,8 +524,7 @@ def test_proxy_group_validation_and_mapping():
     assert group.primary_proxy == group.metadata
     assert group.path == group.metadata.path
 
-    # Test Mapping interface
-    assert len(group) == 2
+    # Test Mapping-like interface
     assert set(group.keys()) == {"metadata", "particle_stack"}
     assert group["metadata"] == group.metadata
 
@@ -824,7 +823,9 @@ def test_proxify_with_prefixed_suffixed_proxy_output():
 
         # 2. Test direct Output resolution from registry
         resolved_output = current_registry().resolve(
-            sb.Output(PrefixedSuffixedProxy), astype=sb.Proxy
+            sb.Output(PrefixedSuffixedProxy),
+            astype=sb.Proxy,
+            intermediate=PrefixedSuffixedProxy,
         )
         assert isinstance(resolved_output, PrefixedSuffixedProxy)
         assert resolved_output.path.name.startswith("job_")
@@ -938,6 +939,74 @@ def test_estimate_optimal_chunk_size():
 
     # Item larger than target: 64MB item with 32MB target -> chunk_size = 1 (not 0)
     assert sb.estimate_optimal_chunk_size(64 * 1024 * 1024) == 1
+
+
+class LenChildProxyA(sb.Proxy):
+    def __init__(self, path: os.PathLike, length: int = 5, **kwargs):
+        super().__init__(path, **kwargs)
+        self._length = length
+
+    def __len__(self) -> int:
+        return self._length
+
+
+class LenChildProxyB(sb.Proxy):
+    def __init__(self, path: os.PathLike, length: int = 5, **kwargs):
+        super().__init__(path, **kwargs)
+        self._length = length
+
+    def __len__(self) -> int:
+        return self._length
+
+
+class LenGroup(sb.ProxyGroup):
+    part_a: LenChildProxyA
+    part_b: LenChildProxyB
+
+    @property
+    def primary_proxy(self) -> sb.Proxy:
+        return self.part_a
+
+
+class LenMixedGroup(sb.ProxyGroup):
+    part_a: LenChildProxyA
+    part_u: UnsitedChildProxy
+
+    @property
+    def primary_proxy(self) -> sb.Proxy:
+        return self.part_a
+
+
+def test_proxy_group_len_matching():
+    group = LenGroup(
+        Path("/data/group"),
+        part_a=LenChildProxyA(Path("/data/group.a"), length=10),
+        part_b=LenChildProxyB(Path("/data/group.b"), length=10),
+    )
+    assert len(group) == 10
+
+
+def test_proxy_group_len_mismatched():
+    group = LenGroup(
+        Path("/data/group"),
+        part_a=LenChildProxyA(Path("/data/group.a"), length=10),
+        part_b=LenChildProxyB(Path("/data/group.b"), length=8),
+    )
+    with pytest.raises(ValueError, match="Inconsistent lengths in LenGroup"):
+        _ = len(group)
+
+
+def test_proxy_group_len_unsized_child():
+    group = LenMixedGroup(
+        Path("/data/group"),
+        part_a=LenChildProxyA(Path("/data/group.a"), length=10),
+        part_u=UnsitedChildProxy(Path("/data/group.u")),
+    )
+    with pytest.raises(
+        TypeError,
+        match=r"child proxy 'part_u' \(UnsitedChildProxy\) does not define __len__",
+    ):
+        _ = len(group)
 
 
 if __name__ == "__main__":

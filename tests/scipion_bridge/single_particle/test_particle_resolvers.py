@@ -166,7 +166,7 @@ def test_resolve_star_path_to_particles_set(tmp_path: Path):
 
     particles = B.resolve(star_path, astype=B.Set[Particle])
     assert len(particles) == 3
-    assert particles["pixels"].shape == (3, 14, 14)
+    assert np.asarray(particles["pixels"]).shape == (3, 14, 14)
     assert np.allclose(np.asarray(particles["pixels"]), data)
     assert np.allclose(np.asarray(particles["sampling_rate"]).flatten(), 1.05)
     assert np.allclose(
@@ -230,3 +230,133 @@ def test_invalid_extension_raises_type_error(tmp_path: Path):
 
     with pytest.raises(TypeError, match="file extension did not match"):
         B.resolve(invalid_path, astype=B.Set[Particle])
+
+
+def test_mrc_stack_proxy_zero_io_len_and_estimated_nbytes(tmp_path: Path):
+    file_path = tmp_path / "stack.mrcs"
+    # 6 frames of 20x20 float32 (mode 2 -> 4 bytes per pixel)
+    data = np.random.randn(6, 20, 20).astype(np.float32)
+    with mrcfile.new(file_path) as mrc:
+        mrc.set_data(data)
+
+    proxy = MRCStackProxy(file_path)
+    assert len(proxy) == 6
+    # 20 * 20 * 4 = 1600 bytes per frame
+    assert proxy.estimated_item_nbytes == 1600
+
+
+def test_particle_stack_proxy_zero_io_len_and_estimated_nbytes(tmp_path: Path):
+    mrc_path = tmp_path / "particles.mrcs"
+    star_path = tmp_path / "particles.star"
+    data = np.random.randn(8, 24, 24).astype(np.float32)
+    with mrcfile.new(mrc_path) as mrc:
+        mrc.set_data(data)
+
+    df = pd.DataFrame(
+        {"rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(8)]},
+    )
+    starfile.write(df, star_path)
+
+    psp = B.resolve(star_path, astype=ParticleStackProxy)
+    assert len(psp) == 8
+    assert len(psp.metadata) == 8
+    assert len(psp.particle_stack) == 8
+    # 24 * 24 * 4 = 2304 bytes per item
+    assert psp.estimated_item_nbytes == 2304
+
+
+def test_particle_stack_proxy_mismatched_lengths_raises(tmp_path: Path):
+    mrc_path = tmp_path / "particles.mrcs"
+    star_path = tmp_path / "particles.star"
+    data = np.random.randn(6, 24, 24).astype(np.float32)
+    with mrcfile.new(mrc_path) as mrc:
+        mrc.set_data(data)
+
+    df = pd.DataFrame(
+        {"rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(8)]},
+    )
+    starfile.write(df, star_path)
+
+    psp = B.resolve(star_path, astype=ParticleStackProxy)
+    assert len(psp.metadata) == 8
+    assert len(psp.particle_stack) == 6
+    with pytest.raises(ValueError, match="Inconsistent lengths in ParticleStackProxy"):
+        _ = len(psp)
+
+
+def test_resolve_particle_stack_to_particles_sliced(tmp_path: Path):
+    mrc_path = tmp_path / "particles.mrcs"
+    star_path = tmp_path / "particles.star"
+    n_particles = 10
+    data = np.arange(n_particles * 16 * 16, dtype=np.float32).reshape(
+        n_particles, 16, 16
+    )
+    with mrcfile.new(mrc_path) as mrc:
+        mrc.set_data(data)
+
+    df = pd.DataFrame(
+        {
+            "rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(n_particles)],
+            "rlnCoordinateX": [float(i * 10) for i in range(n_particles)],
+            "rlnDefocusU": [float(10000 + i * 500) for i in range(n_particles)],
+        },
+    )
+    starfile.write(df, star_path)
+
+    psp = B.resolve(star_path, astype=ParticleStackProxy)
+
+    # 1. Monolithic resolution (slice=None)
+    full_particles = B.resolve(psp, astype=B.Set[Particle])
+    assert len(full_particles) == 10
+    assert np.allclose(np.asarray(full_particles["pixels"]), data)
+    assert np.allclose(
+        np.asarray(full_particles["coordinate"]["x"]).flatten(),
+        [float(i * 10) for i in range(10)],
+    )
+
+    # 2. Sliced resolution (slice=slice(2, 6))
+    sliced_particles = B.resolve(psp, astype=B.Set[Particle], slice=slice(2, 6))
+    assert len(sliced_particles) == 4
+    assert np.allclose(np.asarray(sliced_particles["pixels"]), data[2:6])
+    assert np.allclose(
+        np.asarray(sliced_particles["coordinate"]["x"]).flatten(),
+        [20.0, 30.0, 40.0, 50.0],
+    )
+    assert np.allclose(
+        np.asarray(sliced_particles["ctf"]["defocus_u"]).flatten(),
+        [11000.0, 11500.0, 12000.0, 12500.0],
+    )
+
+    # 3. Single item retrieval via length-1 slice
+    single_particle = B.resolve(psp, astype=B.Set[Particle], slice=slice(7, 8))[0]
+    assert np.allclose(np.asarray(single_particle.pixels), data[7])
+    assert single_particle.coordinate.x == 70.0
+
+
+def test_resolve_star_path_to_particles_sliced_end_to_end(tmp_path: Path):
+    """Verify that resolving a Path with a slice traverses Path -> ParticleStackProxy -> Set[Particle]."""
+    mrc_path = tmp_path / "particles.mrcs"
+    star_path = tmp_path / "particles.star"
+    n_particles = 8
+    data = np.arange(n_particles * 12 * 12, dtype=np.float32).reshape(
+        n_particles, 12, 12
+    )
+    with mrcfile.new(mrc_path) as mrc:
+        mrc.set_data(data)
+
+    df = pd.DataFrame(
+        {
+            "rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(n_particles)],
+            "rlnCoordinateX": [float(i * 100) for i in range(n_particles)],
+        },
+    )
+    starfile.write(df, star_path)
+
+    # End-to-end resolution from Path
+    subset = B.resolve(star_path, astype=B.Set[Particle], slice=slice(3, 7))
+    assert len(subset) == 4
+    assert np.allclose(np.asarray(subset["pixels"]), data[3:7])
+    assert np.allclose(
+        np.asarray(subset["coordinate"]["x"]).flatten(),
+        [300.0, 400.0, 500.0, 600.0],
+    )

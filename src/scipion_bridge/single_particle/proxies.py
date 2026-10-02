@@ -4,11 +4,29 @@ from typing import Any, Optional, cast
 
 import pandas as pd
 import starfile
+import mrcfile
+import mrcfile.utils
 
 from ..core.typed.proxy import Proxy, ProxyGroup
 
 
 class StarfileProxy(Proxy):
+
+    def __len__(self) -> int:
+        star_data = cast(Any, starfile.read(self.path))
+        match star_data:
+            case pd.DataFrame():
+                return len(star_data)
+            case dict():
+                raw = star_data.get("particles")
+                if isinstance(raw, pd.DataFrame):
+                    return len(raw)
+                for block in star_data.values():
+                    if isinstance(block, pd.DataFrame):
+                        return len(block)
+                return 0
+            case _:
+                return 0
 
     @classmethod
     def file_ext(cls):
@@ -40,6 +58,23 @@ class MRCStackProxy(Proxy):
 
         super().__init__(actual_path, managed=managed, *args, **kwargs)
         self.metadata_path = resolved_metadata
+
+    def __len__(self) -> int:
+        with mrcfile.open(self.path, header_only=True) as mrc:
+            assert mrc.header is not None
+            nz = int(mrc.header.nz)
+            return nz if nz > 0 else 1
+
+    @property
+    def estimated_item_nbytes(self) -> Optional[int]:
+        if not self.path.exists():
+            return None
+        with mrcfile.open(self.path, header_only=True) as mrc:
+            assert mrc.header is not None
+            dtype = mrcfile.utils.data_dtype_from_header(mrc.header)
+            nx = int(mrc.header.nx)
+            ny = int(mrc.header.ny)
+            return nx * ny * dtype.itemsize
 
     @classmethod
     def file_ext(cls) -> Optional[str]:
@@ -114,3 +149,11 @@ class ParticleStackProxy(ProxyGroup):
     @property
     def primary_proxy(self) -> Proxy:
         return self.metadata
+
+    @property
+    def num_particles(self) -> int:
+        return len(self)
+
+    @property
+    def estimated_item_nbytes(self) -> Optional[int]:
+        return self.particle_stack.estimated_item_nbytes

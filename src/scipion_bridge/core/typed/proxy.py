@@ -30,6 +30,7 @@ from typing import (
     get_type_hints,
     Mapping,
     Iterator,
+    Sized,
 )
 from typing_extensions import TypeAlias, TypeVar, get_args, get_origin, ParamSpec
 
@@ -118,7 +119,7 @@ class ProxyMetaclass(ABCMeta):
                             primary_proxy,
                             astype=proxy_cls,
                         )
-                    
+
                 base_path = proxy_cls.extract_base_path(value)
                 return proxy_cls(base_path, managed=False)
 
@@ -287,7 +288,7 @@ class Proxy(metaclass=ProxyMetaclass):
         return f"<{self.__class__.__name__} for {getattr(self, 'path', None)} ({is_owned})>"
 
 
-class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
+class ProxyGroup(Proxy, ABC):
     """Abstract base class representing a grouped collection of Proxy objects.
 
     Subclasses must annotate child proxy fields with Proxy types and implement
@@ -449,7 +450,7 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
 
         """Create a ProxyGroup from an existing Proxy."""
         assert issubclass(cls, ProxyGroup)
-        
+
         base_path = cls.extract_base_path(source.path)
         return cls(base_path, managed=source.managed)
 
@@ -488,6 +489,15 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         group = cls(base_path, managed=True, **children)
         return group
 
+    def keys(self):
+        return self._proxies.keys()
+
+    def values(self):
+        return self._proxies.values()
+
+    def items(self):
+        return self._proxies.items()
+
     def __getitem__(self, key: str) -> Proxy:
         return self._proxies[key]
 
@@ -495,7 +505,36 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         return iter(self._proxies)
 
     def __len__(self) -> int:
-        return len(self._proxies)
+        """Infer dataset length across child proxies.
+
+        All child proxies must define __len__ and their lengths must match.
+
+        Raises:
+            TypeError: If the group is empty or any child proxy does not define __len__.
+            ValueError: If child proxies report inconsistent lengths.
+        """
+        if not self._proxies:
+            raise TypeError(
+                f"Cannot compute len({self.__class__.__name__}): group has no child proxies."
+            )
+
+        lengths: dict[str, int] = {}
+        for name, child in self._proxies.items():
+            if not isinstance(child, Sized):
+                raise TypeError(
+                    f"Cannot compute len({self.__class__.__name__}): "
+                    f"child proxy '{name}' ({child.__class__.__name__}) does not define __len__."
+                )
+            lengths[name] = len(child)
+
+        unique_lengths = set(lengths.values())
+        if len(unique_lengths) > 1:
+            details = ", ".join(f"'{k}' has length {v}" for k, v in lengths.items())
+            raise ValueError(
+                f"Inconsistent lengths in {self.__class__.__name__}: {details}"
+            )
+
+        return next(iter(unique_lengths))
 
     def __repr__(self) -> str:
         is_owned = "managed" if self.managed else "unmanaged"
