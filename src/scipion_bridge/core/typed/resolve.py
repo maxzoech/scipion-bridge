@@ -1,4 +1,5 @@
 import sys
+import builtins
 import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -27,6 +28,7 @@ from typing import (
     Union,
     Optional,
     get_origin,
+    cast,
     TYPE_CHECKING,
 )
 
@@ -38,7 +40,9 @@ if sys.version_info < (3, 11):
         RuntimeWarning,
     )
 
-ResolveStep = namedtuple("ResolveStep", ("func", "requires_metadata", "description"))
+ResolveStep = namedtuple(
+    "ResolveStep", ("cls", "requires_metadata", "requires_slice", "description")
+)
 ResolveContext = namedtuple(
     "ResolveContext", ("registry", "namespaces", "caller_namespace", "recursion_level")
 )
@@ -56,12 +60,79 @@ else:
         pass  # Marker Type
 
 
-def _downcast(x):
-    return x
+class _DowncastProjector:
+    def forward(self, x, **kwargs):
+        return x
+
+    def __call__(self, x, **kwargs):
+        return self.forward(x, **kwargs)
 
 
-def _passthrough(x, metadata=None):
-    return x
+def _make_projector_class(func: Callable) -> type:
+    cached_cls = getattr(func, "_projector_cls", None)
+    if cached_cls is not None:
+        return cached_cls
+
+    class DynamicFunctionProjector:
+        @property
+        def __code__(self):
+            return getattr(func, "__code__", None)
+
+        @wraps(func)
+        def forward(self, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def __call__(self, *args, **kwargs):
+            return self.forward(*args, **kwargs)
+
+    DynamicFunctionProjector.__name__ = getattr(
+        func, "__name__", "DynamicFunctionProjector"
+    )
+    DynamicFunctionProjector.__qualname__ = getattr(
+        func, "__qualname__", "DynamicFunctionProjector"
+    )
+    DynamicFunctionProjector.__module__ = getattr(func, "__module__", __name__)
+    DynamicFunctionProjector.__doc__ = getattr(func, "__doc__", None)
+
+    try:
+        setattr(func, "_projector_cls", DynamicFunctionProjector)
+    except Exception:
+        pass
+
+    return DynamicFunctionProjector
+
+
+def _normalize_resolver(
+    resolver: Union[type, Callable],
+    requires_metadata: Optional[bool] = None,
+    requires_slice: Optional[bool] = None,
+) -> Tuple[type, Callable, bool, bool]:
+    if inspect.isclass(resolver):
+        resolver_cls: Any = resolver
+        if hasattr(resolver_cls, "__iter__"):
+            raise TypeError(
+                f"Resolver class '{resolver_cls.__name__}' must not implement '__iter__'. "
+                f"A resolver is a transformer, not an iterator."
+            )
+        if not hasattr(resolver_cls, "forward"):
+            raise TypeError(
+                f"Resolver class '{resolver_cls.__name__}' must define a 'forward' method."
+            )
+        if "__call__" not in resolver_cls.__dict__:
+            setattr(resolver_cls, "__call__", resolver_cls.forward)
+
+        method = resolver_cls.forward
+    else:
+        resolver_cls = _make_projector_class(resolver)
+        method = resolver
+
+    sig = inspect.signature(method)
+    if requires_metadata is None:
+        requires_metadata = "metadata" in sig.parameters
+    if requires_slice is None:
+        requires_slice = "slice" in sig.parameters
+
+    return resolver_cls, method, requires_metadata, requires_slice
 
 
 def _find_calling_frame():
@@ -84,7 +155,9 @@ def _get_qualname(co_func) -> Optional[str]:
 
 class ScopedPathfindingContainer(PathfindingContainer):
 
-    ResolverNode = namedtuple("ResolverNode", ["resolver_fn", "module"])
+    ResolverNode = namedtuple(
+        "ResolverNode", ["resolver_fn", "module", "requires_slice"], defaults=[False]
+    )
 
     def __init__(
         self,
@@ -112,6 +185,15 @@ class ScopedPathfindingContainer(PathfindingContainer):
         else:
             return 1
 
+    @property
+    def slice_priority(self):
+        assert self.edge_attributes is not None
+
+        if self.edge_attributes.requires_slice:
+            return 0  # Higher priority for slice-capable resolvers
+        else:
+            return 1
+
     def __lt__(self, other):
         assert isinstance(other, ScopedPathfindingContainer)
 
@@ -124,25 +206,28 @@ class ScopedPathfindingContainer(PathfindingContainer):
             if not self.resolution_priority == other.resolution_priority:
                 return self.resolution_priority < other.resolution_priority
             else:
+                if not self.slice_priority == other.slice_priority:
+                    return self.slice_priority < other.slice_priority
+                else:
 
-                symbol_path = f"{self.edge_attributes.module}.{self.edge_attributes.resolver_fn.__qualname__}"
-                other_symbol_path = f"{other.edge_attributes.module}.{other.edge_attributes.resolver_fn.__qualname__}"
+                    symbol_path = f"{self.edge_attributes.module}.{self.edge_attributes.resolver_fn.__qualname__}"
+                    other_symbol_path = f"{other.edge_attributes.module}.{other.edge_attributes.resolver_fn.__qualname__}"
 
-                path_length = len(symbol_path.split("."))
-                other_path_length = len(other_symbol_path.split("."))
+                    path_length = len(symbol_path.split("."))
+                    other_path_length = len(other_symbol_path.split("."))
 
-                if (
-                    other_path_length == path_length
-                    and self.edge_attributes.resolver_fn
-                    is not other.edge_attributes.resolver_fn
-                ):
-                    pass
+                    if (
+                        other_path_length == path_length
+                        and self.edge_attributes.resolver_fn
+                        is not other.edge_attributes.resolver_fn
+                    ):
+                        pass
 
-                    # warnings.warn(
-                    #     f"Found ambiguous resolvers {symbol_path} and {other_symbol_path} during type resolution.",
-                    # )
+                        # warnings.warn(
+                        #     f"Found ambiguous resolvers {symbol_path} and {other_symbol_path} during type resolution.",
+                        # )
 
-                return other_path_length < path_length
+                    return other_path_length < path_length
 
 
 def build_default_container(
@@ -157,8 +242,11 @@ def build_default_container(
     else:
         attrs = graph.get_edge_data(previous, value)
         edge_attributes = ScopedPathfindingContainer.ResolverNode(
-            attrs["resolver"], attrs["module"]
+            attrs["resolver"],
+            attrs["module"],
+            attrs["requires_slice"],
         )
+
     return ScopedPathfindingContainer(
         value,
         previous,
@@ -194,6 +282,71 @@ def resolution_context(
         _current_ctx.reset(token)
 
 
+class ComposedResolver(Generic[Origin, Target]):
+    """An independent execution pipeline composed of resolved transformation steps."""
+
+    def __init__(
+        self,
+        origin: Type[Origin],
+        target: Type[Target],
+        steps: List[ResolveStep],
+    ) -> None:
+        self.origin = origin
+        self.target = target
+        self.steps = steps
+
+    def __call__(
+        self,
+        value: Origin,
+        *,
+        metadata: Optional[Any] = None,
+        slice: Optional[builtins.slice] = None,
+    ) -> Target:
+        if not isinstance(value, self.origin):
+            raise TypeError(
+                f"The input value did not match origin data type "
+                f"(expected {self.origin.__qualname__}, got {type(value).__qualname__})"
+            )
+
+        x: Any = value
+        current_slice = slice
+
+        for step in self.steps:
+            logging.debug(step.description)
+            instance = step.cls()
+
+            kwargs: dict[str, Any] = {}
+            if step.requires_metadata:
+                kwargs["metadata"] = metadata
+            if step.requires_slice:
+                kwargs["slice"] = current_slice
+
+            x = instance.forward(x, **kwargs)
+
+            # Narrowing Rule: reset slice to None after the first slice-aware step
+            if step.requires_slice and current_slice is not None:
+                current_slice = None
+
+        if current_slice is not None:
+            raise TypeError(
+                f"A slice was requested for '{self.origin.__qualname__}' -> '{self.target.__qualname__}', "
+                f"but no resolver along the path supports slicing."
+            )
+
+        target_check = get_origin(self.target) or self.target
+        if not isinstance(x, target_check):
+            resolve_desc = "\n".join([step.description for step in self.steps])
+            target_name = getattr(self.target, "__qualname__", str(self.target))
+
+            raise TypeError(
+                f"The resolved output with type '{type(x).__qualname__}' did not match target data type '{target_name}'; "
+                f"this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\n"
+                f"Resolvers used:\n{resolve_desc}"
+            )
+
+        return cast(Target, x)
+
+
 class Registry:
 
     def __init__(self) -> None:
@@ -223,26 +376,33 @@ class Registry:
         self,
         origin: Type[Origin],
         target: Type[Target],
-        resolver: Callable,
+        resolver: Union[type, Callable],
         namespace: Optional[str] = None,
-        requires_metadata: bool = False,
+        requires_metadata: Optional[bool] = None,
+        requires_slice: Optional[bool] = None,
     ):
 
         if namespace is None:
             frame = _find_calling_frame()
             module = frame.f_globals["__name__"]
 
+            qualname = _get_qualname(frame.f_code)
             namespace = Registry._namespace_from_symbol(
-                module=module, qualname=_get_qualname(frame.f_code), strip_last=True
+                module=module, qualname=qualname, strip_last=True
             )
             del frame
+
+        resolver_cls, _, requires_metadata, requires_slice = _normalize_resolver(
+            resolver, requires_metadata, requires_slice
+        )
 
         if self.graph.has_edge(origin, target):
             edge = self.graph.edges[(origin, target)]
 
-            if edge["module"] == namespace and resolver is not edge["resolver"]:
+            if edge["module"] == namespace and resolver_cls is not edge["resolver"]:
                 warnings.warn(
-                    f"Attempted register a resolver for existing transform '{origin.__qualname__}' -> '{target.__qualname__}' ('{edge['resolver'].__qualname__}' vs '{resolver.__qualname__}')",
+                    f"Attempted register a resolver for existing transform '{origin.__qualname__}' -> '{target.__qualname__}' "
+                    f"('{edge['resolver'].__qualname__}' vs '{resolver_cls.__qualname__}')",
                     UserWarning,
                 )
                 return
@@ -255,18 +415,21 @@ class Registry:
                 self.graph.add_edge(
                     subclass,
                     dtype,
-                    resolver=_downcast,
+                    resolver=_DowncastProjector,
                     weight=weight,
                     module=__package__,
+                    requires_metadata=False,
+                    requires_slice=False,
                 )
 
         self.graph.add_edge(
             origin,
             target,
-            resolver=resolver,
+            resolver=resolver_cls,
             weight=0,
             module=namespace,
             requires_metadata=requires_metadata,
+            requires_slice=requires_slice,
         )
 
         # Add edges to downcast data
@@ -280,25 +443,28 @@ class Registry:
         target: Type[Target],
         intermediate: Optional[Type[Intermediate]] = None,
         local_scope_name: Optional[str] = None,
-    ):
+    ) -> ComposedResolver[Origin, Target]:
         assert local_scope_name is not None
 
         def _make_step(edge, data):
             u, v = edge
-            fn = data["resolver"]
+            resolver_cls = data["resolver"]
             mod = data["module"]
-            metadata = data.get("requires_metadata", False)
+            metadata = data["requires_metadata"]
+            requires_slice = data["requires_slice"]
 
             metadata_desc = " (requires metadata)" if metadata else ""
+            slice_desc = " (requires slice)" if requires_slice else ""
 
             return ResolveStep(
-                fn,
+                resolver_cls,
                 metadata,
-                f"{u.__qualname__} -> {v.__qualname__}: {fn.__qualname__} ({mod}{metadata_desc})",
+                requires_slice,
+                f"{u.__qualname__} -> {v.__qualname__}: {resolver_cls.__qualname__} ({mod}{metadata_desc}{slice_desc})",
             )
 
         if origin == target:
-            return _passthrough
+            return ComposedResolver(origin, target, steps=[])
 
         selected_edges = [
             (u, v, e)
@@ -338,32 +504,7 @@ class Registry:
             for u, v in zip(path, path[1:])
         ]
 
-        def resolver_fn(value: Origin, *, metadata: Optional[Any] = None) -> Target:
-            if not isinstance(value, origin):
-                raise TypeError("The input value for did not match origin data type")
-
-            x = value
-            for step in steps:
-                logging.debug(step.description)
-
-                # Pass the metadata if the resolver requires it
-                if step.requires_metadata:
-                    x = step.func(x, metadata=metadata)  # type: ignore
-                else:
-                    x = step.func(x)  # type: ignore
-
-            target_check = get_origin(target) or target
-            if not isinstance(x, target_check):
-                resolve_desc = "\n".join([step.description for step in steps])
-                target_name = getattr(target, "__qualname__", str(target))
-
-                raise TypeError(
-                    f"The resolved output with type '{type(x).__qualname__}' did not match target data type '{target_name}'; this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\nResolvers used:\n{resolve_desc}"
-                )
-
-            return x  # type: ignore
-
-        return resolver_fn
+        return ComposedResolver(origin, target, steps=steps)
 
     def resolve(
         self,
@@ -371,6 +512,7 @@ class Registry:
         astype: Type[Target],
         intermediate: Optional[Type[Intermediate]] = None,
         metadata: Optional[Any] = None,
+        slice: Optional[builtins.slice] = None,
     ) -> Target:
 
         def _find_module(value: Any) -> Optional[str]:
@@ -454,7 +596,8 @@ class Registry:
             indent = " " * 4 * context.recursion_level
 
             logging.info(
-                f"{indent}Resolve '{type(value).__qualname__}' -> '{astype.__qualname__}'{intermediate_desc} (caller in '{context.caller_namespace}')",
+                f"{indent}Resolve '{type(value).__qualname__}' -> '{astype.__qualname__}'"
+                f"{intermediate_desc} (caller in '{context.caller_namespace}')",
             )
 
             logging.debug(f"{indent}Namespace: {namespaces_desc}")
@@ -472,7 +615,7 @@ class Registry:
             search_time = end_search - start
             search_time_ms = search_time * 1_000
 
-            resolved = resolve_fn(value, metadata=metadata)
+            resolved = resolve_fn(value, metadata=metadata, slice=slice)
             end = time.time()
 
         total = end - start
@@ -480,7 +623,8 @@ class Registry:
         search_percentage = int((search_time / total) * 100) if total > 0 else 0
 
         logging.info(
-            f"Resolving from '{type(value).__qualname__}' to '{astype.__qualname__}' took {total_ms:2f}ms ({search_time_ms:2f}ms ({search_percentage}%) path finding)"
+            f"Resolving from '{type(value).__qualname__}' to '{astype.__qualname__}' took {total_ms:2f}ms "
+            f"({search_time_ms:2f}ms ({search_percentage}%) path finding)"
         )
 
         return resolved
@@ -540,28 +684,38 @@ def current_registry() -> Registry:
     return ctx.registry if ctx is not None else DEFAULT_REGISTRY
 
 
-def resolver(f):
+def resolver(target: Any) -> Any:
+    resolver_cls, method, requires_metadata, requires_slice = _normalize_resolver(
+        target
+    )
 
-    # TODO: Input validation
-    hints = typing.get_type_hints(f)
+    hints = typing.get_type_hints(method)
     in_dtype = hints["value"]
     out_dtype = hints["return"]
 
-    requires_metadata = "metadata" in hints
+    qualname = (
+        getattr(target, "__qualname__", target.__name__)
+        if inspect.isclass(target)
+        else _get_qualname(getattr(target, "__code__", None))
+        or getattr(target, "__qualname__", getattr(target, "__name__", None))
+    )
 
     namespace = Registry._namespace_from_symbol(
-        module=f.__module__,
-        qualname=_get_qualname(f.__code__),  # f.__qualname__,
+        module=target.__module__,
+        qualname=qualname,
         strip_last=True,
     )
 
-    # print(f"Registering resolver {f.__qualname__} for {in_dtype.__qualname__} -> {out_dtype.__qualname__} in namespace '{namespace}'")
-
     current_registry().add_resolver(
-        in_dtype, out_dtype, f, namespace, requires_metadata
+        in_dtype,
+        out_dtype,
+        resolver_cls,
+        namespace=namespace,
+        requires_metadata=requires_metadata,
+        requires_slice=requires_slice,
     )
 
-    return f
+    return target if inspect.isclass(target) else resolver_cls()
 
 
 def resolve(
@@ -569,12 +723,14 @@ def resolve(
     astype: Type[Target],
     intermediate: Optional[Type[Intermediate]] = None,
     metadata: Optional[Any] = None,
+    slice: Optional[builtins.slice] = None,
 ) -> Target:
     return current_registry().resolve(
         value,
         astype=astype,
         intermediate=intermediate,
         metadata=metadata,
+        slice=slice,
     )
 
 

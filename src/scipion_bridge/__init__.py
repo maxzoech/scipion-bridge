@@ -4,6 +4,7 @@ from .core.typed.resolve import (
     resolve,
     lift_resolvers,
     Resolve,
+    ComposedResolver,
 )
 
 from .core.typed import proxy
@@ -38,6 +39,7 @@ __all__ = [
     "resolve_params",
     "resolve",
     "Resolve",
+    "ComposedResolver",
     "proxify",
     "Proxy",
     "ProxyGroup",
