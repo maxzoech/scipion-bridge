@@ -7,7 +7,6 @@ from typing import Any, List, Dict, Optional
 
 
 from .ir import IROp, IRSource
-from .node import Node
 
 
 class LoweringContext:

@@ -191,9 +191,15 @@ class _PyWorkflowProtocolConfigurationProvider(ProtocolConfigurationProvider):
         type_hint = self.configuration.inputs.get(
             name
         ) or self.configuration.parameters.get(name)
-        args = get_args(type_hint)
+        if isinstance(type_hint, type) and hasattr(type_hint, "_dtype"):
+            return type_hint._dtype
+        if hasattr(type_hint, "dtype") and not isinstance(type_hint.dtype, property):
+            return type_hint.dtype
 
-        return args[0]
+        args = get_args(type_hint) or getattr(type_hint, "__args__", ())
+        if args:
+            return args[0]
+        return None
 
     def get_value(self, name: str, default: Any = None) -> Any:
         assert hasattr(

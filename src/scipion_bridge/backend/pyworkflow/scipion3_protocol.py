@@ -591,14 +591,15 @@ def convert_protocol_to_scipion3_protocol(
             self.itemIdReadList = defaultdict(list)
 
             self.inputTypes = {
-                k: get_args(v)[0] for k, v in protocol._configuration.inputs.items()
+                k: (getattr(v, "_dtype", None) or get_args(v)[0])
+                for k, v in protocol._configuration.inputs.items()
             }
 
         def _defineParams(self, form):
 
             form.addSection(label="Input")
             for key, element in protocol.configuration.inputs.items():
-                dtype = get_args(protocol._configuration.inputs[key])[0]
+                dtype = element.dtype
                 param, args = _get_param_type_and_kwargs(element, dtype, key=key)
 
                 form.addParam(
@@ -611,7 +612,7 @@ def convert_protocol_to_scipion3_protocol(
 
             form.addSection(label="Parameters")
             for key, param_element in protocol.configuration.parameters.items():
-                dtype = get_args(protocol._configuration.parameters[key])[0]
+                dtype = param_element.dtype
                 param, args = _get_param_type_and_kwargs(param_element, dtype, key=key)
 
                 form.addParam(

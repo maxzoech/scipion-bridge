@@ -77,31 +77,52 @@ class ProxyMetaclass(ABCMeta):
     def __new__(cls, name, bases, dct):
         x = super().__new__(cls, name, bases, dct)
 
-        if getattr(x, "__abstractmethods__", None):
+        if x.__abstractmethods__:
             return x
 
+        proxy_cls = cast(Type["Proxy"], x)
+
         def resolve_path_proxy(value: Path):
-            proxy_ext: Optional[str] = x.extension()  # type: ignore
+            proxy_exts: Optional[tuple[str, ...]] = proxy_cls.extensions()
             path_ext = value.suffix
 
-            if proxy_ext is not None and proxy_ext != path_ext:
+            if proxy_exts is not None and path_ext not in proxy_exts:
+                if issubclass(proxy_cls, ProxyGroup) and path_ext == "":
+                    return proxy_cls(value, managed=False)
+                expected = (
+                    proxy_exts[0] if len(proxy_exts) == 1 else f"one of {proxy_exts}"
+                )
                 raise TypeError(
-                    f"The file extension did not match the proxy (Expected {proxy_ext} but received {path_ext})"
+                    f"The file extension did not match the proxy (Expected {expected} but received {path_ext})",
                 )
 
-            proxy_prefix: Optional[str] = x.prefix()  # type: ignore
+            proxy_prefix: Optional[str] = proxy_cls.prefix()
             if proxy_prefix is not None and not value.name.startswith(proxy_prefix):
                 raise TypeError(
-                    f"The file prefix did not match the proxy (Expected prefix '{proxy_prefix}' on '{value.name}')"
+                    f"The file prefix did not match the proxy (Expected prefix '{proxy_prefix}' on '{value.name}')",
                 )
 
-            proxy_suffix: Optional[str] = x.suffix()  # type: ignore
+            proxy_suffix: Optional[str] = proxy_cls.suffix()
             if proxy_suffix is not None and not value.stem.endswith(proxy_suffix):
                 raise TypeError(
-                    f"The file suffix did not match the proxy (Expected suffix '{proxy_suffix}' on '{value.stem}')"
+                    f"The file suffix did not match the proxy (Expected suffix '{proxy_suffix}' on '{value.stem}')",
                 )
 
-            return x(value, managed=False)
+            if issubclass(proxy_cls, ProxyGroup):
+                if path_ext != "":
+                    primary_type = proxy_cls.primary_proxy_type()
+
+                    if primary_type is not None:
+                        primary_proxy = primary_type(value, managed=False)
+                        return current_registry().resolve(
+                            primary_proxy,
+                            astype=proxy_cls,
+                        )
+                    
+                base_path = proxy_cls.extract_base_path(value)
+                return proxy_cls(base_path, managed=False)
+
+            return proxy_cls(value, managed=False)
 
         # Put this in the scipion_bridge namespace so the user can shadow this
         # default resolver with their own if needed
@@ -140,6 +161,14 @@ class Proxy(metaclass=ProxyMetaclass):
     @classmethod
     def file_ext(cls) -> Optional[str]:
         return None
+
+    @classmethod
+    def extensions(cls) -> Optional[tuple[str, ...]]:
+        ext = cls.extension()
+        if ext is not None:
+            return (ext,)
+        else:
+            return None
 
     @classmethod
     def prefix(cls) -> Optional[str]:
@@ -328,16 +357,9 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         }
 
     @classmethod
-    def extract_base_path(cls, primary_path: os.PathLike) -> Path:
-        """Extract the canonical base_path from a primary proxy path by stripping
-        group/child prefixes, suffixes, and extensions.
-        """
-        primary_path = Path(primary_path)
-        parent = primary_path.parent
-        name = primary_path.name
-
+    def primary_proxy_type(cls) -> Optional[Type[Proxy]]:
+        """Return the Proxy class corresponding to primary_proxy."""
         proxy_fields = cls.get_proxy_fields()
-        primary_cls: Optional[Type[Proxy]] = None
         prop = getattr(cls, "primary_proxy", None)
         if isinstance(prop, property) and prop.fget is not None:
             try:
@@ -348,12 +370,32 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
 
                 field_name = prop.fget(_DummyGroup())
                 if isinstance(field_name, str) and field_name in proxy_fields:
-                    primary_cls = proxy_fields[field_name]
+                    return proxy_fields[field_name]
             except Exception:
                 pass
 
-        if primary_cls is None and proxy_fields:
-            primary_cls = next(iter(proxy_fields.values()))
+        if proxy_fields:
+            return next(iter(proxy_fields.values()))
+        return None
+
+    @classmethod
+    def extensions(cls) -> Optional[tuple[str, ...]]:
+        primary_cls = cls.primary_proxy_type()
+
+        if primary_cls is not None:
+            return primary_cls.extensions()
+        return None
+
+    @classmethod
+    def extract_base_path(cls, primary_path: os.PathLike) -> Path:
+        """Extract the canonical base_path from a primary proxy path by stripping
+        group/child prefixes, suffixes, and extensions.
+        """
+        primary_path = Path(primary_path)
+        parent = primary_path.parent
+        name = primary_path.name
+
+        primary_cls = cls.primary_proxy_type()
 
         if primary_cls is not None:
             ext = primary_cls.extension() or primary_cls.file_ext()
@@ -398,7 +440,10 @@ class ProxyGroup(Proxy, Mapping[str, Proxy], ABC):
         del copy_data  # Unused parameter
 
         """Create a ProxyGroup from an existing Proxy."""
-        return cls(source.path, managed=source.managed)
+        assert issubclass(cls, ProxyGroup)
+        
+        base_path = cls.extract_base_path(source.path)
+        return cls(base_path, managed=source.managed)
 
     @property
     @abstractmethod

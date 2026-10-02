@@ -2,5 +2,7 @@
 
 from __future__ import annotations
 
+from .node import lower, LoweringContext
 
 
+__all__ = ["lower", "LoweringContext"]

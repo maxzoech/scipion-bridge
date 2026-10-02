@@ -38,18 +38,24 @@ class Protocol(metaclass=abc.ABCMeta):
 
     @property
     def configuration(self) -> ProtocolConfiguration:
-        def _build_fields(source_dict, field_class):
+        def _build_fields(source_dict):
             def _get_item(key, type_hint):
-                try:
-                    field = getattr(type(self), key)
-                except AttributeError:
-                    field = field_class(optional=False)
+                field = getattr(type(self), key, None)
+                if field is None:
+                    field = type_hint(optional=False)
+                    field._bound_name = key
+                    field.name = key
+                elif (
+                    getattr(field, "dtype", None) is None
+                    and getattr(type_hint, "_dtype", None) is not None
+                ):
+                    field._dtype = type_hint._dtype
                 return (key, field)
 
             return OrderedDict(_get_item(k, v) for k, v in source_dict.items())
 
-        inputs = _build_fields(self._configuration.inputs, Input)
-        params = _build_fields(self._configuration.parameters, Field)
+        inputs = _build_fields(self._configuration.inputs)
+        params = _build_fields(self._configuration.parameters)
 
         return ProtocolConfiguration(inputs, params)
 
@@ -145,10 +151,11 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
     states = OrderedDict()
     for name in typed_assign_ops:
         value = attributes[name]
+        origin = get_origin(value) or getattr(value, "__origin__", None)
 
-        if get_origin(value) == Input:
+        if origin == Input:
             inputs[name] = value
-        elif get_origin(value) == Field:
+        elif origin == Field:
             parameters[name] = value
         else:
             states[name] = value

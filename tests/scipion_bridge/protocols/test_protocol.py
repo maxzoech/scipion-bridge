@@ -59,6 +59,14 @@ def test_create_protocol():
     assert config.parameters["param"] == B.Field(optional=False)
     assert config.parameters["param_default"] == B.Field(default=42)
 
+    assert config.inputs["path"].dtype == str
+    assert config.inputs["magic_number"].dtype == int
+    assert config.parameters["param"].dtype == float
+    assert config.parameters["param_default"].dtype == int
+
+    assert proto.magic_number.dtype == int
+    assert proto.param_default.dtype == int
+
 
 def test_protocol_untyped_state():
     with pytest.raises(

@@ -12,23 +12,26 @@ FieldSelf = TypeVar("FieldSelf", bound="Field")
 InputSelf = TypeVar("InputSelf", bound="Input")
 
 from ..streaming.ops import Source
+from ..utils.marker import Marker
 
 
 from ...backend.standalone.container import Container
 
 
-class BoundField(Generic[T]):
+class BoundField(Marker[T]):
 
     def __init__(
         self,
         name: str,
         *,
+        dtype: Optional[Any] = None,
         default: Optional[T] = None,
         optional: Optional[bool] = None,
         label: Optional[str] = None,
         group: Optional[str] = None,
         help: Optional[str] = None,
     ):
+        Marker.__init__(self, dtype=dtype)
         self.name = name
         self.default = default
         self.optional = optional
@@ -51,21 +54,23 @@ class BoundField(Generic[T]):
         return config_provider.get_value(self.name, default=self.default)
 
 
-class Field(Generic[T]):
+class Field(Marker[T]):
 
     def __set_name__(self, owner: Any, name: str) -> None:
         self._bound_name = name
+        super().__set_name__(owner, name)
 
     def __init__(
         self,
         *,
+        dtype: Optional[Any] = None,
         default: Optional[T] = None,
         optional: Optional[bool] = None,
         label: Optional[str] = None,
         group: Optional[str] = None,
         help: Optional[str] = None,
     ):
-        super().__init__()
+        Marker.__init__(self, dtype=dtype)
 
         if optional is None:
             optional = default is None
@@ -88,6 +93,7 @@ class Field(Generic[T]):
 
         return BoundField(
             name=self._bound_name,
+            dtype=self.dtype,
             default=self.default,
             optional=self.optional,
             label=self.label,
@@ -113,6 +119,7 @@ class BoundInput(BoundField[T], Source):
         self,
         name: str,
         *,
+        dtype: Optional[Any] = None,
         default: Optional[T] = None,
         optional: Optional[bool] = None,
         label: Optional[str] = None,
@@ -121,6 +128,7 @@ class BoundInput(BoundField[T], Source):
         BoundField.__init__(
             self,
             name=name,
+            dtype=dtype,
             default=default,
             optional=optional,
             label=label,
@@ -138,6 +146,7 @@ class Input(Field[T]):
     def __init__(
         self,
         *,
+        dtype: Optional[Any] = None,
         default: Optional[T] = None,
         optional: Optional[bool] = None,
         label: Optional[str] = None,
@@ -145,6 +154,7 @@ class Input(Field[T]):
     ):
         Field.__init__(
             self,
+            dtype=dtype,
             default=default,
             optional=optional,
             group="Input",
@@ -164,6 +174,7 @@ class Input(Field[T]):
 
         return BoundInput(
             name=self._bound_name,
+            dtype=self.dtype,
             default=self.default,
             optional=self.optional,
             label=self.label,

@@ -3,7 +3,6 @@ from .ops import Op, Source, MapOp
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
 from .ir import IROp, IRSource, IRMap, IRSink
-from .lower import lower, LoweringContext
 from .backend import CompiledPipeline, StreamingBackendProvider
 from .pipeline import Pipeline
 

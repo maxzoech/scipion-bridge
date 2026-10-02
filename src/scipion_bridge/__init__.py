@@ -28,8 +28,10 @@ from .core.struct import Struct, Set, Collection, concat, Array, Arg, Dim
 from .core.streaming import Op, FlushSignal, FLUSH
 
 from .core.typed import core_resolvers
+from . import single_particle
 
 lift_resolvers(core_resolvers, proxy)
+lift_resolvers(core_resolvers, proxy, single_particle)
 
 __all__ = [
     "resolver",
@@ -62,4 +64,5 @@ __all__ = [
     "FLUSH",
     "Arg",
     "Dim",
+    "single_particle",
 ]
