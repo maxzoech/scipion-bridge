@@ -11,9 +11,15 @@ from ..core.typed.proxy import Proxy, ProxyGroup
 
 
 class StarfileProxy(Proxy):
+    _cached_data: Optional[Any] = None
+
+    def read(self) -> Any:
+        if self._cached_data is None:
+            self._cached_data = cast(Any, starfile.read(self.path))
+        return self._cached_data
 
     def __len__(self) -> int:
-        star_data = cast(Any, starfile.read(self.path))
+        star_data = self.read()
         match star_data:
             case pd.DataFrame():
                 return len(star_data)

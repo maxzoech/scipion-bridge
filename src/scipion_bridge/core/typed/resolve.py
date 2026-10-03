@@ -29,6 +29,8 @@ from typing import (
     Optional,
     get_origin,
     cast,
+    Iterator,
+    Sized,
     TYPE_CHECKING,
 )
 
@@ -179,20 +181,13 @@ class ScopedPathfindingContainer(PathfindingContainer):
         return self.edge_attributes.module.startswith(self.local_scope_name)
 
     @property
-    def resolution_priority(self):
-        if self.is_local_scope:
-            return 0  # Higher priority
-        else:
-            return 1
+    def resolution_priority(self) -> int:
+        return 0 if self.is_local_scope else 1
 
     @property
-    def slice_priority(self):
+    def slice_priority(self) -> int:
         assert self.edge_attributes is not None
-
-        if self.edge_attributes.requires_slice:
-            return 0  # Higher priority for slice-capable resolvers
-        else:
-            return 1
+        return 0 if self.edge_attributes.requires_slice else 1
 
     def __lt__(self, other):
         assert isinstance(other, ScopedPathfindingContainer)
@@ -200,34 +195,22 @@ class ScopedPathfindingContainer(PathfindingContainer):
         assert self.edge_attributes is not None
         assert other.edge_attributes is not None
 
-        if not self.weight == other.weight:
+        if self.weight != other.weight:
             return self.weight < other.weight
-        else:
-            if not self.resolution_priority == other.resolution_priority:
-                return self.resolution_priority < other.resolution_priority
-            else:
-                if not self.slice_priority == other.slice_priority:
-                    return self.slice_priority < other.slice_priority
-                else:
 
-                    symbol_path = f"{self.edge_attributes.module}.{self.edge_attributes.resolver_fn.__qualname__}"
-                    other_symbol_path = f"{other.edge_attributes.module}.{other.edge_attributes.resolver_fn.__qualname__}"
+        if self.resolution_priority != other.resolution_priority:
+            return self.resolution_priority < other.resolution_priority
 
-                    path_length = len(symbol_path.split("."))
-                    other_path_length = len(other_symbol_path.split("."))
+        if self.slice_priority != other.slice_priority:
+            return self.slice_priority < other.slice_priority
 
-                    if (
-                        other_path_length == path_length
-                        and self.edge_attributes.resolver_fn
-                        is not other.edge_attributes.resolver_fn
-                    ):
-                        pass
+        symbol_path = f"{self.edge_attributes.module}.{self.edge_attributes.resolver_fn.__qualname__}"
+        other_symbol_path = f"{other.edge_attributes.module}.{other.edge_attributes.resolver_fn.__qualname__}"
 
-                        # warnings.warn(
-                        #     f"Found ambiguous resolvers {symbol_path} and {other_symbol_path} during type resolution.",
-                        # )
+        path_length = len(symbol_path.split("."))
+        other_path_length = len(other_symbol_path.split("."))
 
-                    return other_path_length < path_length
+        return other_path_length < path_length
 
 
 def build_default_container(
@@ -282,6 +265,26 @@ def resolution_context(
         _current_ctx.reset(token)
 
 
+def estimate_optimal_chunk_size(
+    item_nbytes: Optional[int],
+    target_bytes: Optional[int] = None,
+    default_chunk_size: int = 100,
+) -> int:
+    """Calculate an optimal batch/chunk size targeting a memory footprint (default 32MB).
+
+    If item_nbytes is None or <= 0, returns default_chunk_size.
+    Otherwise returns max(1, target_bytes // item_nbytes).
+    """
+    if item_nbytes is None or item_nbytes <= 0:
+        return default_chunk_size
+
+    effective_target = target_bytes if target_bytes is not None else 32 * 1024 * 1024
+    chunk_size = effective_target // item_nbytes
+    if chunk_size < 1:
+        return 1
+    return chunk_size
+
+
 class ComposedResolver(Generic[Origin, Target]):
     """An independent execution pipeline composed of resolved transformation steps."""
 
@@ -294,6 +297,24 @@ class ComposedResolver(Generic[Origin, Target]):
         self.origin = origin
         self.target = target
         self.steps = steps
+
+        for step in self.steps:
+            try:
+                step.cls.precompute()
+            except AttributeError:
+                pass
+
+    def _validate_target(self, out: Any) -> None:
+        target_check = get_origin(self.target) or self.target
+        if not isinstance(out, target_check):
+            resolve_desc = "\n".join([step.description for step in self.steps])
+            target_name = getattr(self.target, "__qualname__", str(self.target))
+
+            raise TypeError(
+                f"The resolved output with type '{type(out).__qualname__}' did not match target data type '{target_name}'; "
+                f"this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\n"
+                f"Resolvers used:\n{resolve_desc}"
+            )
 
     def __call__(
         self,
@@ -333,18 +354,103 @@ class ComposedResolver(Generic[Origin, Target]):
                 f"but no resolver along the path supports slicing."
             )
 
-        target_check = get_origin(self.target) or self.target
-        if not isinstance(x, target_check):
-            resolve_desc = "\n".join([step.description for step in self.steps])
-            target_name = getattr(self.target, "__qualname__", str(self.target))
+        self._validate_target(x)
+        return cast(Target, x)
 
+    def iter(
+        self,
+        value: Origin,
+        *,
+        chunk_size: Optional[int] = None,
+        target_bytes: Optional[int] = None,
+        metadata: Optional[Any] = None,
+    ) -> Iterator[Target]:
+        """Iteratively resolve value in chunks by slicing the first slice-aware step.
+
+        If chunk_size is None, optimal chunk size is estimated based on intermediate.estimated_item_nbytes
+        targeting target_bytes (defaults to 32MB).
+
+        Raises:
+            TypeError: If value doesn't match origin, if no step in the path supports slicing,
+                       or if the intermediate object before the slice step is not Sized.
+            ValueError: If chunk_size or target_bytes <= 0.
+        """
+        if not isinstance(value, self.origin):
             raise TypeError(
-                f"The resolved output with type '{type(x).__qualname__}' did not match target data type '{target_name}'; "
-                f"this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\n"
-                f"Resolvers used:\n{resolve_desc}"
+                f"The input value did not match origin data type "
+                f"(expected {self.origin.__qualname__}, got {type(value).__qualname__})"
             )
 
-        return cast(Target, x)
+        if not any(step.requires_slice for step in self.steps):
+            raise TypeError(
+                f"Cannot iterate resolution for '{self.origin.__qualname__}' -> '{self.target.__qualname__}': "
+                f"no resolver along the path supports slicing."
+            )
+
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+
+        if target_bytes is not None and target_bytes <= 0:
+            raise ValueError(f"target_bytes must be positive, got {target_bytes}")
+
+        return self._iter_impl(
+            value,
+            chunk_size=chunk_size,
+            target_bytes=target_bytes,
+            metadata=metadata,
+        )
+
+    def _iter_impl(
+        self,
+        value: Origin,
+        *,
+        chunk_size: Optional[int] = None,
+        target_bytes: Optional[int] = None,
+        metadata: Optional[Any] = None,
+    ) -> Iterator[Target]:
+        slice_idx = next(i for i, step in enumerate(self.steps) if step.requires_slice)
+        prefix_steps = self.steps[:slice_idx]
+        stream_steps = self.steps[slice_idx:]
+
+        x: Any = value
+        for step in prefix_steps:
+            logging.debug(step.description)
+            instance = step.cls()
+            kwargs: dict[str, Any] = {}
+            if step.requires_metadata:
+                kwargs["metadata"] = metadata
+            x = instance.forward(x, **kwargs)
+
+        intermediate = x
+        if not isinstance(intermediate, Sized):
+            raise TypeError(
+                f"Cannot iterate over '{type(intermediate).__qualname__}': object does not define __len__."
+            )
+
+        total = len(intermediate)
+        actual_chunk_size = chunk_size or estimate_optimal_chunk_size(
+            getattr(intermediate, "estimated_item_nbytes", None),
+            target_bytes=target_bytes,
+        )
+
+        stream_instances = [step.cls() for step in stream_steps]
+
+        for k in range(0, total, actual_chunk_size):
+            chunk_slice = builtins.slice(k, min(k + actual_chunk_size, total))
+            current_slice: Optional[builtins.slice] = chunk_slice
+            out: Any = intermediate
+
+            for step, inst in zip(stream_steps, stream_instances):
+                kwargs: dict[str, Any] = {}
+                if step.requires_metadata:
+                    kwargs["metadata"] = metadata
+                if step.requires_slice:
+                    kwargs["slice"] = current_slice
+                    current_slice = None
+                out = inst.forward(out, **kwargs)
+
+            self._validate_target(out)
+            yield cast(Target, out)
 
 
 class Registry:
@@ -408,7 +514,7 @@ class Registry:
                 return
 
         def _add_downcasts(subclass: Type):
-            for weight, dtype in enumerate(inspect.getmro(subclass)):
+            for weight_idx, dtype in enumerate(inspect.getmro(subclass)):
                 if subclass == dtype:
                     continue
 
@@ -416,7 +522,7 @@ class Registry:
                     subclass,
                     dtype,
                     resolver=_DowncastProjector,
-                    weight=weight,
+                    weight=weight_idx,
                     module=__package__,
                     requires_metadata=False,
                     requires_slice=False,
@@ -506,21 +612,13 @@ class Registry:
 
         return ComposedResolver(origin, target, steps=steps)
 
-    def resolve(
-        self,
-        value,
-        astype: Type[Target],
-        intermediate: Optional[Type[Intermediate]] = None,
-        metadata: Optional[Any] = None,
-        slice: Optional[builtins.slice] = None,
-    ) -> Target:
-
-        def _find_module(value: Any) -> Optional[str]:
+    def _resolve_namespaces(self, value: Any) -> Tuple[Set[str], str, Type]:
+        def _find_module(val: Any) -> Optional[str]:
             try:
-                if inspect.ismodule(value):
-                    return value.__name__
+                if inspect.ismodule(val):
+                    return val.__name__
                 else:
-                    return value.__module__
+                    return val.__module__
             except AttributeError:
                 return None
 
@@ -535,8 +633,6 @@ class Registry:
 
                 return _expand_namespace(".".join(tail), expanded + [next_el])
 
-        start = time.time()
-
         # Find imported modules to construct namespace
         frame = _find_calling_frame()
         calling_module: str = frame.f_globals["__name__"]
@@ -545,15 +641,9 @@ class Registry:
             module=calling_module, qualname=_get_qualname(frame.f_code)
         )
 
-        # The associated namespace is the namespace where the value we want to
-        # resolve.
-        # This useful when we use a symbol without directly importing the module
-        # where it was declared, e.g.
-        # import scipion_bridge
-        # ...
-        # value.typed(scipion_bridge.typed.volume.SpiderFile) <- we never imported Spider file
+        origin_type = value if inspect.isclass(value) else type(value)
         associated_namespace = Registry._namespace_from_symbol(
-            module=type(value).__module__, qualname=type(value).__qualname__
+            module=origin_type.__module__, qualname=origin_type.__qualname__
         )
         associated_namespace = _expand_namespace(associated_namespace, [])
 
@@ -580,6 +670,15 @@ class Registry:
 
         # The union of the visible modules and registered modules is the available namespace
         namespaces = visible_modules & registered_modules
+        return namespaces, calling_namespace, origin_type
+
+    def _lookup_resolver(
+        self,
+        value: Any,
+        astype: Type[Target],
+        intermediate: Optional[Type[Intermediate]] = None,
+    ) -> ComposedResolver[Any, Target]:
+        namespaces, calling_namespace, origin_type = self._resolve_namespaces(value)
 
         with resolution_context(self, namespaces, calling_namespace) as context:
             assert context is not None
@@ -596,7 +695,56 @@ class Registry:
             indent = " " * 4 * context.recursion_level
 
             logging.info(
-                f"{indent}Resolve '{type(value).__qualname__}' -> '{astype.__qualname__}'"
+                f"{indent}Resolve '{origin_type.__qualname__}' -> '{astype.__qualname__}'"
+                f"{intermediate_desc} (caller in '{context.caller_namespace}')",
+            )
+
+            logging.debug(f"{indent}Namespace: {namespaces_desc}")
+
+            return self.find_resolve_func(
+                context.namespaces,
+                origin_type,
+                astype,
+                intermediate,
+                context.caller_namespace,
+            )
+
+    def find_resolver(
+        self,
+        origin: Union[Type[Origin], Origin],
+        target: Type[Target],
+        intermediate: Optional[Type[Intermediate]] = None,
+    ) -> ComposedResolver[Origin, Target]:
+        """Precompute and return a ComposedResolver for the given origin and target types."""
+        return self._lookup_resolver(origin, target, intermediate)
+
+    def resolve(
+        self,
+        value,
+        astype: Type[Target],
+        intermediate: Optional[Type[Intermediate]] = None,
+        metadata: Optional[Any] = None,
+        slice: Optional[builtins.slice] = None,
+    ) -> Target:
+        start = time.time()
+        namespaces, calling_namespace, origin_type = self._resolve_namespaces(value)
+
+        with resolution_context(self, namespaces, calling_namespace) as context:
+            assert context is not None
+
+            intermediate_desc = (
+                f" (via '{intermediate.__qualname__}')"
+                if intermediate is not None
+                else ""
+            )
+
+            namespaces_ctx = [f"'{n}'" for n in context.namespaces]
+            namespaces_desc = ", ".join(namespaces_ctx).rstrip()
+
+            indent = " " * 4 * context.recursion_level
+
+            logging.info(
+                f"{indent}Resolve '{origin_type.__qualname__}' -> '{astype.__qualname__}'"
                 f"{intermediate_desc} (caller in '{context.caller_namespace}')",
             )
 
@@ -604,7 +752,7 @@ class Registry:
 
             resolve_fn = self.find_resolve_func(
                 context.namespaces,
-                type(value),
+                origin_type,
                 astype,
                 intermediate,
                 context.caller_namespace,
@@ -628,6 +776,23 @@ class Registry:
         )
 
         return resolved
+
+    def resolve_iter(
+        self,
+        value,
+        astype: Type[Target],
+        intermediate: Optional[Type[Intermediate]] = None,
+        chunk_size: Optional[int] = None,
+        target_bytes: Optional[int] = None,
+        metadata: Optional[Any] = None,
+    ) -> Iterator[Target]:
+        resolve_fn = self._lookup_resolver(value, astype, intermediate)
+        return resolve_fn.iter(
+            value,
+            chunk_size=chunk_size,
+            target_bytes=target_bytes,
+            metadata=metadata,
+        )
 
     def lift_resolvers(self, origin_module_name: str, target_module_name: str):
         # Assert that the target module is actually imports the module from which
@@ -731,6 +896,37 @@ def resolve(
         intermediate=intermediate,
         metadata=metadata,
         slice=slice,
+    )
+
+
+def resolve_iter(
+    value,
+    astype: Type[Target],
+    intermediate: Optional[Type[Intermediate]] = None,
+    chunk_size: Optional[int] = None,
+    target_bytes: Optional[int] = None,
+    metadata: Optional[Any] = None,
+) -> Iterator[Target]:
+    return current_registry().resolve_iter(
+        value,
+        astype=astype,
+        intermediate=intermediate,
+        chunk_size=chunk_size,
+        target_bytes=target_bytes,
+        metadata=metadata,
+    )
+
+
+def find_resolver(
+    origin: Union[Type[Origin], Origin],
+    target: Type[Target],
+    intermediate: Optional[Type[Intermediate]] = None,
+) -> ComposedResolver[Origin, Target]:
+    """Precompute and return a ComposedResolver from the current registry."""
+    return current_registry().find_resolver(
+        origin,
+        target,
+        intermediate=intermediate,
     )
 
 

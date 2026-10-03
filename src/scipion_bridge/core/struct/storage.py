@@ -687,7 +687,12 @@ class StagingEngine(_BaseStorage):
 
         if arr is not None and arr.dtype != object:
             if entry.is_static:
-                return self._coerce_static_shape(arr, entry.shape, key)
+                return self._coerce_static_shape(
+                    arr,
+                    entry.shape,
+                    key,
+                    is_set=isinstance(entry, SetEntryBase),
+                )
             return arr
 
         if entry.is_static:
@@ -700,19 +705,27 @@ class StagingEngine(_BaseStorage):
         arr: np.ndarray,
         entry_shape: Tuple[Optional[int], ...],
         key: KeyPath,
+        *,
+        is_set: bool = False,
     ) -> np.ndarray:
         """Validate and adjust array shape to match static entry dimensions."""
-        match (arr.shape, entry_shape):
-            case ((), (1,)):
+        match (arr.shape, entry_shape, is_set):
+            case ((), (1,), False):
                 return arr.reshape(1)
 
-            case ((), ()):
+            case ((), (1,), True):
+                return arr.reshape(1, 1)
+
+            case ((), (), _):
                 return arr.reshape(())
 
-            case ((n,), (1,)) if n != 1:
+            case ((_,), (1,), True):
                 return arr.reshape(-1, 1)
 
-            case (shape, target) if (
+            case ((1,), (1,), False):
+                return arr
+
+            case (shape, target, _) if (
                 len(shape) >= len(target)
                 and shape[len(shape) - len(target) :] == target
             ):

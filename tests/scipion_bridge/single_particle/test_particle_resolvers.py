@@ -360,3 +360,106 @@ def test_resolve_star_path_to_particles_sliced_end_to_end(tmp_path: Path):
         np.asarray(subset["coordinate"]["x"]).flatten(),
         [300.0, 400.0, 500.0, 600.0],
     )
+
+
+def test_resolve_iter_particle_stack_end_to_end(tmp_path: Path):
+    """Verify that B.resolve_iter streams chunks end-to-end with matching data."""
+    mrc_path = tmp_path / "particles.mrcs"
+    star_path = tmp_path / "particles.star"
+    n_particles = 10
+    data = np.arange(n_particles * 16 * 16, dtype=np.float32).reshape(
+        n_particles, 16, 16
+    )
+    with mrcfile.new(mrc_path) as mrc:
+        mrc.set_data(data)
+
+    df = pd.DataFrame(
+        {
+            "rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(n_particles)],
+            "rlnCoordinateX": [float(i * 10) for i in range(n_particles)],
+            "rlnDefocusU": [float(10000 + i * 500) for i in range(n_particles)],
+        },
+    )
+    starfile.write(df, star_path)
+
+    # 1. Iterate in fixed chunk_size=3 from Path
+    chunks = list(B.resolve_iter(star_path, astype=B.Set[Particle], chunk_size=3))
+    assert len(chunks) == 4
+    assert [len(c) for c in chunks] == [3, 3, 3, 1]
+
+    # Verify chunk slices
+    assert np.allclose(np.asarray(chunks[0]["pixels"]), data[0:3])
+    assert np.allclose(np.asarray(chunks[1]["pixels"]), data[3:6])
+    assert np.allclose(np.asarray(chunks[2]["pixels"]), data[6:9])
+    assert np.allclose(np.asarray(chunks[3]["pixels"]), data[9:10])
+
+    assert np.allclose(
+        np.asarray(chunks[0]["coordinate"]["x"]).flatten(),
+        [0.0, 10.0, 20.0],
+    )
+    assert np.allclose(
+        np.asarray(chunks[3]["coordinate"]["x"]).flatten(),
+        [90.0],
+    )
+
+    # 2. Compare against monolithic resolution
+    full = B.resolve(star_path, astype=B.Set[Particle])
+    concatenated = B.concat(chunks)
+    assert len(concatenated) == len(full) == 10
+    assert np.allclose(np.asarray(concatenated["pixels"]), np.asarray(full["pixels"]))
+    assert np.allclose(
+        np.asarray(concatenated["coordinate"]["x"]).flatten(),
+        np.asarray(full["coordinate"]["x"]).flatten(),
+    )
+
+    # 3. Iterate with auto-chunking (chunk_size=None)
+    chunks_auto = list(B.resolve_iter(star_path, astype=B.Set[Particle]))
+    assert sum(len(c) for c in chunks_auto) == 10
+
+    # 4. Iterate directly from ParticleStackProxy
+    psp = B.resolve(star_path, astype=ParticleStackProxy)
+    chunks_from_psp = list(B.resolve_iter(psp, astype=B.Set[Particle], chunk_size=5))
+    assert len(chunks_from_psp) == 2
+    assert len(chunks_from_psp[0]) == 5
+    assert len(chunks_from_psp[1]) == 5
+    assert np.allclose(np.asarray(chunks_from_psp[0]["pixels"]), data[0:5])
+    assert np.allclose(np.asarray(chunks_from_psp[1]["pixels"]), data[5:10])
+
+    # 5. Non-sliceable target raises TypeError
+    with pytest.raises(
+        TypeError,
+        match="no resolver along the path supports slicing",
+    ):
+        list(B.resolve_iter(star_path, astype=StarfileProxy))
+
+
+def test_resolve_particle_stack_to_particles_caches_star_data(tmp_path: Path):
+    """Verify that starfile.read is called only once across multiple chunks during iteration."""
+    from unittest.mock import patch
+
+    mrc_path = tmp_path / "particles.mrcs"
+    star_path = tmp_path / "particles.star"
+    n_particles = 10
+    data = np.arange(n_particles * 16 * 16, dtype=np.float32).reshape(
+        n_particles, 16, 16
+    )
+    with mrcfile.new(mrc_path) as mrc:
+        mrc.set_data(data)
+
+    df = pd.DataFrame(
+        {
+            "rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(n_particles)],
+            "rlnCoordinateX": [float(i * 10) for i in range(n_particles)],
+        },
+    )
+    starfile.write(df, star_path)
+
+    # Pre-resolve to ParticleStackProxy so we isolate the slice step caching
+    psp = B.resolve(star_path, astype=ParticleStackProxy)
+
+    with patch("starfile.read", wraps=starfile.read) as mock_read:
+        chunks = list(B.resolve_iter(psp, astype=B.Set[Particle], chunk_size=2))
+        assert len(chunks) == 5
+        # Across 5 chunks, starfile.read must only be called once!
+        assert mock_read.call_count == 1
+

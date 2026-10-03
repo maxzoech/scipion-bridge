@@ -13,7 +13,13 @@ from ..environment.temp_files import TemporaryFilesProvider
 from ..utils.arc import manager as arc_manager
 from ..utils.func_params import extract_func_params
 
-from .resolve import current_registry, resolve_params, resolver, Registry
+from .resolve import (
+    current_registry,
+    resolve_params,
+    resolver,
+    Registry,
+    estimate_optimal_chunk_size,
+)
 from abc import ABC, ABCMeta, abstractmethod
 from typing import (
     Dict,
@@ -74,6 +80,78 @@ class FuncParam:
                 pass
 
 
+class PathToProxyResolver:
+    """Class-based resolver transforming a Path into a single-file Proxy."""
+
+    target_cls: Type[Any]
+
+    def _validate_path(self, value: Path) -> None:
+        proxy_exts = self.target_cls.extensions()
+        path_ext = value.suffix
+
+        if proxy_exts is not None and path_ext not in proxy_exts:
+            expected = proxy_exts[0] if len(proxy_exts) == 1 else f"one of {proxy_exts}"
+            raise TypeError(
+                f"The file extension did not match the proxy (Expected {expected} but received {path_ext})",
+            )
+
+        proxy_prefix = self.target_cls.prefix()
+        if proxy_prefix is not None and not value.name.startswith(proxy_prefix):
+            raise TypeError(
+                f"The file prefix did not match the proxy (Expected prefix '{proxy_prefix}' on '{value.name}')",
+            )
+
+        proxy_suffix = self.target_cls.suffix()
+        if proxy_suffix is not None and not value.stem.endswith(proxy_suffix):
+            raise TypeError(
+                f"The file suffix did not match the proxy (Expected suffix '{proxy_suffix}' on '{value.stem}')",
+            )
+
+    def forward(self, value: Path) -> Any:
+        path = Path(value)
+        self._validate_path(path)
+        return self.target_cls(path, managed=False)
+
+
+class PathToProxyGroupResolver(PathToProxyResolver):
+    """Class-based resolver transforming a Path into a ProxyGroup."""
+
+    _cached_group_resolver: Optional[Any] = None
+
+    @classmethod
+    def precompute(cls) -> None:
+        if cls._cached_group_resolver is None:
+            primary_type = cls.target_cls.primary_proxy_type()
+            assert primary_type is not None
+            cls._cached_group_resolver = current_registry().find_resolver(
+                primary_type,
+                cls.target_cls,
+            )
+
+    def _validate_path(self, value: Path) -> None:
+        if value.suffix == "":
+            return
+        super()._validate_path(value)
+
+    def forward(self, value: Path) -> Any:
+        path = Path(value)
+        self._validate_path(path)
+
+        if path.suffix == "":
+            base_path = self.target_cls.extract_base_path(path)
+            return self.target_cls(base_path, managed=False)
+
+        primary_type = self.target_cls.primary_proxy_type()
+        assert primary_type is not None
+
+        if self.__class__._cached_group_resolver is None:
+            self.precompute()
+        assert self.__class__._cached_group_resolver is not None
+        return self.__class__._cached_group_resolver(
+            primary_type(path, managed=False),
+        )
+
+
 class ProxyMetaclass(ABCMeta):
     def __new__(cls, name, bases, dct):
         x = super().__new__(cls, name, bases, dct)
@@ -82,61 +160,38 @@ class ProxyMetaclass(ABCMeta):
             return x
 
         proxy_cls = cast(Type["Proxy"], x)
+        
+        is_proxy_group = (
+            issubclass(proxy_cls, ProxyGroup)
+            if "ProxyGroup" in globals()
+            else False
+        )
 
-        def resolve_path_proxy(value: Path):
-            proxy_exts: Optional[tuple[str, ...]] = proxy_cls.extensions()
-            path_ext = value.suffix
+        base_resolver_cls = (
+            PathToProxyGroupResolver if is_proxy_group else PathToProxyResolver
+        )
 
-            if proxy_exts is not None and path_ext not in proxy_exts:
-                if issubclass(proxy_cls, ProxyGroup) and path_ext == "":
-                    return proxy_cls(value, managed=False)
-                expected = (
-                    proxy_exts[0] if len(proxy_exts) == 1 else f"one of {proxy_exts}"
-                )
-                raise TypeError(
-                    f"The file extension did not match the proxy (Expected {expected} but received {path_ext})",
-                )
+        resolver_cls = type(
+            f"ResolvePathTo{proxy_cls.__name__}",
+            (base_resolver_cls,),
+            {
+                "target_cls": proxy_cls,
+                "__module__": proxy_cls.__module__,
+                "__qualname__": f"ResolvePathTo{proxy_cls.__name__}",
+                "__doc__": f"Resolve Path to {proxy_cls.__name__}",
+            },
+        )
 
-            proxy_prefix: Optional[str] = proxy_cls.prefix()
-            if proxy_prefix is not None and not value.name.startswith(proxy_prefix):
-                raise TypeError(
-                    f"The file prefix did not match the proxy (Expected prefix '{proxy_prefix}' on '{value.name}')",
-                )
-
-            proxy_suffix: Optional[str] = proxy_cls.suffix()
-            if proxy_suffix is not None and not value.stem.endswith(proxy_suffix):
-                raise TypeError(
-                    f"The file suffix did not match the proxy (Expected suffix '{proxy_suffix}' on '{value.stem}')",
-                )
-
-            if issubclass(proxy_cls, ProxyGroup):
-                if path_ext != "":
-                    primary_type = proxy_cls.primary_proxy_type()
-
-                    if primary_type is not None:
-                        primary_proxy = primary_type(value, managed=False)
-                        return current_registry().resolve(
-                            primary_proxy,
-                            astype=proxy_cls,
-                        )
-
-                base_path = proxy_cls.extract_base_path(value)
-                return proxy_cls(base_path, managed=False)
-
-            return proxy_cls(value, managed=False)
-
-        # Put this in the scipion_bridge namespace so the user can shadow this
-        # default resolver with their own if needed
         default_resolver_namespace = Registry._namespace_from_symbol(
             module=str(__package__),
-            qualname=resolve_path_proxy.__name__,
+            qualname=resolver_cls.__name__,
             strip_last=True,
         )
 
         current_registry().add_resolver(
             Path,
             cast(Type[Any], x),
-            resolver=resolve_path_proxy,
+            resolver=resolver_cls,
             namespace=default_resolver_namespace,
         )
 
@@ -567,25 +622,6 @@ class ProxyGroup(Proxy, ABC):
         # ProxyGroup does not directly manage the base_path via ARC.
         # Child proxies handle their own reference-counted cleanup.
         pass
-
-
-def estimate_optimal_chunk_size(
-    item_nbytes: Optional[int],
-    target_bytes: int = 32 * 1024 * 1024,
-    default_chunk_size: int = 100,
-) -> int:
-    """Calculate an optimal batch/chunk size targeting a memory footprint (default 32MB).
-
-    If item_nbytes is None or <= 0, returns default_chunk_size.
-    Otherwise returns max(1, target_bytes // item_nbytes).
-    """
-    if item_nbytes is None or item_nbytes <= 0:
-        return default_chunk_size
-
-    chunk_size = target_bytes // item_nbytes
-    if chunk_size < 1:
-        return 1
-    return chunk_size
 
 
 class Output(Generic[T]):

@@ -1,21 +1,13 @@
 from argparse import ArgumentParser
-from dataclasses import dataclass
 from enum import Enum
-from functools import partial
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Dict, Optional, Type
+
+from tqdm import tqdm
 
 import scipion_bridge as B
 from ...core.protocol.protocol_base import Protocol
-
-
-@dataclass
-class ResolvedInput:
-
-    value: Any
-    dtype: type
-    is_path: bool
 
 
 def _convert_to_argname(name: str) -> str:
@@ -26,32 +18,90 @@ def _convert_to_argname(name: str) -> str:
 
 
 class RayPipelineRunner:
+    """Ray pipeline runner for Scipion Bridge protocols.
 
-    def __init__(self, protocol: Protocol) -> None:
+    Precomputes resolvers for protocol inputs upon initialization,
+    and iterates over resolved inputs on execution.
+    """
+
+    def __init__(
+        self,
+        protocol: Protocol,
+        *,
+        origin_types: Optional[Dict[str, Type]] = None,
+        chunk_size: Optional[int] = None,
+        target_bytes: Optional[int] = None,
+    ) -> None:
         self.protocol = protocol
+        self.origin_types = origin_types or {}
+        self.chunk_size = chunk_size
+        self.target_bytes = target_bytes
+        self._input_resolvers: Dict[str, B.ComposedResolver] = {}
 
-    def __call__(self, **kwds: Any):
-        self.run(kwargs=kwds)
+        self._precompute_resolvers()
 
-    def run(self, **kwargs):
-        print("Run protocol here")
+    def _precompute_resolvers(self) -> None:
+        """Precompute ComposedResolver instances for all protocol inputs."""
+        config = self.protocol.configuration
+        for name, field in config.inputs.items():
+            target_type = field.dtype
+            assert isinstance(target_type, type)
+
+            origin_type = self.origin_types.get(name, Path)
+            if origin_type == target_type:
+                continue
+
+            resolver = B.find_resolver(origin_type, target_type)
+            self._input_resolvers[name] = resolver
+
+    @property
+    def input_resolvers(self) -> Dict[str, B.ComposedResolver]:
+        """Return the precomputed input resolvers."""
+        return dict(self._input_resolvers)
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.run(*args, **kwds)
+
+    def run(
+        self,
+        inputs: Optional[Dict[str, Any]] = None,
+        *,
+        chunk_size: Optional[int] = None,
+        target_bytes: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Iterate over the resolved inputs and print the length of each chunk."""
+        all_inputs = dict(inputs or {})
+        all_inputs.update(kwargs)
+
+        effective_chunk_size = chunk_size if chunk_size is not None else self.chunk_size
+        effective_target_bytes = (
+            target_bytes if target_bytes is not None else self.target_bytes
+        )
+
+        for name, raw_value in all_inputs.items():
+            assert name in self._input_resolvers
+
+            resolver = self._input_resolvers[name]
+            for chunk in tqdm(
+                resolver.iter(
+                    raw_value,
+                    chunk_size=effective_chunk_size,
+                    target_bytes=effective_target_bytes,
+                )
+            ):
+                print(len(chunk))
 
     def launch_as_terminal_application(self):
+        """CLI entry point for running the protocol from terminal arguments."""
         parser = ArgumentParser()
         config = self.protocol.configuration
 
-        def _parse_input(val: Any, dtype: type):
-            inputs = Path(val)
-            return ResolvedInput(inputs, dtype=dtype, is_path=True)
-
         for name, field in config.inputs.items():
-            dtype = field.dtype
-            assert isinstance(dtype, type)
-
             parser.add_argument(
                 _convert_to_argname(name),
                 dest=name,
-                type=partial(_parse_input, dtype=dtype),
+                type=Path,
                 required=not field.optional,
                 default=field.default,
                 help=field.help,
@@ -88,7 +138,12 @@ class RayPipelineRunner:
 
         args, unparsed_args = parser.parse_known_args()
 
-        particles: ResolvedInput = args.particles
-        inputs = B.resolve(particles.value, astype=particles.dtype)
+        inputs = {
+            name: val
+            for name in config.inputs
+            if (val := getattr(args, name, None)) is not None
+        }
 
-        print(inputs)
+        self.run(
+            inputs,
+        )
