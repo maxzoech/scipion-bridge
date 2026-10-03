@@ -1,18 +1,25 @@
 from __future__ import annotations
+import abc
+import ast
 import inspect
 import textwrap
-import ast
-import abc
 
 from dataclasses import dataclass
-from itertools import chain
-from typing import Dict, get_type_hints, get_origin, get_args, Any, Type, OrderedDict
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    OrderedDict,
+    Type,
+    TypeVar,
+    cast,
+    get_origin,
+    get_type_hints,
+)
 
 from ..streaming.ops import Op
 from .fields import Field, Input
-
-from ..utils.ast import parse_ast
-from ..utils.type_annotation import has_untyped_class_definitions
 
 
 @dataclass
@@ -32,32 +39,53 @@ class ValidationError(Exception):
     pass
 
 
+FieldT = TypeVar("FieldT", bound=Field)
+
+
+def _bind_field(
+    owner_cls: type,
+    key: str,
+    type_hint: Type[FieldT] | Any,
+) -> tuple[str, FieldT]:
+    field = getattr(owner_cls, key, None)
+    if field is None:
+        bound_field = type_hint(optional=False)
+        bound_field._bound_name = key
+        bound_field.name = key
+        return (
+            key,
+            bound_field,
+        )
+    
+    else:
+        if (
+            getattr(field, "dtype", None) is None
+            and getattr(type_hint, "_dtype", None) is not None
+        ):
+            field._dtype = type_hint._dtype
+        return (
+            key,
+            field,
+        )
+
+
 class Protocol(metaclass=abc.ABCMeta):
 
     _configuration: _ProtocolTypeConfiguration
 
     @property
     def configuration(self) -> ProtocolConfiguration:
-        def _build_fields(source_dict):
-            def _get_item(key, type_hint):
-                field = getattr(type(self), key, None)
-                if field is None:
-                    field = type_hint(optional=False)
-                    field._bound_name = key
-                    field.name = key
-                elif (
-                    getattr(field, "dtype", None) is None
-                    and getattr(type_hint, "_dtype", None) is not None
-                ):
-                    field._dtype = type_hint._dtype
-                return (key, field)
-
-            return OrderedDict(_get_item(k, v) for k, v in source_dict.items())
-
-        inputs = _build_fields(self._configuration.inputs)
-        params = _build_fields(self._configuration.parameters)
-
-        return ProtocolConfiguration(inputs, params)
+        inputs = OrderedDict(
+            _bind_field(type(self), k, v) for k, v in self._configuration.inputs.items()
+        )
+        params = OrderedDict(
+            _bind_field(type(self), k, v)
+            for k, v in self._configuration.parameters.items()
+        )
+        return ProtocolConfiguration(
+            inputs=inputs,
+            parameters=params,
+        )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -73,21 +101,22 @@ class Protocol(metaclass=abc.ABCMeta):
 
     def get_pipeline(self) -> Op:
         """Return the pipeline of operations for this protocol."""
+        output_types = self.outputs()
 
-        def _verify_outputs(outputs: Dict):
+        def _verify_outputs(outputs: Any) -> Dict[str, Any]:
             if not isinstance(outputs, dict):
-                raise ValueError("Pipeline output needs to be a dictionary")
-
-            output_types = self.outputs()
+                raise ValidationError(
+                    f"Protocol steps output must be a dictionary, got {type(outputs).__name__}",
+                )
 
             for key, value in outputs.items():
                 if key not in output_types:
-                    raise ValueError(f"Output '{key}' is not in declared outputs.")
+                    raise ValidationError(f"Output '{key}' is not in declared outputs.")
 
                 if not isinstance(value, output_types[key]):
-                    raise TypeError(
+                    raise ValidationError(
                         f"Type mismatch for output key '{key}': "
-                        f"expected {output_types[key]}, got '{type(value)}' ({value!r})"
+                        f"expected {output_types[key]}, got '{type(value)}' ({value!r})",
                     )
 
             return outputs
@@ -109,56 +138,85 @@ class Protocol(metaclass=abc.ABCMeta):
         pass
 
 
-def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
+def _extract_declaration_order_from_ast(cls: type) -> Optional[List[str]]:
+    """Extract declaration order of annotated attributes from class source AST.
 
-    attributes = get_type_hints(cls)
+    Returns None if source code is not available on disk (e.g. cloudpickle reconstruction,
+    dynamically generated classes, or interactive environments).
+    """
+    try:
+        source = inspect.getsource(cls)
+    except (OSError, TypeError):
+        return None
 
-    source = inspect.getsource(cls)
-    source = textwrap.dedent(source)
+    try:
+        source = textwrap.dedent(source)
+        tree = ast.parse(source)
+    except (SyntaxError, IndentationError):
+        return None
 
-    tree = ast.parse(source)
+    if not tree.body or not isinstance(tree.body[0], ast.ClassDef):
+        return None
+
     class_def = tree.body[0]
-    assert isinstance(class_def, ast.ClassDef), "Protocol must be a class"
-
-    if has_untyped_class_definitions(tree):
-        raise TypeError(
-            f"The protocol {cls.__qualname__} has declared attributes without type annotation."
-        )
-
-    # Check if the user has defined state without a type annotation
-    untyped_assign_ops = [
-        target.id
-        for a in class_def.body
-        if isinstance(a, ast.Assign)
-        for target in a.targets
-        if isinstance(target, ast.Name)
-    ]
-    if len(untyped_assign_ops) > 0:
-        invalid_state_list = ", ".join([f"'{s}'" for s in untyped_assign_ops])
-        raise TypeError(
-            f"The protocol states {invalid_state_list} in {cls.__qualname__} do not have type annotations."
-        )
-
-    # Configure states
-    typed_assign_ops = [
+    return [
         a.target.id
         for a in class_def.body
         if isinstance(a, ast.AnnAssign) and isinstance(a.target, ast.Name)
     ]
 
-    inputs = OrderedDict()
-    parameters = OrderedDict()
-    states = OrderedDict()
-    for name in typed_assign_ops:
-        value = attributes[name]
-        origin = get_origin(value) or getattr(value, "__origin__", None)
 
-        if origin == Input:
-            inputs[name] = value
-        elif origin == Field:
-            parameters[name] = value
-        else:
-            states[name] = value
+def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
+    annotations: Dict[str, Any] = getattr(cls, "__annotations__", {})
+
+    # Detect untyped class attributes (e.g. `state = 42` instead of `state: int = 42`)
+    untyped = [
+        k
+        for k, v in cls.__dict__.items()
+        if not (k.startswith("__") and k.endswith("__"))
+        and not k.startswith("_abc_")
+        and not callable(v)
+        and not isinstance(v, (type, property, classmethod, staticmethod))
+        and k not in annotations
+    ]
+    if untyped:
+        invalid_list = ", ".join(f"'{k}'" for k in untyped)
+        raise TypeError(
+            f"The protocol {cls.__qualname__} has declared attributes without type annotation: {invalid_list}.",
+        )
+
+    match _extract_declaration_order_from_ast(cls):
+        case list() as ast_order:
+            ordered_names = [name for name in ast_order if name in annotations] + [
+                name for name in annotations if name not in ast_order
+            ]
+        case _:
+            ordered_names = list(annotations.keys())
+
+    hints = get_type_hints(cls)
+
+    inputs: OrderedDict[str, Type[Input]] = OrderedDict()
+    parameters: OrderedDict[str, Type[Field]] = OrderedDict()
+    states: OrderedDict[str, Type] = OrderedDict()
+
+    for name in ordered_names:
+        value = hints.get(name, annotations[name])
+        origin = get_origin(value)
+
+        is_input = (isinstance(value, type) and issubclass(value, Input)) or (
+            isinstance(origin, type) and issubclass(origin, Input)
+        )
+        is_field = (isinstance(value, type) and issubclass(value, Field)) or (
+            isinstance(origin, type) and issubclass(origin, Field)
+        )
+
+        match (is_input, is_field):
+            case (True, _):
+                inputs[name] = cast(Type[Input], value)
+            case (_, True):
+                parameters[name] = cast(Type[Field], value)
+            case _:
+                states[name] = value
 
     return _ProtocolTypeConfiguration(
         inputs=inputs,

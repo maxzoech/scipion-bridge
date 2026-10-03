@@ -20,6 +20,10 @@ class CompiledPipeline(abc.ABC):
         """Drain in-flight tasks and finalize sinks."""
         ...
 
+    def close(self) -> None:
+        """Terminate any resources or actors allocated for this pipeline."""
+        pass
+
 
 class StreamingBackendProvider(abc.ABC):
     """Abstract base for streaming execution backends."""

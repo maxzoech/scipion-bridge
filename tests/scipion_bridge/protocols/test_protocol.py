@@ -3,8 +3,6 @@ import pytest
 import scipion_bridge as B
 from scipion_bridge import Protocol
 
-from typing import Any
-
 
 def test_protocol_fields():
     # These should pass
@@ -121,6 +119,69 @@ def test_convert_scipion_to_python_enum_with_protocol_configuration():
     )
 
     assert provider.get_value("color") == Color.GREEN
+
+
+class CloudpickleTestProtocol(Protocol):
+    particles: B.Input[str] = B.Input(label="Input Particles", optional=False)
+    batch_size: B.Field[int] = B.Field(default=100)
+    extra_state: int = 10
+
+    def _compute_latents(self, item: str) -> str:
+        return f"transformed_{item}"
+
+    def outputs(self):
+        return {"output": str}
+
+    def steps(self):
+        return None
+
+
+def test_extract_declaration_order_from_ast():
+    from scipion_bridge.core.protocol.protocol_base import (
+        _extract_declaration_order_from_ast,
+    )
+
+    order = _extract_declaration_order_from_ast(BasicProtocol)
+    assert order == ["path", "magic_number", "param", "param_default", "state"]
+
+    # Class with no source on disk (e.g. built via type)
+    dyn_cls = type("DynamicClass", (object,), {})
+    assert _extract_declaration_order_from_ast(dyn_cls) is None
+
+
+def test_protocol_class_cloudpickle_serialization_main_module():
+    import cloudpickle
+
+    CloudpickleTestProtocol.__module__ = "__main__"
+    data = cloudpickle.dumps(CloudpickleTestProtocol)
+    unpickled_cls = cloudpickle.loads(data)
+
+    assert unpickled_cls is not None
+    assert list(unpickled_cls._configuration.inputs.keys()) == ["particles"]
+    assert list(unpickled_cls._configuration.parameters.keys()) == ["batch_size"]
+    assert list(unpickled_cls._configuration.states.keys()) == ["extra_state"]
+
+
+def test_protocol_instance_and_bound_method_cloudpickle_serialization():
+    import cloudpickle
+
+    CloudpickleTestProtocol.__module__ = "__main__"
+    proto = CloudpickleTestProtocol()
+    proto.extra_state = 999
+
+    inst_data = cloudpickle.dumps(proto)
+    unpickled_inst = cloudpickle.loads(inst_data)
+
+    assert unpickled_inst.extra_state == 999
+    assert list(unpickled_inst.configuration.inputs.keys()) == ["particles"]
+    assert list(unpickled_inst.configuration.parameters.keys()) == ["batch_size"]
+
+    method_data = cloudpickle.dumps(proto._compute_latents)
+    unpickled_method = cloudpickle.loads(method_data)
+
+    assert callable(unpickled_method)
+    assert unpickled_method("sample") == "transformed_sample"
+    assert unpickled_method.__self__.extra_state == 999
 
 
 if __name__ == "__main__":

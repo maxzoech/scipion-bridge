@@ -1,21 +1,13 @@
-from enum import Enum
-from dataclasses import dataclass
+from typing import Any, Optional, TypeVar, overload
 from dependency_injector.wiring import Provide, inject
 
 from ..environment.protocol_config import ProtocolConfigurationProvider
-
-from typing import Generic, TypeVar, Optional, Type, overload, Any
-
-T = TypeVar("T")
-
-FieldSelf = TypeVar("FieldSelf", bound="Field")
-InputSelf = TypeVar("InputSelf", bound="Input")
-
 from ..streaming.ops import Source
 from ..utils.marker import Marker
 
-
-from ...backend.standalone.container import Container
+T = TypeVar("T")
+FieldSelf = TypeVar("FieldSelf", bound="Field")
+InputSelf = TypeVar("InputSelf", bound="Input")
 
 
 class BoundField(Marker[T]):
@@ -48,9 +40,10 @@ class BoundField(Marker[T]):
     def _get_value(
         self,
         config_provider: ProtocolConfigurationProvider = Provide[
-            Container.protocol_config_provider
+            "protocol_config_provider"
         ],
     ) -> T:
+        assert self.name is not None
         return config_provider.get_value(self.name, default=self.default)
 
 

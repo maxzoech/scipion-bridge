@@ -2,7 +2,6 @@ from __future__ import annotations
 from typing import (
     Optional,
     Any,
-    List,
 )
 from dependency_injector.wiring import Provide, inject
 
@@ -23,9 +22,7 @@ class Pipeline:
     def from_sink(
         cls,
         *nodes: Node,
-        backend: Optional[StreamingBackendProvider] = Provide[
-            "streaming_backend"
-        ],
+        backend: Optional[StreamingBackendProvider] = Provide["streaming_backend"],
     ) -> Pipeline:
         """
         Factory method: Lowers the DAG starting from target nodes and compiles
@@ -66,6 +63,10 @@ class Pipeline:
         Flush all stateful operations in the pipeline by sending a FLUSH sentinel to all input sources.
         """
         self._compiled.flush()
+
+    def close(self) -> None:
+        """Terminate backend resources and actors allocated for this pipeline."""
+        self._compiled.close()
 
     def __enter__(self) -> Pipeline:
         return self

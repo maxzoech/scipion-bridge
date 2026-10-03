@@ -193,6 +193,13 @@ def fetch_backend_data():
     # Python's duck typing
 ```
 
+### Use existing abstractions
+For example, do not use magic attributes when there exists a method to
+accomplish the same thing using builtin methods:
+```
+Replace manual getattr(expected, "__origin__", None) with standard, explicit functions from typing: get_origin(value) and get_args(value)
+```
+
 ### Other patterns
 - Annotate the code base with types and implement correct overloads
 - Maximize comprehensions (list, dict, set) in the code.

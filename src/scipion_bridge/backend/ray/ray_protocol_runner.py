@@ -1,13 +1,18 @@
 from argparse import ArgumentParser
+from collections.abc import Sized
 from enum import Enum
+import os
 from pathlib import Path
 import re
-from typing import Any, Dict, Optional, Type
+from typing import Any, Callable, Dict, Optional, Type, Union
 
-from tqdm import tqdm
-
-import scipion_bridge as B
+from ...core.typed.resolve import ComposedResolver, find_resolver
 from ...core.protocol.protocol_base import Protocol
+from ...core.streaming.backend import StreamingBackendProvider
+from ...core.streaming.pipeline import Pipeline
+from ...core.streaming.sink import Sink
+from ...core.streaming.sink_writer import SinkWriter
+from .backend import RayBackend
 
 
 def _convert_to_argname(name: str) -> str:
@@ -17,11 +22,17 @@ def _convert_to_argname(name: str) -> str:
     return f"--{kebab}"
 
 
+def _default_sink_handler(outputs: Dict[str, Any]) -> None:
+    """Default sink handler for compiled Ray pipelines."""
+    pass
+
+
 class RayPipelineRunner:
     """Ray pipeline runner for Scipion Bridge protocols.
 
     Precomputes resolvers for protocol inputs upon initialization,
-    and iterates over resolved inputs on execution.
+    compiles the protocol streaming DAG into a Ray pipeline,
+    and executes it on input chunks.
     """
 
     def __init__(
@@ -29,16 +40,16 @@ class RayPipelineRunner:
         protocol: Protocol,
         *,
         origin_types: Optional[Dict[str, Type]] = None,
-        chunk_size: Optional[int] = None,
-        target_bytes: Optional[int] = None,
+        sink: Optional[Union[Sink, SinkWriter, Callable[[Any], Any]]] = None,
     ) -> None:
         self.protocol = protocol
         self.origin_types = origin_types or {}
-        self.chunk_size = chunk_size
-        self.target_bytes = target_bytes
-        self._input_resolvers: Dict[str, B.ComposedResolver] = {}
+        self.backend = RayBackend()
+        self.sink = sink
+        self._input_resolvers: Dict[str, ComposedResolver] = {}
 
         self._precompute_resolvers()
+        self._pipeline: Pipeline = self._compile_pipeline()
 
     def _precompute_resolvers(self) -> None:
         """Precompute ComposedResolver instances for all protocol inputs."""
@@ -51,11 +62,39 @@ class RayPipelineRunner:
             if origin_type == target_type:
                 continue
 
-            resolver = B.find_resolver(origin_type, target_type)
+            resolver = find_resolver(
+                origin_type,
+                target_type,
+            )
             self._input_resolvers[name] = resolver
 
+    def _compile_pipeline(self) -> Pipeline:
+        """Compile protocol streaming DAG into an executable Ray pipeline."""
+        steps = self.protocol.get_pipeline()
+
+        sink_node = (
+            self.sink
+            if isinstance(self.sink, Sink)
+            else Sink(
+                self.sink or _default_sink_handler,
+            )
+        )
+        steps.op(
+            sink_node,
+        )
+
+        return Pipeline.from_sink(
+            sink_node,
+            backend=self.backend,
+        )
+
     @property
-    def input_resolvers(self) -> Dict[str, B.ComposedResolver]:
+    def pipeline(self) -> Pipeline:
+        """Return the compiled streaming Pipeline."""
+        return self._pipeline
+
+    @property
+    def input_resolvers(self) -> Dict[str, ComposedResolver]:
         """Return the precomputed input resolvers."""
         return dict(self._input_resolvers)
 
@@ -65,36 +104,65 @@ class RayPipelineRunner:
     def run(
         self,
         inputs: Optional[Dict[str, Any]] = None,
-        *,
-        chunk_size: Optional[int] = None,
-        target_bytes: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
-        """Iterate over the resolved inputs and print the length of each chunk."""
+        """Iterate over resolved inputs in lockstep interleaving and execute the compiled streaming pipeline."""
         all_inputs = dict(inputs or {})
         all_inputs.update(kwargs)
 
-        effective_chunk_size = chunk_size if chunk_size is not None else self.chunk_size
-        effective_target_bytes = (
-            target_bytes if target_bytes is not None else self.target_bytes
+        env_chunk_size = (
+            int(os.environ["SCIPION_CHUNK_SIZE"])
+            if "SCIPION_CHUNK_SIZE" in os.environ
+            else None
+        )
+        env_target_bytes = (
+            int(os.environ["SCIPION_TARGET_BYTE_SIZE"])
+            if "SCIPION_TARGET_BYTE_SIZE" in os.environ
+            else None
         )
 
-        for name, raw_value in all_inputs.items():
-            assert name in self._input_resolvers
+        _DONE = object()
 
-            resolver = self._input_resolvers[name]
-            for chunk in tqdm(
-                resolver.iter(
-                    raw_value,
-                    chunk_size=effective_chunk_size,
-                    target_bytes=effective_target_bytes,
-                )
-            ):
-                print(len(chunk))
+        active_iterators = {
+            name: self._input_resolvers[name].iter(
+                raw_value,
+                chunk_size=env_chunk_size,
+                target_bytes=env_target_bytes,
+            )
+            for name, raw_value in all_inputs.items()
+            if name in self._input_resolvers
+        }
+
+        with self._pipeline:
+            while active_iterators:
+                for name in list(active_iterators.keys()):
+                    chunk = next(
+                        active_iterators[name],
+                        _DONE,
+                    )
+                    if chunk is _DONE:
+                        del active_iterators[name]
+                        continue
+
+                    assert isinstance(chunk, Sized)
+                    print(len(chunk))
+                    self._pipeline.send(
+                        **{name: chunk},
+                    )
+
+    def close(self) -> None:
+        """Terminate all actors allocated for the pipeline."""
+        self._pipeline.close()
+
+    def __enter__(self) -> "RayPipelineRunner":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
     def launch_as_terminal_application(self):
         """CLI entry point for running the protocol from terminal arguments."""
-        parser = ArgumentParser()
+        parser = ArgumentParser(description=self.protocol.__doc__)
         config = self.protocol.configuration
 
         for name, field in config.inputs.items():

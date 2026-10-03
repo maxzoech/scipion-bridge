@@ -1,24 +1,15 @@
-import os
-import sys
-import re
-from dataclasses import dataclass
-from subprocess import Popen, PIPE
-from dependency_injector import containers, providers
+import ast
+import functools
+import inspect
+import itertools
+from subprocess import PIPE
+import textwrap
+from typing import Any, Callable, Dict, Optional, Protocol, Set, TypeVar, overload
+
 from dependency_injector.wiring import Provide, inject
 
-from ...backend.standalone.container import Container
 from ..environment.cmd_exec import ShellExecProvider
 from ..environment.domain import Domain
-
-import ast
-import inspect
-import textwrap
-from typing import Dict, Any, Callable, Optional, Set, List, Protocol, TypeVar, overload
-
-import itertools
-import functools
-from functools import partial
-
 from .func_params import extract_func_params
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -192,7 +183,7 @@ def _shell_command_wrapper(
     @inject
     def wrapper(
         *args,
-        __scipion_bridge_runner__: ShellExecProvider = Provide[Container.shell_exec],
+        __scipion_bridge_runner__: ShellExecProvider = Provide["shell_exec"],
         **kwargs,
     ):
         _ = f(
