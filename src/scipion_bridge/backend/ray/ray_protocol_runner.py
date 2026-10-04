@@ -1,9 +1,11 @@
 from argparse import ArgumentParser
+from argparse import ArgumentParser, BooleanOptionalAction
 from collections.abc import Sized
 from enum import Enum
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable, Dict, Optional, Type, Union
 
 from ...core.typed.resolve import ComposedResolver, find_resolver
@@ -133,6 +135,10 @@ class RayPipelineRunner:
             if name in self._input_resolvers
         }
 
+        t_start = time.perf_counter()
+        total_chunks = 0
+        total_items = 0
+
         with self._pipeline:
             while active_iterators:
                 for name in list(active_iterators.keys()):
@@ -145,10 +151,21 @@ class RayPipelineRunner:
                         continue
 
                     assert isinstance(chunk, Sized)
-                    print(len(chunk))
+
+                    total_chunks += 1
+                    total_items += len(chunk)
+
                     self._pipeline.send(
                         **{name: chunk},
                     )
+
+        elapsed = time.perf_counter() - t_start
+        throughput = total_items / elapsed if elapsed > 0 else 0.0
+        print(
+            f"Pipeline complete in {elapsed:.2f}s "
+            f"({total_chunks} chunks, {total_items} items, "
+            f"{throughput:.1f} items/s)",
+        )
 
     def close(self) -> None:
         """Terminate all actors allocated for the pipeline."""
@@ -194,6 +211,7 @@ class RayPipelineRunner:
                     kwargs["action"] = (
                         "store_true" if not field.default else "store_false"
                     )
+                    kwargs["action"] = BooleanOptionalAction
                     kwargs.pop("required", None)
 
                 case _:

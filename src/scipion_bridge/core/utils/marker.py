@@ -1,3 +1,4 @@
+from abc import ABCMeta
 import types
 from typing import (
     Any,
@@ -7,13 +8,65 @@ from typing import (
     Tuple,
     TypeVar,
     get_args,
+    get_origin,
     get_type_hints,
 )
 
 T = TypeVar("T")
 
 
-class Marker(Generic[T]):
+import importlib
+import copyreg
+import cloudpickle
+
+def _lookup_marker_class(module_name: str, qualname: str) -> type:
+    mod = importlib.import_module(module_name)
+    return getattr(mod, qualname)
+
+
+def _rebuild_generic_marker(origin: type, params: Any) -> type:
+    return origin[params]  # type: ignore
+
+
+def _reduce_marker_meta(obj: type) -> Tuple[Any, Tuple[Any, ...]]:
+    origin = get_origin(obj)
+    args = get_args(obj)
+
+    if origin is not None and args:
+        params = args[0] if len(args) == 1 else args
+        return _rebuild_generic_marker, (origin, params)
+    
+    return _lookup_marker_class, (obj.__module__, obj.__qualname__)
+
+
+class MarkerMeta(ABCMeta):
+    """Metaclass ensuring generic Marker subclasses serialize and deserialize by reference."""
+
+    def __reduce__(cls):
+        return _reduce_marker_meta(cls)
+
+
+# Register with standard Python pickle / copyreg
+copyreg.pickle(MarkerMeta, _reduce_marker_meta)
+
+# Hook into cloudpickle class reduction to prevent dynamic class re-creation
+_orig_cloudpickle_class_reduce = cloudpickle.cloudpickle._class_reduce
+
+
+def _scipion_cloudpickle_class_reduce(obj: Any) -> Any:
+    if isinstance(type(obj), MarkerMeta) or issubclass(type(obj), MarkerMeta):
+        origin = getattr(obj, "__origin__", None)
+        args = getattr(obj, "__args__", None)
+        if origin is not None and args:
+            params = args[0] if len(args) == 1 else args
+            return _rebuild_generic_marker, (origin, params)
+    return _orig_cloudpickle_class_reduce(obj)
+
+
+cloudpickle.cloudpickle._class_reduce = _scipion_cloudpickle_class_reduce
+
+
+class Marker(Generic[T], metaclass=MarkerMeta):
     """Generic base class supporting static typing and runtime annotation introspection."""
 
     _dtype: Optional[Any] = None
@@ -62,7 +115,7 @@ class Marker(Generic[T]):
         param_names = ", ".join(getattr(t, "__name__", str(t)) for t in type_args)
         new_cls_name = f"{cls.__name__}[{param_names}]"
 
-        new_cls = type(
+        new_cls = MarkerMeta(
             new_cls_name,
             (cls,),
             {

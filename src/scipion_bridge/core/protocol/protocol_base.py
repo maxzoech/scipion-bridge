@@ -119,10 +119,22 @@ class Protocol(metaclass=abc.ABCMeta):
                 if key not in output_types:
                     raise ValidationError(f"Output '{key}' is not in declared outputs.")
 
-                if not isinstance(value, output_types[key]):
+                expected_type = output_types[key]
+                origin = get_origin(expected_type) or expected_type
+                origin = get_origin(expected_type) or expected_type
+
+                if not isinstance(value, origin):
                     raise ValidationError(
                         f"Type mismatch for output key '{key}': "
-                        f"expected {output_types[key]}, got '{type(value)}' ({value!r})",
+                        f"expected {expected_type}, got '{type(value)}' ({value!r})",
+                    )
+
+                expected_dtype = getattr(expected_type, "_dtype", None)
+                actual_dtype = getattr(value, "dtype", getattr(value, "_dtype", None))
+                if expected_dtype is not None and actual_dtype != expected_dtype:
+                    raise ValidationError(
+                        f"Type argument mismatch for output key '{key}': "
+                        f"expected dtype '{expected_dtype}', got '{actual_dtype}'",
                     )
 
             return outputs

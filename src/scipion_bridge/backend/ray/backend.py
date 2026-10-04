@@ -48,7 +48,6 @@ class RaySourceActor:
 class RayWorkerActor:
     """
     Ray actor representing a transformation stage (IRMap) in the streaming pipeline.
-    Applies func(item) and pushes the result directly to downstream actors.
     """
 
     def __init__(self, func: Callable[[Any], Any]):
@@ -63,11 +62,12 @@ class RayWorkerActor:
         self._downstream = handles
 
     async def push(self, item: Any) -> None:
-        """Process an item and forward result or sentinel to downstream actors."""
-        if isinstance(item, FlushSignal):
-            out = item
-        else:
-            out = self.func(item)
+        """Process incoming item or forward FlushSignal to downstream actors."""
+        match item:
+            case FlushSignal():
+                out = item
+            case _:
+                out = await asyncio.to_thread(self.func, item)
 
         if self._downstream:
             futures = [handle.push.remote(out) for handle in self._downstream]
@@ -149,9 +149,14 @@ class RayBackend(StreamingBackendProvider):
                 dict.fromkeys(extra_paths + [os.path.abspath(p) for p in sys.path if p])
             )
             python_path = ":".join(all_paths)
+
             ray.init(
                 ignore_reinit_error=True,
-                runtime_env={"env_vars": {"PYTHONPATH": python_path}},
+                runtime_env={
+                    "env_vars": {
+                        "PYTHONPATH": python_path,
+                    },
+                },
             )
 
     def compile(self, ir_sinks: List[IROp]) -> RayCompiledPipeline:

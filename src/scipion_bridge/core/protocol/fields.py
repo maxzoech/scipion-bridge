@@ -207,7 +207,7 @@ class Resource(Marker[T]):
     def __get__(self, instance: Any, owner: Any) -> Any:
         if instance is None:
             return self
-        
+
         return self._get_resource(instance)
 
     @inject
@@ -220,6 +220,7 @@ class Resource(Marker[T]):
 
         if not isinstance(provider, ResourceProvider):
             raise NotImplementedError(f"Resources are not supported by this backend.")
+            return self.builder(instance)
 
         return provider.get_resource(
             self.name,

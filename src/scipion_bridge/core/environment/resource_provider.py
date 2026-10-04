@@ -57,7 +57,7 @@ class DefaultResourceProvider(ResourceProvider):
                         raise TypeError(
                             f"Resource '{name}' expected type {dtype}, got {type(res)}."
                         )
-                    
+
                     self._cache[key] = res
 
         return self._cache[key]

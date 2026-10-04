@@ -67,8 +67,8 @@ def test_ray_protocol_runner_precomputation():
     assert any(step.requires_slice for step in resolver.steps)
 
 
-def test_ray_protocol_runner_hot_path_zero_dijkstra(tmp_path, capsys, monkeypatch):
-    """Verify that no Dijkstra pathfinding occurs on the hot streaming execution path and lengths are printed."""
+def test_ray_protocol_runner_hot_path_zero_dijkstra(tmp_path, monkeypatch):
+    """Verify that no Dijkstra pathfinding occurs on the hot streaming execution path."""
     monkeypatch.setenv("SCIPION_CHUNK_SIZE", "2")
     star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
     proto = StreamingParticleProtocol()
@@ -88,22 +88,26 @@ def test_ray_protocol_runner_hot_path_zero_dijkstra(tmp_path, capsys, monkeypatc
         # Dijkstra pathfinding must NOT be called again on the hot path
         assert mock_dijkstra.call_count == precompute_call_count
 
-    captured = capsys.readouterr()
-    assert captured.out == "2\n2\n"
 
-
-def test_ray_protocol_runner_iter_prints_lengths(tmp_path, capsys, monkeypatch):
-    """Verify that runner iterates over chunks of the resolved Set and prints each length."""
+def test_ray_protocol_runner_iter_chunk_sizes(tmp_path, monkeypatch):
+    """Verify that runner iterates over chunks of the resolved Set and pushes correct chunk sizes."""
     monkeypatch.setenv("SCIPION_CHUNK_SIZE", "3")
     star_path, _ = _create_sample_particles(tmp_path, n_particles=10)
     proto = StreamingParticleProtocol()
     runner = RayPipelineRunner(proto)
 
+    chunk_sizes = []
+    original_send = runner.pipeline.send
+
+    def _spy_send(**kwargs):
+        chunk_sizes.append(len(kwargs["particles"]))
+        original_send(**kwargs)
+
+    runner.pipeline.send = _spy_send
     runner.run(particles=star_path)
 
-    captured = capsys.readouterr()
     # 10 particles with chunk_size 3 yields chunks of 3, 3, 3, 1
-    assert captured.out == "3\n3\n3\n1\n"
+    assert chunk_sizes == [3, 3, 3, 1]
 
 
 def test_ray_pipeline_runner_compiles_pipeline():
