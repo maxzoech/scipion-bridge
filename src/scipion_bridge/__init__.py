@@ -25,6 +25,11 @@ from .core.utils.shell import shell_command
 
 from .core import protocol
 from .core.protocol import Protocol, Field, Input
+from .core.protocol import Protocol, Field, Input, Resource
+from .core.environment.resource_provider import (
+    ResourceProvider,
+    DefaultResourceProvider,
+)
 
 from .core import struct
 from .core.struct import Struct, Set, Collection, concat, Array, Arg, Dim
@@ -61,6 +66,9 @@ __all__ = [
     "Protocol",
     "Field",
     "Input",
+    "Resource",
+    "ResourceProvider",
+    "DefaultResourceProvider",
     "struct",
     "Struct",
     "Set",

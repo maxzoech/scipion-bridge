@@ -184,5 +184,94 @@ def test_protocol_instance_and_bound_method_cloudpickle_serialization():
     assert unpickled_method.__self__.extra_state == 999
 
 
+class ResourceTestProtocol(Protocol):
+    param: B.Field[int] = B.Field(default=10)
+    model: B.Resource[dict] = B.Resource(
+        builder=lambda self: {"loaded_with": self.param.default},
+    )
+
+    def outputs(self):
+        return {}
+
+    def steps(self):
+        pass
+
+
+def test_protocol_resource_declaration_and_lazy_caching():
+    proto = ResourceTestProtocol()
+    config = proto.configuration
+
+    assert "model" in config.resources
+    assert isinstance(config.resources["model"], B.Resource)
+    # Class-level access returns descriptor
+    assert isinstance(ResourceTestProtocol.model, B.Resource)
+
+    # First access builds resource
+    res1 = proto.model
+    assert res1 == {"loaded_with": 10}
+
+    # Second access returns cached object
+    res2 = proto.model
+    assert res1 is res2
+
+
+def test_protocol_resource_missing_builder_raises():
+    with pytest.raises(
+        TypeError,
+        match="The protocol resource 'missing_model' .* must be assigned a Resource instance with a builder callable.",
+    ):
+
+        class InvalidResourceProtocol(Protocol):
+            missing_model: B.Resource[dict]
+
+            def outputs(self):
+                return {}
+
+            def steps(self):
+                pass
+
+
+def test_protocol_resource_non_callable_builder_raises():
+    with pytest.raises(TypeError, match="Resource builder must be a callable."):
+        B.Resource(builder="not_callable")
+
+
+def test_protocol_resource_read_only_enforcement():
+    proto = ResourceTestProtocol()
+    with pytest.raises(
+        AttributeError, match="Resource 'model' is read-only and cannot be modified."
+    ):
+        proto.model = {"new": "model"}
+
+
+def test_protocol_resource_builder_called_exactly_once():
+    call_count = 0
+
+    def mock_builder(proto_instance):
+        nonlocal call_count
+        call_count += 1
+        return f"model_v{call_count}"
+
+    class CountedResourceProtocol(Protocol):
+        heavy_net: B.Resource[str] = B.Resource(builder=mock_builder)
+
+        def outputs(self):
+            return {}
+
+        def steps(self):
+            pass
+
+    proto = CountedResourceProtocol()
+    assert call_count == 0
+
+    assert proto.heavy_net == "model_v1"
+    assert call_count == 1
+
+    # Multiple subsequent accesses do not call builder again
+    for _ in range(5):
+        assert proto.heavy_net == "model_v1"
+    assert call_count == 1
+
+
 if __name__ == "__main__":
     test_create_protocol()

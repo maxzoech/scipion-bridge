@@ -1,7 +1,9 @@
 from typing import Any, Optional, TypeVar, overload
+from typing import Any, Callable, Optional, TypeVar, overload
 from dependency_injector.wiring import Provide, inject
 
 from ..environment.protocol_config import ProtocolConfigurationProvider
+from ..environment.resource_provider import ResourceProvider
 from ..streaming.ops import Source
 from ..utils.marker import Marker
 
@@ -172,4 +174,61 @@ class Input(Field[T]):
             optional=self.optional,
             label=self.label,
             help=self.help,
+        )
+
+
+ResourceSelf = TypeVar("ResourceSelf", bound="Resource")
+
+
+class Resource(Marker[T]):
+    """Marker and descriptor for actor-scoped protocol resources."""
+
+    def __set_name__(self, owner: Any, name: str) -> None:
+        self._bound_name = name
+        self.name = name
+        super().__set_name__(owner, name)
+
+    def __init__(
+        self,
+        *,
+        builder: Callable[[Any], T],
+        dtype: Optional[Any] = None,
+    ):
+        Marker.__init__(self, dtype=dtype)
+        if not callable(builder):
+            raise TypeError("Resource builder must be a callable.")
+        self.builder = builder
+        self.name: Optional[str] = None
+
+    @overload
+    def __get__(self: ResourceSelf, instance: None, owner: Any) -> ResourceSelf: ...
+
+    @overload
+    def __get__(self, instance: Any, owner: Any) -> T: ...
+
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            return self
+        return self._get_resource(instance)
+
+    @inject
+    def _get_resource(
+        self,
+        instance: Any,
+        provider: ResourceProvider = Provide["resource_provider"],
+    ) -> T:
+        assert self.name is not None
+
+        if not isinstance(provider, ResourceProvider):
+            raise NotImplementedError(f"Resources are not supported by this backend.")
+
+        return provider.get_resource(
+            self.name,
+            self.builder,
+            instance,
+        )
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        raise AttributeError(
+            f"Resource '{self.name}' is read-only and cannot be modified."
         )

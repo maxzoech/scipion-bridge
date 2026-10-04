@@ -1,5 +1,6 @@
 from enum import Enum
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
@@ -266,3 +267,60 @@ def test_ray_pipeline_runner_with_bound_method_and_main_module(tmp_path, monkeyp
     proto = MainModuleBoundMethodProtocol()
     runner = RayPipelineRunner(proto)
     runner.run(particles=star_path)
+
+
+@ray.remote
+class BuilderTracker:
+    def __init__(self):
+        self.call_count = 0
+
+    def increment(self):
+        self.call_count += 1
+        return self.call_count
+
+    def get_count(self):
+        return self.call_count
+
+
+class RayResourceProtocol(Protocol):
+    particles: B.Input[B.Set[Particle]] = B.Input(
+        label="Input Particles",
+        optional=False,
+    )
+
+    tracker_handle: Any = None
+    model: B.Resource[dict] = B.Resource(
+        builder=lambda self: {
+            "builder_run": ray.get(self.tracker_handle.increment.remote())
+        },
+    )
+
+    def _infer(self, particles: B.Set[Particle]):
+        model_info = self.model
+        assert model_info["builder_run"] == 1
+        return {"output": particles}
+
+    def outputs(self):
+        return {"output": B.Set[Particle]}
+
+    def steps(self):
+        return self.particles.map(self._infer)
+
+
+def test_ray_pipeline_runner_with_resource(tmp_path, monkeypatch):
+    """Verify that Resource builder runs lazily inside the Ray worker actor exactly once across streaming chunks."""
+    monkeypatch.setenv("SCIPION_CHUNK_SIZE", "2")
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=6)
+
+    tracker = BuilderTracker.remote()
+    proto = RayResourceProtocol()
+    proto.tracker_handle = tracker
+
+    # Before running: builder has not run
+    assert ray.get(tracker.get_count.remote()) == 0
+
+    runner = RayPipelineRunner(proto)
+    runner.run(particles=star_path)
+
+    # After streaming 3 chunks of 2 particles: builder was called exactly once in worker actor
+    assert ray.get(tracker.get_count.remote()) == 1

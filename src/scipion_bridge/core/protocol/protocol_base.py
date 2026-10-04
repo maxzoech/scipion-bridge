@@ -20,12 +20,14 @@ from typing import (
 
 from ..streaming.ops import Op
 from .fields import Field, Input
+from .fields import Field, Input, Resource
 
 
 @dataclass
 class _ProtocolTypeConfiguration:
     inputs: OrderedDict[str, Type[Input]]
     parameters: OrderedDict[str, Type[Field]]
+    resources: OrderedDict[str, Type[Resource]]
     states: OrderedDict[str, Type]
 
 
@@ -33,6 +35,7 @@ class _ProtocolTypeConfiguration:
 class ProtocolConfiguration:
     inputs: OrderedDict[str, Input]
     parameters: OrderedDict[str, Field]
+    resources: OrderedDict[str, Resource]
 
 
 class ValidationError(Exception):
@@ -56,7 +59,7 @@ def _bind_field(
             key,
             bound_field,
         )
-    
+
     else:
         if (
             getattr(field, "dtype", None) is None
@@ -82,9 +85,13 @@ class Protocol(metaclass=abc.ABCMeta):
             _bind_field(type(self), k, v)
             for k, v in self._configuration.parameters.items()
         )
+        resources = OrderedDict(
+            (k, getattr(type(self), k)) for k in self._configuration.resources
+        )
         return ProtocolConfiguration(
             inputs=inputs,
             parameters=params,
+            resources=resources,
         )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -197,7 +204,14 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
 
     inputs: OrderedDict[str, Type[Input]] = OrderedDict()
     parameters: OrderedDict[str, Type[Field]] = OrderedDict()
+    resources: OrderedDict[str, Type[Resource]] = OrderedDict()
     states: OrderedDict[str, Type] = OrderedDict()
+
+    def _is_type_or_origin_subclass(val: Any, target_type: type) -> bool:
+        origin = get_origin(val)
+        return (isinstance(val, type) and issubclass(val, target_type)) or (
+            isinstance(origin, type) and issubclass(origin, target_type)
+        )
 
     for name in ordered_names:
         value = hints.get(name, annotations[name])
@@ -209,6 +223,23 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
         is_field = (isinstance(value, type) and issubclass(value, Field)) or (
             isinstance(origin, type) and issubclass(origin, Field)
         )
+        if _is_type_or_origin_subclass(value, Input):
+            inputs[name] = cast(Type[Input], value)
+
+        elif _is_type_or_origin_subclass(value, Field):
+            parameters[name] = cast(Type[Field], value)
+
+        elif _is_type_or_origin_subclass(value, Resource):
+            field_obj = getattr(cls, name, None)
+
+            if not isinstance(field_obj, Resource) or field_obj.builder is None:
+                raise TypeError(
+                    f"The protocol resource '{name}' in {cls.__qualname__} must be assigned a Resource instance with a builder callable.",
+                )
+            
+            resources[name] = cast(Type[Resource], value)
+        else:
+            states[name] = value
 
         match (is_input, is_field):
             case (True, _):
@@ -221,5 +252,6 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
     return _ProtocolTypeConfiguration(
         inputs=inputs,
         parameters=parameters,
+        resources=resources,
         states=states,
     )
