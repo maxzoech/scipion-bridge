@@ -273,5 +273,63 @@ def test_protocol_resource_builder_called_exactly_once():
     assert call_count == 1
 
 
+def test_protocol_resource_dtype_validation():
+    class ValidDtypeProtocol(Protocol):
+        data: B.Resource[dict] = B.Resource(
+            builder=lambda self: {"k": "v"},
+            dtype=dict,
+        )
+
+        def outputs(self):
+            return {}
+
+        def steps(self):
+            pass
+
+    proto = ValidDtypeProtocol()
+    assert proto.data == {"k": "v"}
+
+    class InvalidDtypeProtocol(Protocol):
+        data: B.Resource[dict] = B.Resource(
+            builder=lambda self: "string_instead_of_dict",
+            dtype=dict,
+        )
+
+        def outputs(self):
+            return {}
+
+        def steps(self):
+            pass
+
+    proto_invalid = InvalidDtypeProtocol()
+    with pytest.raises(
+        TypeError,
+        match="Resource 'data' expected type <class 'dict'>, got <class 'str'>.",
+    ):
+        _ = proto_invalid.data
+
+
+def test_protocol_resource_scopes_standalone():
+    class MultiScopeProtocol(Protocol):
+        proc_res: B.Resource[str] = B.Resource(
+            builder=lambda self: "process_local",
+            scope=B.ResourceScope.PROCESS,
+        )
+        shared_res: B.Resource[str] = B.Resource(
+            builder=lambda self: "cluster_shared",
+            scope=B.ResourceScope.SHARED,
+        )
+
+        def outputs(self):
+            return {}
+
+        def steps(self):
+            pass
+
+    proto = MultiScopeProtocol()
+    assert proto.proc_res == "process_local"
+    assert proto.shared_res == "cluster_shared"
+
+
 if __name__ == "__main__":
     test_create_protocol()

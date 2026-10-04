@@ -1,8 +1,8 @@
-from __future__ import annotations
 import abc
 import ast
 import inspect
 import textwrap
+import uuid
 
 from dataclasses import dataclass
 from typing import (
@@ -19,7 +19,6 @@ from typing import (
 )
 
 from ..streaming.ops import Op
-from .fields import Field, Input
 from .fields import Field, Input, Resource
 
 
@@ -99,8 +98,8 @@ class Protocol(metaclass=abc.ABCMeta):
 
         cls._configuration = _create_protocol_info(cls)
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, protocol_id: Optional[str] = None) -> None:
+        self.protocol_id: str = protocol_id or uuid.uuid4().hex
 
     def setup(self):
         """Optional setup method for protocol initialization."""
@@ -236,7 +235,7 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
                 raise TypeError(
                     f"The protocol resource '{name}' in {cls.__qualname__} must be assigned a Resource instance with a builder callable.",
                 )
-            
+
             resources[name] = cast(Type[Resource], value)
         else:
             states[name] = value

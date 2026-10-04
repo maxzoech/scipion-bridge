@@ -1,9 +1,8 @@
-from typing import Any, Optional, TypeVar, overload
-from typing import Any, Callable, Optional, TypeVar, overload
+from typing import Any, Callable, Optional, TypeVar, overload, Self
 from dependency_injector.wiring import Provide, inject
 
 from ..environment.protocol_config import ProtocolConfigurationProvider
-from ..environment.resource_provider import ResourceProvider
+from ..environment.resource_provider import ResourceProvider, ResourceScope
 from ..streaming.ops import Source
 from ..utils.marker import Marker
 
@@ -177,9 +176,6 @@ class Input(Field[T]):
         )
 
 
-ResourceSelf = TypeVar("ResourceSelf", bound="Resource")
-
-
 class Resource(Marker[T]):
     """Marker and descriptor for actor-scoped protocol resources."""
 
@@ -192,16 +188,18 @@ class Resource(Marker[T]):
         self,
         *,
         builder: Callable[[Any], T],
+        scope: ResourceScope = ResourceScope.PROCESS,
         dtype: Optional[Any] = None,
     ):
         Marker.__init__(self, dtype=dtype)
         if not callable(builder):
             raise TypeError("Resource builder must be a callable.")
         self.builder = builder
+        self.scope = scope
         self.name: Optional[str] = None
 
     @overload
-    def __get__(self: ResourceSelf, instance: None, owner: Any) -> ResourceSelf: ...
+    def __get__(self: Self, instance: None, owner: Any) -> Self: ...
 
     @overload
     def __get__(self, instance: Any, owner: Any) -> T: ...
@@ -209,6 +207,7 @@ class Resource(Marker[T]):
     def __get__(self, instance: Any, owner: Any) -> Any:
         if instance is None:
             return self
+        
         return self._get_resource(instance)
 
     @inject
@@ -226,6 +225,8 @@ class Resource(Marker[T]):
             self.name,
             self.builder,
             instance,
+            scope=self.scope,
+            dtype=self.dtype,
         )
 
     def __set__(self, instance: Any, value: Any) -> None:

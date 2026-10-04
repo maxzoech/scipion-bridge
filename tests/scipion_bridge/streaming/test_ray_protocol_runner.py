@@ -324,3 +324,100 @@ def test_ray_pipeline_runner_with_resource(tmp_path, monkeypatch):
 
     # After streaming 3 chunks of 2 particles: builder was called exactly once in worker actor
     assert ray.get(tracker.get_count.remote()) == 1
+
+
+class RaySharedResourceMultiWorkerProtocol(Protocol):
+    particles: B.Input[B.Set[Particle]] = B.Input(
+        label="Input Particles",
+        optional=False,
+    )
+
+    tracker_handle: Any = None
+    shared_volume: B.Resource[np.ndarray] = B.Resource(
+        builder=lambda self: (
+            ray.get(self.tracker_handle.increment.remote()),
+            np.ones((10, 10), dtype=np.float32),
+        )[1],
+        scope=B.ResourceScope.SHARED,
+        dtype=np.ndarray,
+    )
+
+    def _step1(self, particles: B.Set[Particle]):
+        vol = self.shared_volume
+        assert isinstance(vol, np.ndarray)
+        assert vol.shape == (10, 10)
+        return particles
+
+    def _step2(self, particles: B.Set[Particle]):
+        vol = self.shared_volume
+        assert isinstance(vol, np.ndarray)
+        assert vol.shape == (10, 10)
+        return {"output": particles}
+
+    def outputs(self):
+        return {"output": B.Set[Particle]}
+
+    def steps(self):
+        return self.particles.map(self._step1).map(self._step2)
+
+
+def test_ray_pipeline_runner_with_shared_resource_multi_worker(tmp_path, monkeypatch):
+    """Verify that a SHARED resource is built exactly once even across multiple worker actors."""
+    monkeypatch.setenv("SCIPION_CHUNK_SIZE", "2")
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=6)
+
+    tracker = BuilderTracker.remote()
+    proto = RaySharedResourceMultiWorkerProtocol()
+    proto.tracker_handle = tracker
+
+    assert ray.get(tracker.get_count.remote()) == 0
+
+    runner = RayPipelineRunner(proto)
+    runner.run(particles=star_path)
+
+    # Despite 2 distinct worker actors (step1 and step2) processing 3 chunks each,
+    # the SHARED resource builder ran exactly once across the entire cluster!
+    assert ray.get(tracker.get_count.remote()) == 1
+
+
+class RayProcessResourceMultiWorkerProtocol(Protocol):
+    particles: B.Input[B.Set[Particle]] = B.Input(
+        label="Input Particles",
+        optional=False,
+    )
+
+    tracker_handle: Any = None
+    process_res: B.Resource[dict] = B.Resource(
+        builder=lambda self: {"val": ray.get(self.tracker_handle.increment.remote())},
+        scope=B.ResourceScope.PROCESS,
+    )
+
+    def _step1(self, particles: B.Set[Particle]):
+        _ = self.process_res
+        return particles
+
+    def _step2(self, particles: B.Set[Particle]):
+        _ = self.process_res
+        return {"output": particles}
+
+    def outputs(self):
+        return {"output": B.Set[Particle]}
+
+    def steps(self):
+        return self.particles.map(self._step1).map(self._step2)
+
+
+def test_ray_pipeline_runner_with_process_resource_multi_worker(tmp_path, monkeypatch):
+    """Verify that a PROCESS resource runs once per worker actor process (2 times for 2 actors)."""
+    monkeypatch.setenv("SCIPION_CHUNK_SIZE", "2")
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=6)
+
+    tracker = BuilderTracker.remote()
+    proto = RayProcessResourceMultiWorkerProtocol()
+    proto.tracker_handle = tracker
+
+    runner = RayPipelineRunner(proto)
+    runner.run(particles=star_path)
+
+    # 2 distinct worker actors each initialize their own process-local copy:
+    assert ray.get(tracker.get_count.remote()) == 2

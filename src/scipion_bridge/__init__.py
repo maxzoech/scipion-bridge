@@ -26,6 +26,7 @@ from .core.utils.shell import shell_command
 from .core import protocol
 from .core.protocol import Protocol, Field, Input
 from .core.protocol import Protocol, Field, Input, Resource
+from .core.protocol import Protocol, Field, Input, Resource, ResourceScope
 from .core.environment.resource_provider import (
     ResourceProvider,
     DefaultResourceProvider,
@@ -67,6 +68,7 @@ __all__ = [
     "Field",
     "Input",
     "Resource",
+    "ResourceScope",
     "ResourceProvider",
     "DefaultResourceProvider",
     "struct",
