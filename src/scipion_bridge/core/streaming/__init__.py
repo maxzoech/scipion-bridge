@@ -1,8 +1,8 @@
-from .node import Node, FlushSignal, FLUSH
-from .ops import Op, Source, MapOp
+from .node import Node, FlushSignal, FLUSH, lower, LoweringContext
+from .ops import Op, Source, MapOp, ChunkOp
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
-from .ir import IROp, IRSource, IRMap, IRSink
+from .ir import IROp, IRSource, IRMap, IRAccumulate, IRSink
 from .backend import CompiledPipeline, StreamingBackendProvider
 from .pipeline import Pipeline
 
@@ -11,6 +11,7 @@ __all__ = [
     "Op",
     "Source",
     "MapOp",
+    "ChunkOp",
     "Sink",
     "FlushSignal",
     "FLUSH",
@@ -19,6 +20,7 @@ __all__ = [
     "IROp",
     "IRSource",
     "IRMap",
+    "IRAccumulate",
     "IRSink",
     "lower",
     "LoweringContext",

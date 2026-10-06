@@ -1,10 +1,8 @@
-import pytest
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.sink import Sink
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
-from scipion_bridge.core.streaming.ir import IRSource, IRMap, IRSink
-from scipion_bridge.core.streaming.lower import lower, LoweringContext
-
+from scipion_bridge.core.streaming.ir import IRSource, IRMap, IRSink, IRAccumulate
+from scipion_bridge.core.streaming.node import lower
 
 def test_linear_lowering():
     results = []
@@ -73,3 +71,27 @@ def test_checkpoint_dag_lowering():
     stage2_ir_map = ir_sinks[0].upstream[0]
     stage1_ir_map = stage2_ir_map.upstream[0]
     assert len(stage1_ir_map.downstream) == 2
+
+
+def test_chunk_lowering():
+    writer = CallbackSinkWriter(lambda x: None)
+    source = Source("input")
+    chunked = source.chunk(10, drop_last=True)
+    sink_node = chunked.write_to(writer)
+
+    ir_sinks = lower([sink_node])
+    assert len(ir_sinks) == 1
+
+    sink_ir = ir_sinks[0]
+    assert isinstance(sink_ir, IRSink)
+    assert len(sink_ir.upstream) == 1
+
+    accum_ir = sink_ir.upstream[0]
+    assert isinstance(accum_ir, IRAccumulate)
+    assert accum_ir.downstream == [sink_ir]
+    assert len(accum_ir.upstream) == 1
+    assert accum_ir.flush_fn is not None
+
+    src_ir = accum_ir.upstream[0]
+    assert isinstance(src_ir, IRSource)
+    assert src_ir.downstream == [accum_ir]

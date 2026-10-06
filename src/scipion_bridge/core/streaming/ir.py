@@ -6,7 +6,7 @@ The IR is a backend-agnostic DAG representation of the streaming pipeline.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from .sink_writer import SinkWriter
 
@@ -48,7 +48,23 @@ class IRMap(IROp):
 
 
 @dataclass(eq=False)
+class IRAccumulate(IROp):
+    """Stateful stream accumulation primitive.
+
+    Maintains internal state across incoming items and flushes,
+    emitting zero or more output items downstream.
+    """
+
+    accumulate_fn: Callable[[Any, Any], Tuple[Any, List[Any]]] = field(
+        default=lambda state, item: (state, [item]),
+    )
+    initial_state_fn: Callable[[], Any] = field(default=lambda: None)
+    flush_fn: Optional[Callable[[Any], Tuple[Any, List[Any]]]] = None
+
+
+@dataclass(eq=False)
 class IRSink(IROp):
     """Terminal/Checkpoint node delegating to an async SinkWriter."""
 
     writer: Optional[SinkWriter] = None
+

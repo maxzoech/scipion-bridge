@@ -1,4 +1,3 @@
-from argparse import ArgumentParser
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections.abc import Sized
 from enum import Enum

@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 import ray
 import scipion_bridge as B
 from scipion_bridge.core.streaming.ops import Source

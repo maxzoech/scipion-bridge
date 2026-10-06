@@ -308,10 +308,10 @@ class ComposedResolver(Generic[Origin, Target]):
         target_check = get_origin(self.target) or self.target
         if not isinstance(out, target_check):
             resolve_desc = "\n".join([step.description for step in self.steps])
-            target_name = getattr(self.target, "__qualname__", str(self.target))
+            target_name = getattr(self.target, "__name__", str(self.target))
 
             raise TypeError(
-                f"The resolved output with type '{type(out).__qualname__}' did not match target data type '{target_name}'; "
+                f"The resolved output with type '{type(out).__name__}' did not match target data type '{target_name}'; "
                 f"this is most likely a bug in a resolver function. Set log level to INFO debug resolver calls.\n"
                 f"Resolvers used:\n{resolve_desc}"
             )
@@ -326,7 +326,7 @@ class ComposedResolver(Generic[Origin, Target]):
         if not isinstance(value, self.origin):
             raise TypeError(
                 f"The input value did not match origin data type "
-                f"(expected {self.origin.__qualname__}, got {type(value).__qualname__})"
+                f"(expected {self.origin.__name__}, got {type(value).__name__})"
             )
 
         x: Any = value
@@ -350,7 +350,7 @@ class ComposedResolver(Generic[Origin, Target]):
 
         if current_slice is not None:
             raise TypeError(
-                f"A slice was requested for '{self.origin.__qualname__}' -> '{self.target.__qualname__}', "
+                f"A slice was requested for '{self.origin.__name__}' -> '{self.target.__name__}', "
                 f"but no resolver along the path supports slicing."
             )
 
@@ -378,12 +378,12 @@ class ComposedResolver(Generic[Origin, Target]):
         if not isinstance(value, self.origin):
             raise TypeError(
                 f"The input value did not match origin data type "
-                f"(expected {self.origin.__qualname__}, got {type(value).__qualname__})"
+                f"(expected {self.origin.__name__}, got {type(value).__name__})"
             )
 
         if not any(step.requires_slice for step in self.steps):
             raise TypeError(
-                f"Cannot iterate resolution for '{self.origin.__qualname__}' -> '{self.target.__qualname__}': "
+                f"Cannot iterate resolution for '{self.origin.__name__}' -> '{self.target.__name__}': "
                 f"no resolver along the path supports slicing."
             )
 
@@ -424,7 +424,7 @@ class ComposedResolver(Generic[Origin, Target]):
         intermediate = x
         if not isinstance(intermediate, Sized):
             raise TypeError(
-                f"Cannot iterate over '{type(intermediate).__qualname__}': object does not define __len__."
+                f"Cannot iterate over '{type(intermediate).__name__}': object does not define __len__."
             )
 
         total = len(intermediate)
@@ -507,7 +507,7 @@ class Registry:
 
             if edge["module"] == namespace and resolver_cls is not edge["resolver"]:
                 warnings.warn(
-                    f"Attempted register a resolver for existing transform '{origin.__qualname__}' -> '{target.__qualname__}' "
+                    f"Attempted register a resolver for existing transform '{origin.__name__}' -> '{target.__name__}' "
                     f"('{edge['resolver'].__qualname__}' vs '{resolver_cls.__qualname__}')",
                     UserWarning,
                 )
@@ -566,7 +566,7 @@ class Registry:
                 resolver_cls,
                 metadata,
                 requires_slice,
-                f"{u.__qualname__} -> {v.__qualname__}: {resolver_cls.__qualname__} ({mod}{metadata_desc}{slice_desc})",
+                f"{u.__name__} -> {v.__name__}: {resolver_cls.__qualname__} ({mod}{metadata_desc}{slice_desc})",
             )
 
         if origin == target:
@@ -586,7 +586,7 @@ class Registry:
                 break
         else:
             raise TypeError(
-                f"'{origin.__qualname__}' could not be resolved as '{target.__qualname__}'"
+                f"'{origin.__name__}' could not be resolved as '{target.__name__}'"
             )
 
         try:
@@ -602,7 +602,7 @@ class Registry:
             )
         except (nx.NetworkXNoPath, nx.NodeNotFound, StopIteration):
             raise TypeError(
-                f"'{origin.__qualname__}' could not be resolved as '{target.__qualname__}'"
+                f"'{origin.__name__}' could not be resolved as '{target.__name__}'"
             )
 
         steps = [
@@ -684,7 +684,7 @@ class Registry:
             assert context is not None
 
             intermediate_desc = (
-                f" (via '{intermediate.__qualname__}')"
+                f" (via '{intermediate.__name__}')"
                 if intermediate is not None
                 else ""
             )
@@ -695,7 +695,7 @@ class Registry:
             indent = " " * 4 * context.recursion_level
 
             logging.info(
-                f"{indent}Resolve '{origin_type.__qualname__}' -> '{astype.__qualname__}'"
+                f"{indent}Resolve '{origin_type.__name__}' -> '{astype.__name__}'"
                 f"{intermediate_desc} (caller in '{context.caller_namespace}')",
             )
 
@@ -733,7 +733,7 @@ class Registry:
             assert context is not None
 
             intermediate_desc = (
-                f" (via '{intermediate.__qualname__}')"
+                f" (via '{intermediate.__name__}')"
                 if intermediate is not None
                 else ""
             )
@@ -744,7 +744,7 @@ class Registry:
             indent = " " * 4 * context.recursion_level
 
             logging.info(
-                f"{indent}Resolve '{origin_type.__qualname__}' -> '{astype.__qualname__}'"
+                f"{indent}Resolve '{origin_type.__name__}' -> '{astype.__name__}'"
                 f"{intermediate_desc} (caller in '{context.caller_namespace}')",
             )
 
@@ -771,7 +771,7 @@ class Registry:
         search_percentage = int((search_time / total) * 100) if total > 0 else 0
 
         logging.info(
-            f"Resolving from '{type(value).__qualname__}' to '{astype.__qualname__}' took {total_ms:2f}ms "
+            f"Resolving from '{type(value).__name__}' to '{astype.__name__}' took {total_ms:2f}ms "
             f"({search_time_ms:2f}ms ({search_percentage}%) path finding)"
         )
 

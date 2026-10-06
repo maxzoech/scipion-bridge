@@ -462,4 +462,3 @@ def test_resolve_particle_stack_to_particles_caches_star_data(tmp_path: Path):
         assert len(chunks) == 5
         # Across 5 chunks, starfile.read must only be called once!
         assert mock_read.call_count == 1
-

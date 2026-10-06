@@ -9,7 +9,13 @@ from scipion_bridge.core.streaming.backend import (
     CompiledPipeline,
     StreamingBackendProvider,
 )
-from scipion_bridge.core.streaming.ir import IROp, IRSource, IRMap, IRSink
+from scipion_bridge.core.streaming.ir import (
+    IROp,
+    IRSource,
+    IRMap,
+    IRAccumulate,
+    IRSink,
+)
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
 
@@ -75,7 +81,63 @@ class RayWorkerActor:
 
 
 @ray.remote
+class RayAccumulatorActor:
+    """
+    Ray actor representing a stateful accumulation stage (IRAccumulate).
+    Maintains internal state, processes incoming items or FlushSignal,
+    and pushes emitted items downstream.
+    """
+
+    def __init__(
+        self,
+        accumulate_fn: Callable[[Any, Any], tuple[Any, List[Any]]],
+        initial_state_fn: Callable[[], Any],
+        flush_fn: Optional[Callable[[Any], tuple[Any, List[Any]]]] = None,
+    ):
+        from .container import configure_ray_env
+
+        configure_ray_env()
+        self.accumulate_fn = accumulate_fn
+        self.flush_fn = flush_fn
+        self.state = initial_state_fn()
+        self._downstream: List[Any] = []
+
+    def set_downstream(self, handles: List[Any]) -> None:
+        """Configure downstream actor handles for direct P2P push."""
+        self._downstream = handles
+
+    async def _forward(self, item: Any) -> None:
+        if self._downstream:
+            futures = [handle.push.remote(item) for handle in self._downstream]
+            await asyncio.gather(*futures)
+
+    async def push(self, item: Any) -> None:
+        """Process incoming item or FlushSignal and forward emissions downstream."""
+        match item:
+            case FlushSignal():
+                if self.flush_fn is not None:
+                    self.state, emissions = await asyncio.to_thread(
+                        self.flush_fn,
+                        self.state,
+                    )
+                    for out_item in emissions:
+                        await self._forward(out_item)
+
+                await self._forward(item)
+
+            case _:
+                self.state, emissions = await asyncio.to_thread(
+                    self.accumulate_fn,
+                    self.state,
+                    item,
+                )
+                for out_item in emissions:
+                    await self._forward(out_item)
+
+
+@ray.remote
 class RaySinkActor:
+
     """
     Ray actor wrapping a SinkWriter.
     Dispatches writes and finalizes upon receiving FLUSH signals.
@@ -188,6 +250,16 @@ class RayBackend(StreamingBackendProvider):
                     actor = RaySourceActor.remote(name=name)
                 case IRMap(func=func):
                     actor = RayWorkerActor.remote(func=func)
+                case IRAccumulate(
+                    accumulate_fn=accumulate_fn,
+                    initial_state_fn=initial_state_fn,
+                    flush_fn=flush_fn,
+                ):
+                    actor = RayAccumulatorActor.remote(
+                        accumulate_fn=accumulate_fn,
+                        initial_state_fn=initial_state_fn,
+                        flush_fn=flush_fn,
+                    )
                 case IRSink(writer=writer):
                     actor = RaySinkActor.remote(writer=writer)
                 case _:
@@ -199,9 +271,10 @@ class RayBackend(StreamingBackendProvider):
         # 3. Wire downstream actor handles
         wire_futures: List[Any] = []
         for node, actor in actor_map.items():
-            if isinstance(node, (IRSource, IRMap)):
+            if isinstance(node, (IRSource, IRMap, IRAccumulate)):
                 downstream_handles = [actor_map[d] for d in node.downstream]
                 wire_futures.append(actor.set_downstream.remote(downstream_handles))
+
 
         if wire_futures:
             ray.get(wire_futures)

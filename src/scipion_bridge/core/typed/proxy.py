@@ -160,11 +160,9 @@ class ProxyMetaclass(ABCMeta):
             return x
 
         proxy_cls = cast(Type["Proxy"], x)
-        
+
         is_proxy_group = (
-            issubclass(proxy_cls, ProxyGroup)
-            if "ProxyGroup" in globals()
-            else False
+            issubclass(proxy_cls, ProxyGroup) if "ProxyGroup" in globals() else False
         )
 
         base_resolver_cls = (

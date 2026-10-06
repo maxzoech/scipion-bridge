@@ -107,42 +107,44 @@ class Protocol(metaclass=abc.ABCMeta):
 
     def get_pipeline(self) -> Op:
         """Return the pipeline of operations for this protocol."""
+        return self.steps().map(self._verify_outputs)
+
+    def _verify_outputs(self, outputs: Any) -> Dict[str, Any]:
+        """Validate step outputs against the declared outputs.
+
+        Implemented as a bound method so that ``outputs()`` is evaluated in the
+        process executing the step, instead of being captured on the driver and
+        pickled together with a closure.
+        """
+        if not isinstance(outputs, dict):
+            raise ValidationError(
+                f"Protocol steps output must be a dictionary, got {type(outputs).__name__}",
+            )
+
         output_types = self.outputs()
 
-        def _verify_outputs(outputs: Any) -> Dict[str, Any]:
-            if not isinstance(outputs, dict):
+        for key, value in outputs.items():
+            if key not in output_types:
+                raise ValidationError(f"Output '{key}' is not in declared outputs.")
+
+            expected_type = output_types[key]
+            origin = get_origin(expected_type) or expected_type
+
+            if not isinstance(value, origin):
                 raise ValidationError(
-                    f"Protocol steps output must be a dictionary, got {type(outputs).__name__}",
+                    f"Type mismatch for output key '{key}': "
+                    f"expected {expected_type}, got '{type(value)}' ({value!r})",
                 )
 
-            for key, value in outputs.items():
-                if key not in output_types:
-                    raise ValidationError(f"Output '{key}' is not in declared outputs.")
+            expected_dtype = getattr(expected_type, "_dtype", None)
+            actual_dtype = getattr(value, "dtype", getattr(value, "_dtype", None))
+            if expected_dtype is not None and actual_dtype != expected_dtype:
+                raise ValidationError(
+                    f"Type argument mismatch for output key '{key}': "
+                    f"expected dtype '{expected_dtype}', got '{actual_dtype}'",
+                )
 
-                expected_type = output_types[key]
-                origin = get_origin(expected_type) or expected_type
-                origin = get_origin(expected_type) or expected_type
-
-                if not isinstance(value, origin):
-                    raise ValidationError(
-                        f"Type mismatch for output key '{key}': "
-                        f"expected {expected_type}, got '{type(value)}' ({value!r})",
-                    )
-
-                expected_dtype = getattr(expected_type, "_dtype", None)
-                actual_dtype = getattr(value, "dtype", getattr(value, "_dtype", None))
-                if expected_dtype is not None and actual_dtype != expected_dtype:
-                    raise ValidationError(
-                        f"Type argument mismatch for output key '{key}': "
-                        f"expected dtype '{expected_dtype}', got '{actual_dtype}'",
-                    )
-
-            return outputs
-
-        steps_op = self.steps()
-        pipeline: Op = steps_op.map(_verify_outputs)
-
-        return pipeline
+        return outputs
 
     @abc.abstractmethod
     def outputs(self) -> Dict[str, Type]:
