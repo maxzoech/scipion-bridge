@@ -42,8 +42,8 @@ def init_ray_session():
 
 
 @pytest.fixture(
-    params=["staging"]
-)  # TODO: add "arrow_frozen", "arrow_from_batch" when implemented
+    params=["staging", "arrow_from_batch"]
+)  # TODO: add "arrow_frozen" when the Arrow storage engine is implemented
 def engine_mode(request):
     """Parametrizes tests across the three engine states."""
     return request.param

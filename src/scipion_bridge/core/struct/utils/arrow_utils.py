@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence, Tuple, Union, overload
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, overload
 import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
@@ -334,6 +334,91 @@ def arrow_to_numpy(col: pa.Array, shape: Tuple[Optional[int], ...]) -> np.ndarra
         return leaf_np.reshape(full_shape)
 
     return col.to_numpy(zero_copy_only=False)
+
+
+def leaf_to_arrow(
+    data: Union[np.ndarray, ak.Array],
+    entry: ArrayEntryBase,
+) -> pa.Array:
+    """Convert a leaf column buffer of a Set into an Arrow array.
+
+    Static columns become FixedShapeTensorArrays (or primitive arrays for 1-D
+    buffers) and ragged columns become (nested) list arrays. Contiguous NumPy
+    buffers are wrapped without copying.
+    """
+    match (entry.is_static, data):
+        case (True, np.ndarray()) if data.ndim == 1:
+            return pa.array(data)
+        case (True, np.ndarray()):
+            return pa.FixedShapeTensorArray.from_numpy_ndarray(
+                np.ascontiguousarray(data),
+            )
+        case (False, np.ndarray()):
+            return ak.to_arrow(ak.Array(data), extensionarray=False)
+        case (False, ak.Array()):
+            return ak.to_arrow(data, extensionarray=False)
+        case _:
+            raise TypeError(
+                f"Cannot convert buffer of type '{type(data).__name__}' "
+                f"for {type(entry).__name__} to Arrow.",
+            )
+
+
+def leaf_from_arrow(
+    column: pa.Array,
+    entry: ArrayEntryBase,
+) -> Union[np.ndarray, ak.Array]:
+    """Convert an Arrow array produced by :func:`leaf_to_arrow` back into a buffer."""
+    match entry.is_static:
+        case True:
+            return arrow_to_numpy(column, entry.shape)
+        case False:
+            return ak.from_arrow(column)
+
+
+def nest_columns(
+    schema: Schema,
+    leaves: Dict[KeyPath, pa.Array],
+    root: KeyPath = KeyPath(root=()),
+) -> Dict[str, pa.Array]:
+    """Assemble leaf arrays into top-level columns, nesting children as StructArrays.
+
+    Fields without any initialized leaf are omitted.
+    """
+    columns: Dict[str, pa.Array] = {}
+    for name, entry in schema.fields.items():
+        path = root.append(name)
+        match entry.children:
+            case None if path in leaves:
+                columns[name] = leaves[path]
+            case None:
+                pass
+            case children:
+                nested = nest_columns(children, leaves, path)
+                if nested:
+                    columns[name] = pa.StructArray.from_arrays(
+                        list(nested.values()),
+                        names=list(nested),
+                    )
+    return columns
+
+
+def find_nested_column(batch: pa.RecordBatch, path: KeyPath) -> Optional[pa.Array]:
+    """Resolve the leaf array at ``path`` in a batch built by :func:`nest_columns`.
+
+    Returns None if the leaf was not initialized when the batch was built.
+    """
+    first, *rest = path.path
+    if batch.schema.get_field_index(first) < 0:
+        return None
+
+    column = batch.column(first)
+    for name in rest:
+        assert isinstance(column, pa.StructArray)
+        if column.type.get_field_index(name) < 0:
+            return None
+        column = column.field(name)
+    return column
 
 
 # Legacy aliases for backward compatibility

@@ -22,7 +22,7 @@ def deserialize_set(header, frames):
     (arrow_buffer,) = frames
     reader = pa.ipc.open_stream(arrow_buffer)
     batch = reader.read_next_batch()
-    return Set.from_arrow(header["dtype"], batch)
+    return Set[header["dtype"]].from_arrow(batch)
 
 
 def register_dask_serialization() -> bool:

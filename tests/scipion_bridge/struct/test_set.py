@@ -933,7 +933,6 @@ def test_ragged_set_ndarray_slice_assignment(as_engine):
         assert np.allclose(p_set[2 + i].embeddings, latents[i])
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_ragged_set_view_assignment():
     class Particle(B.Struct):
         embeddings: B.Array[float] = B.Array(shape=(None,))
@@ -952,7 +951,6 @@ def test_ragged_set_view_assignment():
     assert batch.num_rows == 5
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_sliced_set_to_arrow(as_engine):
     class Particle(B.Struct):
         pixels: B.Array[float] = B.Array(shape=(4, 4))

@@ -3,8 +3,33 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, List
+from dataclasses import dataclass
+from typing import Any, Dict, List
 from .ir import IROp
+
+
+@dataclass
+class StageStats:
+    """Execution metrics of a single pipeline stage.
+
+    Attributes:
+        items_in: Data items processed by the stage (excluding FLUSH).
+        items_out: Data items forwarded downstream.
+        idle_s: Time spent waiting for input. High values mean the stage is
+            starved by its upstream.
+        process_s: Time spent in the stage logic.
+        blocked_s: Time spent waiting for room in the outbox. High values mean
+            the stage is throttled by its downstream.
+        emit_s: Time spent forwarding items downstream, including
+            serialization.
+    """
+
+    items_in: int = 0
+    items_out: int = 0
+    idle_s: float = 0.0
+    process_s: float = 0.0
+    blocked_s: float = 0.0
+    emit_s: float = 0.0
 
 
 class CompiledPipeline(abc.ABC):
@@ -18,6 +43,11 @@ class CompiledPipeline(abc.ABC):
     @abc.abstractmethod
     def flush(self) -> None:
         """Drain in-flight tasks and finalize sinks."""
+        ...
+
+    @abc.abstractmethod
+    def stats(self) -> Dict[str, StageStats]:
+        """Return execution metrics per stage, keyed by a readable stage label."""
         ...
 
     def close(self) -> None:

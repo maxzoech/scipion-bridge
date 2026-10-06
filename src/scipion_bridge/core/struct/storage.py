@@ -524,6 +524,11 @@ class StagingEngine(_BaseStorage):
             effective_idx,
             field_key,
         )
+        if not buffer.flags.writeable:
+            # Buffers adopted zero-copy from Arrow (e.g. after unpickling) are
+            # read-only; copy on the first in-place write.
+            buffer = buffer.copy()
+            self._data[field_key] = buffer
         if self._fits_numpy_buffer(buffer, effective_idx, data):
             buffer[effective_idx] = data
             return
@@ -834,71 +839,3 @@ class StagingEngine(_BaseStorage):
             case (int() as idx, *rest):
                 self._traverse_list_update(lst[idx], tuple(rest), data)
 
-
-# class ArrayStorage(_BaseStorage):
-#     """Unified Arrow-backed storage engine delegating to polymorphic _StorageEngine implementations."""
-
-#     def __init__(
-#         self,
-#         schema: Schema,
-#         capacity: Optional[int] = None,
-#         record_batch: Optional[pa.RecordBatch] = None,
-#         path: KeyPath = ("root",),
-#         offset: Union[Offset, Sequence[IndexType]] = (),
-#         root_entry: Optional[SchemaEntry] = None,
-#     ) -> None:
-#         super().__init__(schema=schema, parent=None, path=path, offset=Offset(offset))
-#         self._schema = schema
-
-#         if root_entry is not None:
-#             resolved_root_entry = root_entry
-#         elif capacity is not None:
-#             resolved_root_entry = SchemaSetEntry(schema=schema, capacity=capacity)
-#         else:
-#             resolved_root_entry = SchemaEntry(schema=schema)
-
-#         if record_batch is not None:
-#             self._engine: _StorageEngine = _ArrowEngine(
-#                 schema, record_batch, root_entry=resolved_root_entry
-#             )
-#         else:
-#             self._engine = _StagingEngine(
-#                 schema, capacity=capacity, root_entry=resolved_root_entry
-#             )
-
-#     @property
-#     def root_entry(self) -> SchemaEntry:
-#         return self._engine.root_entry
-
-#     @property
-#     def capacity(self) -> Optional[int]:
-#         return self._engine.capacity
-
-#     @property
-#     def is_frozen(self) -> bool:
-#         return self._engine.is_frozen
-
-#     def to_record_batch(self) -> pa.RecordBatch:
-#         """Freeze and compile the storage into an immutable Arrow RecordBatch."""
-#         batch = self._engine.to_record_batch()
-#         if not self._engine.is_frozen:
-#             # Transition to immutable Arrow engine and drop staging buffers
-#             self._engine = _ArrowEngine(
-#                 self._schema, batch, root_entry=self._engine.root_entry
-#             )
-#         return batch
-
-#     @classmethod
-#     def from_record_batch(
-#         cls,
-#         batch: pa.RecordBatch,
-#         schema: Schema,
-#         root_entry: Optional[SchemaEntry] = None,
-#     ) -> "ArrayStorage":
-#         """Construct an ArrayStorage directly wrapping a frozen Arrow RecordBatch."""
-#         return cls(
-#             schema=schema,
-#             capacity=len(batch),
-#             record_batch=batch,
-#             root_entry=root_entry,
-#         )

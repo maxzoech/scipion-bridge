@@ -6,11 +6,13 @@ N-dimensional arrays across the outer batch dimension.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import (
     Any,
     Dict,
     Optional,
     Sequence,
+    SupportsIndex,
     Tuple,
     Type,
     TypeVar,
@@ -34,10 +36,17 @@ from .schema import (
     SchemaSetEntry,
     ArraySetEntry,
     RaggedArraySetEntry,
+    SetEntryBase,
 )
 from .exceptions import UninitializedFieldError
 from .key_path import KeyPath
 from .storage import _BaseStorage, StagingEngine, StorageView
+from .utils.arrow_utils import (
+    find_nested_column,
+    leaf_from_arrow,
+    leaf_to_arrow,
+    nest_columns,
+)
 from ..utils.marker import Marker
 
 T = TypeVar("T", bound=Struct)
@@ -543,17 +552,97 @@ class Set(Marker[T], SchemaConvertible):
                 )
 
     def to_arrow(self) -> pa.RecordBatch:
-        """Export Set to Apache Arrow RecordBatch."""
-        raise NotImplementedError(
-            "Arrow conversion is pending ArrowEngine implementation"
+        """Export the visible rows of the Set to an Apache Arrow RecordBatch.
+
+        Every top-level field becomes a column; nested Structs and Sets become
+        StructArray columns. Uninitialized fields are omitted. For a view, only
+        the rows of the view are exported, and contiguous buffers are wrapped
+        without copying.
+        """
+        leaves = {
+            path: leaf_to_arrow(self._storage.read(key, entry), entry)
+            for path, entry in self.schema().tree_iter()
+            if (key := self._storage.root.extend(path)) in self._storage
+        }
+        columns = nest_columns(self.schema(), leaves)
+        return pa.RecordBatch.from_arrays(
+            list(columns.values()),
+            names=list(columns),
+            metadata=_capacity_metadata(self._capacity),
         )
 
     @classmethod
-    def from_arrow(cls, dtype: Any, batch: Any) -> Any:
-        """Construct Set from Apache Arrow RecordBatch."""
-        raise NotImplementedError(
-            "Arrow conversion is pending ArrowEngine implementation"
-        )
+    def from_arrow(cls, batch: pa.RecordBatch) -> Self:
+        """Construct a Set from a RecordBatch produced by :meth:`to_arrow`.
+
+        Column buffers are adopted without copying where Arrow allows it; such
+        buffers may be read-only and are copied on the first in-place write.
+        """
+        result = cls(capacity=_capacity_from_metadata(batch.schema.metadata))
+        for path, entry in cls.schema().tree_iter():
+            column = find_nested_column(batch, path)
+            if column is None:
+                continue
+
+            result._storage.write(
+                result._storage.root.extend(path),
+                _without_capacity(entry),
+                leaf_from_arrow(column, entry),
+            )
+        return result
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        """Pickle data-carrying Sets as Arrow RecordBatches.
+
+        Only the visible rows are serialized, so a slice no longer drags its
+        parent storage along, and Arrow buffers are transferred out-of-band
+        (zero-copy with pickle protocol 5, e.g. in Ray's object store).
+        Sets bound as field descriptors of a Struct keep the default pickling.
+        """
+        match self.name:
+            case None:
+                return (_set_from_arrow, (type(self), self.to_arrow()))
+            case _:
+                return super().__reduce_ex__(protocol)
+
+
+_CAPACITY_KEY = b"scipion_bridge.capacity"
+
+
+def _capacity_metadata(capacity: Optional[int]) -> Dict[bytes, bytes]:
+    match capacity:
+        case None:
+            return {}
+        case int():
+            return {_CAPACITY_KEY: str(capacity).encode()}
+
+
+def _capacity_from_metadata(metadata: Optional[Dict[bytes, bytes]]) -> Optional[int]:
+    match metadata:
+        case dict() if _CAPACITY_KEY in metadata:
+            return int(metadata[_CAPACITY_KEY])
+        case _:
+            return None
+
+
+def _without_capacity(entry: ArrayEntryBase) -> ArrayEntryBase:
+    """Drop the Set capacity of a leaf entry for restoring a full column.
+
+    The capacity of a leaf inside a nested Set refers to that inner Set's
+    dimension, while a full-column write validates it against the outer
+    length. Restored columns were exported from a valid Set, so they are
+    written as-is.
+    """
+    match entry:
+        case SetEntryBase():
+            return dataclasses.replace(entry, capacity=None)
+        case _:
+            return entry
+
+
+def _set_from_arrow(cls: Type[Set[Any]], batch: pa.RecordBatch) -> Set[Any]:
+    """Unpickle a Set serialized by ``Set.__reduce_ex__``."""
+    return cls.from_arrow(batch)
 
 
 def concat(sets: Sequence[Set[T]]) -> Set[T]:

@@ -152,6 +152,19 @@ class Protocol(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def steps(self) -> Op:
+        """Return the streaming pipeline of the protocol, built from its inputs.
+
+        Each ``.map()`` runs as a separate pipeline stage. Split GPU work and
+        CPU post-processing into separate maps so that they overlap on
+        consecutive batches::
+
+            def steps(self):
+                return (
+                    self.particles.chunk(256)
+                    .map(self._forward)
+                    .map(self._build_metadata)
+                )
+        """
         pass
 
     def validate_protocol_configuration(self):

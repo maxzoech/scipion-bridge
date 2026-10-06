@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Optional, Type, Union
 
 from ...core.typed.resolve import ComposedResolver, find_resolver
 from ...core.protocol.protocol_base import Protocol
-from ...core.streaming.backend import StreamingBackendProvider
+from ...core.streaming.backend import StageStats
 from ...core.streaming.pipeline import Pipeline
 from ...core.streaming.sink import Sink
 from ...core.streaming.sink_writer import SinkWriter
@@ -21,6 +21,20 @@ def _convert_to_argname(name: str) -> str:
     cleaned = name.lstrip("-")
     kebab = re.sub(r"(?<!^)(?=[A-Z])", "-", cleaned).replace("_", "-").lower()
     return f"--{kebab}"
+
+
+def _format_stats(stats: Dict[str, StageStats]) -> str:
+    """Format cumulative per-stage metrics as a table."""
+    header = (
+        f"{'stage':<40} {'in':>6} {'out':>6} {'idle_s':>8} "
+        f"{'process_s':>10} {'blocked_s':>10} {'emit_s':>8}"
+    )
+    rows = [
+        f"{label:<40} {s.items_in:>6} {s.items_out:>6} {s.idle_s:>8.2f} "
+        f"{s.process_s:>10.2f} {s.blocked_s:>10.2f} {s.emit_s:>8.2f}"
+        for label, s in stats.items()
+    ]
+    return "\n".join([header, *rows])
 
 
 def _default_sink_handler(outputs: Dict[str, Any]) -> None:
@@ -42,10 +56,18 @@ class RayPipelineRunner:
         *,
         origin_types: Optional[Dict[str, Type]] = None,
         sink: Optional[Union[Sink, SinkWriter, Callable[[Any], Any]]] = None,
+        queue_size: int = 2,
     ) -> None:
+        """
+        Args:
+            queue_size: Number of items each pipeline stage buffers. Overridden
+                by the ``SCIPION_STREAM_QUEUE_SIZE`` environment variable.
+        """
         self.protocol = protocol
         self.origin_types = origin_types or {}
-        self.backend = RayBackend()
+        self.backend = RayBackend(
+            queue_size=int(os.environ.get("SCIPION_STREAM_QUEUE_SIZE", queue_size)),
+        )
         self.sink = sink
         self._input_resolvers: Dict[str, ComposedResolver] = {}
 
@@ -165,6 +187,7 @@ class RayPipelineRunner:
             f"({total_chunks} chunks, {total_items} items, "
             f"{throughput:.1f} items/s)",
         )
+        print(_format_stats(self._pipeline.stats()))
 
     def close(self) -> None:
         """Terminate all actors allocated for the pipeline."""

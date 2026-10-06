@@ -1,11 +1,12 @@
 from __future__ import annotations
 from typing import (
-    Optional,
     Any,
+    Dict,
+    Optional,
 )
 from dependency_injector.wiring import Provide, inject
 
-from .backend import CompiledPipeline, StreamingBackendProvider
+from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
 from .node import Node, lower
 
 
@@ -63,6 +64,10 @@ class Pipeline:
         Flush all stateful operations in the pipeline by sending a FLUSH sentinel to all input sources.
         """
         self._compiled.flush()
+
+    def stats(self) -> Dict[str, StageStats]:
+        """Return execution metrics per stage of the compiled pipeline."""
+        return self._compiled.stats()
 
     def close(self) -> None:
         """Terminate backend resources and actors allocated for this pipeline."""

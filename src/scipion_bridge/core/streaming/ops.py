@@ -29,7 +29,15 @@ class Op(Node):
         return node
 
     def map_batch(self, func: Callable[[Any], Any]) -> MapOp:
-        """Transform entire incoming stream item / batch (1:1)."""
+        """Transform entire incoming stream item / batch (1:1).
+
+        Every map is executed as its own pipeline stage, and consecutive stages
+        process different items concurrently. Splitting a step into separate
+        maps therefore overlaps its parts, e.g. CPU post-processing of one
+        batch with the GPU forward pass of the next::
+
+            particles.chunk(256).map(forward).map(build_metadata)
+        """
         return self.op(MapOp(func))
 
     def map(self, func: Callable[[Any], Any]) -> MapOp:
@@ -133,7 +141,7 @@ def _make_set_chunk_accumulator(
 
         if len(combined) > 0:
             return (([combined], len(combined)), emissions)
-        
+
         return (([], 0), emissions)
 
     def flush(
