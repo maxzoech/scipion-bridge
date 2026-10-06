@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import awkward as ak
@@ -10,8 +11,6 @@ import numpy as np
 from numpy.typing import NDArray
 import pyarrow as pa
 import pyarrow.compute as _pc
-
-pc: Any = _pc
 
 from .exceptions import UninitializedFieldError
 from .schema import (
@@ -22,6 +21,9 @@ from .schema import (
     SchemaSetEntry,
 )
 from .key_path import IndexType, KeyPath
+from .utils.arrow_utils import is_regular_awkward
+
+pc: Any = _pc
 
 
 class _BaseStorage(abc.ABC):
@@ -237,7 +239,16 @@ class StorageView(_BaseStorage):
 
 
 class StagingEngine(_BaseStorage):
-    """Mutable in-memory storage engine backed by NumPy and Awkward Arrays."""
+    """Mutable in-memory storage engine backed by NumPy and Awkward Arrays.
+
+    Concurrent element-wise access is supported as long as every thread reads
+    and writes its own elements (e.g. ``Op.map_element``): writes into
+    disjoint rows of an existing column touch disjoint memory and are
+    lock-free. Transitions that replace a whole column object (allocation,
+    copy-on-write of a read-only buffer, splitting a ragged column into rows,
+    materializing pending rows) run once under a lock with double-checked
+    locking. Whole-column writes and buffer expansion are not thread-safe.
+    """
 
     def __init__(
         self,
@@ -247,6 +258,17 @@ class StagingEngine(_BaseStorage):
         super().__init__(root=root, parent=parent)
         self._data: Dict[Tuple[str, ...], Union[np.ndarray, ak.Array]] = {}
         self._chunks: Dict[Tuple[str, ...], List[Any]] = {}
+        self._lock = threading.RLock()
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        for name, value in state.items():
+            setattr(self, name, value)
+        self._lock = threading.RLock()
 
     @staticmethod
     def _decompose(key: KeyPath) -> Tuple[Tuple[str, ...], Tuple[IndexType, ...]]:
@@ -285,6 +307,12 @@ class StagingEngine(_BaseStorage):
                 case _:
                     curr = curr[idx]
         return curr
+
+    def _materialize_pending(self, field_key: Tuple[str, ...], entry: Entry) -> None:
+        """Merge pending rows of a column into one buffer, once, under the lock."""
+        with self._lock:
+            if field_key in self._chunks:
+                self._materialize_chunks(field_key, entry)
 
     def _materialize_chunks(
         self,
@@ -358,8 +386,7 @@ class StagingEngine(_BaseStorage):
             return True
 
         return any(
-            k[: len(field_key)] == field_key
-            for k in (*self._data.keys(), *self._chunks.keys())
+            k[: len(field_key)] == field_key for k in (*self._data, *self._chunks)
         )
 
     def clear(self, key: Optional[KeyPath] = None) -> None:
@@ -367,9 +394,11 @@ class StagingEngine(_BaseStorage):
         target_key = key if key is not None else self.root
         prefix, _ = self._decompose(target_key)
 
-        self._data = {k: v for k, v in self._data.items() if k[: len(prefix)] != prefix}
+        self._data = {
+            k: v for k, v in tuple(self._data.items()) if k[: len(prefix)] != prefix
+        }
         self._chunks = {
-            k: v for k, v in self._chunks.items() if k[: len(prefix)] != prefix
+            k: v for k, v in tuple(self._chunks.items()) if k[: len(prefix)] != prefix
         }
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
@@ -378,13 +407,13 @@ class StagingEngine(_BaseStorage):
         prefix_fields, index_tuple = self._decompose(target_key)
         effective_idx = self._compute_index(index_tuple)
 
-        for field_key, buffer in self._data.items():
+        for field_key, buffer in tuple(self._data.items()):
             if field_key[: len(prefix_fields)] == prefix_fields:
                 if not effective_idx:
                     return len(buffer)
                 return len(buffer[effective_idx])
 
-        for field_key, chunks in self._chunks.items():
+        for field_key, chunks in tuple(self._chunks.items()):
             if field_key[: len(prefix_fields)] == prefix_fields:
                 if not effective_idx:
                     return len(chunks)
@@ -409,7 +438,7 @@ class StagingEngine(_BaseStorage):
                         f"Element at '{key}' has not been initialized.",
                     )
                 return val
-            self._materialize_chunks(field_key, entry)
+            self._materialize_pending(field_key, entry)
 
         if field_key not in self._data:
             raise UninitializedFieldError(
@@ -505,36 +534,67 @@ class StagingEngine(_BaseStorage):
         key: KeyPath,
     ) -> None:
         """Indexed write on a static (fixed-shape) field with auto-allocation and expansion."""
-        if field_key not in self._data:
-            outer_dims = self._infer_outer_dims(entry, effective_idx)
-            int_shape = cast(Tuple[int, ...], entry.shape)
-            total_shape = (*outer_dims, *int_shape)
-            buffer = np.zeros(
-                total_shape,
-                dtype=entry.dtype,
-            )
-            buffer[effective_idx] = data
-            self._data[field_key] = buffer
-            return
-
-        buffer = self._data[field_key]
-        assert isinstance(buffer, np.ndarray)
-        buffer = self._expand_numpy_if_needed(
-            buffer,
-            effective_idx,
-            field_key,
-        )
-        if not buffer.flags.writeable:
-            # Buffers adopted zero-copy from Arrow (e.g. after unpickling) are
-            # read-only; copy on the first in-place write.
-            buffer = buffer.copy()
-            self._data[field_key] = buffer
+        buffer = self._writable_static_buffer(field_key, entry, effective_idx)
         if self._fits_numpy_buffer(buffer, effective_idx, data):
             buffer[effective_idx] = data
             return
 
         raise ValueError(
             f"Shape mismatch writing to static field '{key}'.",
+        )
+
+    def _writable_static_buffer(
+        self,
+        field_key: Tuple[str, ...],
+        entry: ArrayEntryBase,
+        effective_idx: Tuple[IndexType, ...],
+    ) -> np.ndarray:
+        """Return a writable buffer of a static column that covers ``effective_idx``.
+
+        Allocating, expanding or copying a read-only buffer replaces the column
+        object; this happens once under the lock. Otherwise the buffer is
+        returned lock-free.
+        """
+        buffer = self._data.get(field_key)
+        if self._is_writable_for(buffer, effective_idx):
+            assert isinstance(buffer, np.ndarray)
+            return buffer
+
+        with self._lock:
+            buffer = self._data.get(field_key)
+            match buffer:
+                case None:
+                    outer_dims = self._infer_outer_dims(
+                        entry,
+                        effective_idx,
+                        min_length=self._sibling_length(field_key),
+                    )
+                    int_shape = cast(Tuple[int, ...], entry.shape)
+                    buffer = np.zeros((*outer_dims, *int_shape), dtype=entry.dtype)
+                case np.ndarray() if self._is_writable_for(buffer, effective_idx):
+                    return buffer
+                case np.ndarray():
+                    # Expansion allocates a new buffer. Without expansion, the
+                    # buffer was adopted zero-copy from Arrow (e.g. after
+                    # unpickling) and is read-only; copy it once.
+                    expanded = self._expand_numpy_if_needed(buffer, effective_idx)
+                    buffer = expanded if expanded is not buffer else buffer.copy()
+                case _:
+                    raise TypeError(
+                        f"Static field buffer must be a numpy array, got '{type(buffer).__name__}'.",
+                    )
+            self._data[field_key] = buffer
+            return buffer
+
+    def _is_writable_for(
+        self,
+        buffer: Optional[Union[np.ndarray, ak.Array]],
+        effective_idx: Tuple[IndexType, ...],
+    ) -> bool:
+        return (
+            isinstance(buffer, np.ndarray)
+            and buffer.flags.writeable
+            and self._expanded_shape(buffer.shape, effective_idx) == buffer.shape
         )
 
     def _write_indexed_dynamic(
@@ -545,25 +605,104 @@ class StagingEngine(_BaseStorage):
         data: Any,
     ) -> None:
         """Indexed write on a dynamic field, staged as chunks for deferred materialization."""
-        if field_key in self._data:
-            existing = self._data.pop(field_key)
-            if isinstance(existing, ak.Array):
-                self._chunks[field_key] = cast(list, ak.to_list(existing))
-            else:
-                self._chunks[field_key] = list(existing)
-
-        if field_key not in self._chunks:
-            outer_dims = self._infer_outer_dims(entry, effective_idx)
-            self._chunks[field_key] = self._build_nested_list(outer_dims)
-
-        chunks = self._chunks[field_key]
-        match effective_idx:
-            case (int(idx), *_) if idx >= len(chunks):
-                chunks.extend([None] * (idx + 1 - len(chunks)))
-            case _:
-                pass
-
+        chunks = self._row_chunks(field_key, entry, effective_idx)
         self._traverse_list_update(chunks, effective_idx, data)
+
+    def _row_chunks(
+        self,
+        field_key: Tuple[str, ...],
+        entry: ArrayEntryBase,
+        effective_idx: Tuple[IndexType, ...],
+    ) -> List[Any]:
+        """Return the per-row chunk list of a dynamic column that covers ``effective_idx``.
+
+        Splitting a column into rows, allocating and extending the list happen
+        once under the lock. Otherwise the list is returned lock-free.
+        """
+        chunks = self._chunks.get(field_key)
+        if chunks is not None and self._covers(chunks, effective_idx):
+            return chunks
+
+        with self._lock:
+            chunks = self._chunks.get(field_key)
+            match chunks:
+                case None if field_key in self._data:
+                    chunks = self._split_rows(self._data[field_key])
+                    # Publish the rows before removing the column, so that
+                    # concurrent readers always find the field.
+                    self._chunks[field_key] = chunks
+                    del self._data[field_key]
+                case None:
+                    outer_dims = self._infer_outer_dims(
+                        entry,
+                        effective_idx,
+                        min_length=self._sibling_length(field_key),
+                    )
+                    chunks = self._build_nested_list(outer_dims)
+                    self._chunks[field_key] = chunks
+                case _:
+                    pass
+
+            match effective_idx:
+                case (int(idx), *_) if idx >= len(chunks):
+                    chunks.extend([None] * (idx + 1 - len(chunks)))
+                case _:
+                    pass
+            return chunks
+
+    @staticmethod
+    def _covers(chunks: List[Any], effective_idx: Tuple[IndexType, ...]) -> bool:
+        match effective_idx:
+            case (int(idx), *_):
+                return idx < len(chunks)
+            case _:
+                return True
+
+    @staticmethod
+    def _split_rows(column: Union[np.ndarray, ak.Array]) -> List[Any]:
+        """Split a column into a list of per-row buffers.
+
+        Regular columns become writable NumPy row views (one copy at most, if
+        the column is read-only); irregular or masked columns become Awkward
+        rows, keeping missing rows as None.
+        """
+        match column:
+            case np.ndarray():
+                rows = column if column.flags.writeable else column.copy()
+                return list(rows)
+            case ak.Array() if not ak.any(
+                ak.is_none(column, axis=0)
+            ) and is_regular_awkward(column):
+                rows = ak.to_numpy(column)
+                return list(rows if rows.flags.writeable else rows.copy())
+            case ak.Array():
+                return [row for row in column]
+            case _:
+                raise TypeError(
+                    f"Cannot split column of type '{type(column).__name__}' into rows.",
+                )
+
+    def _sibling_length(self, field_key: Tuple[str, ...]) -> int:
+        """Length of an existing column in the same container, or 0.
+
+        Columns of one container share their outer length, so a new column is
+        allocated at full length at once instead of being expanded by later
+        (possibly concurrent) writes.
+        """
+        container = field_key[:-1]
+        return max(
+            (
+                len(column)
+                for key, column in (
+                    *tuple(self._data.items()),
+                    *tuple(self._chunks.items()),
+                )
+                if key != field_key
+                and len(key) == len(field_key)
+                and key[:-1] == container
+            ),
+            default=0,
+        )
 
     def _validate_dtype(self, data: Any, target_dtype: Any, key: KeyPath) -> None:
         match data:
@@ -756,7 +895,10 @@ class StagingEngine(_BaseStorage):
             return False
 
     def _infer_outer_dims(
-        self, entry: Entry, effective_idx: Tuple[IndexType, ...]
+        self,
+        entry: Entry,
+        effective_idx: Tuple[IndexType, ...],
+        min_length: int = 0,
     ) -> Tuple[int, ...]:
         outer_dims: List[int] = []
         for i, idx in enumerate(effective_idx):
@@ -767,6 +909,8 @@ class StagingEngine(_BaseStorage):
                 and entry.capacity is not None
                 else 0
             )
+            if i == 0:
+                dim_cap = max(dim_cap, min_length)
             match idx:
                 case int(n):
                     dim_cap = max(dim_cap, n + 1)
@@ -786,36 +930,36 @@ class StagingEngine(_BaseStorage):
             return [None] * (dims[0] if dims else 0)
         return [StagingEngine._build_nested_list(dims[1:]) for _ in range(dims[0])]
 
-    def _expand_numpy_if_needed(
-        self,
-        buffer: np.ndarray,
+    @staticmethod
+    def _expanded_shape(
+        shape: Tuple[int, ...],
         effective_idx: Tuple[IndexType, ...],
-        field_key: Tuple[str, ...],
-    ) -> np.ndarray:
-        new_shape = list(buffer.shape)
-        expanded = False
+    ) -> Tuple[int, ...]:
+        """Return the shape needed to hold ``effective_idx`` (``shape`` if it fits)."""
+        new_shape = list(shape)
         for i, idx in enumerate(effective_idx):
             match idx:
                 case int(n) if n >= new_shape[i]:
                     new_shape[i] = n + 1
-                    expanded = True
                 case slice() as s if s.stop is not None and s.stop > new_shape[i]:
                     new_shape[i] = s.stop
-                    expanded = True
                 case _:
                     pass
+        return tuple(new_shape)
 
-        if expanded:
-            new_buffer = np.zeros(
-                tuple(new_shape),
-                dtype=buffer.dtype,
-            )
-            slices = tuple(slice(0, s) for s in buffer.shape)
-            new_buffer[slices] = buffer
-            self._data[field_key] = new_buffer
-            return new_buffer
+    def _expand_numpy_if_needed(
+        self,
+        buffer: np.ndarray,
+        effective_idx: Tuple[IndexType, ...],
+    ) -> np.ndarray:
+        """Return ``buffer``, or a zero-padded copy large enough for ``effective_idx``."""
+        new_shape = self._expanded_shape(buffer.shape, effective_idx)
+        if new_shape == buffer.shape:
+            return buffer
 
-        return buffer
+        new_buffer = np.zeros(new_shape, dtype=buffer.dtype)
+        new_buffer[tuple(slice(0, s) for s in buffer.shape)] = buffer
+        return new_buffer
 
     def _traverse_list_update(
         self, lst: list, effective_idx: Tuple[IndexType, ...], data: Any
@@ -838,4 +982,3 @@ class StagingEngine(_BaseStorage):
 
             case (int() as idx, *rest):
                 self._traverse_list_update(lst[idx], tuple(rest), data)
-

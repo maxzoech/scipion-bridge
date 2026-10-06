@@ -6,6 +6,7 @@ from typing import (
     Any,
     Callable,
     List,
+    Optional,
     Tuple,
     TypeVar,
 )
@@ -15,6 +16,13 @@ from .node import Node, LoweringContext
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
 from .ir import IROp, IRSource, IRMap, IRAccumulate
+from .element_mapper import (
+    ElementMapConfig,
+    Executor,
+    StartMethod,
+    Workers,
+    make_element_mapper,
+)
 
 _NodeT = TypeVar("_NodeT", bound=Node)
 
@@ -43,6 +51,53 @@ class Op(Node):
     def map(self, func: Callable[[Any], Any]) -> MapOp:
         """Alias for map_batch."""
         return self.map_batch(func)
+
+    def map_element(
+        self,
+        func: Callable[[Any], Any],
+        *,
+        workers: Workers = "auto",
+        executor: Executor = "thread",
+        start_method: Optional[StartMethod] = None,
+        chunksize: Optional[int] = None,
+    ) -> MapElementOp:
+        """Apply ``func`` to every element of the incoming collections, in parallel.
+
+        For each collection ``col`` (any collection with ``__len__``,
+        ``__getitem__`` and ``__setitem__``) this runs
+        ``col[i] = func(col[i])`` for all ``i`` on a thread pool and forwards
+        the same, modified collection. ``func`` may modify the element in
+        place (e.g. a Set row view) or return a new value. Every index is
+        processed by exactly one worker.
+
+        Use it after ``.chunk(n)`` to preprocess elements on the CPU in a
+        stage of its own::
+
+            particles.chunk(256).map_element(preprocess).map(forward)
+
+        Args:
+            func: Function applied to each element.
+            workers: Number of workers, or ``"auto"`` for one worker per
+                element capped at the available CPUs.
+            executor: ``"thread"`` (default) or ``"process"``. Threads are safe
+                next to CUDA/JAX and scale when ``func`` releases the GIL
+                (NumPy, PyTorch, OpenCV); processes help for pure-Python work.
+            start_method: Process start method (``"spawn"`` by default; only
+                with ``executor="process"``). Avoid ``"fork"`` in processes that
+                initialized CUDA or JAX.
+            chunksize: Consecutive indices per pool task.
+        """
+        return self.op(
+            MapElementOp(
+                func,
+                ElementMapConfig(
+                    workers=workers,
+                    executor=executor,
+                    start_method=start_method,
+                    chunksize=chunksize,
+                ),
+            )
+        )
 
     def chunk(self, n: int, drop_last: bool = False) -> ChunkOp:
         """Accumulate Set[T] instances into batches of target size `n`.
@@ -95,6 +150,24 @@ class MapOp(Op):
 
     def lower(self, ctx: LoweringContext) -> IROp:
         return IRMap(func=self.func)
+
+
+class MapElementOp(Op):
+    """Operation node applying a function to every element of a collection in parallel."""
+
+    def __init__(self, func: Callable[[Any], Any], config: ElementMapConfig):
+        super().__init__(upstream=None)
+        self.func = func
+        self.config = config
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        accumulate_fn, initial_state_fn = make_element_mapper(self.func, self.config)
+        func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
+        return IRAccumulate(
+            accumulate_fn=accumulate_fn,
+            initial_state_fn=initial_state_fn,
+            name=f"map_element({func_name})",
+        )
 
 
 def _make_set_chunk_accumulator(
@@ -177,4 +250,5 @@ class ChunkOp(Op):
             accumulate_fn=accumulate_fn,
             initial_state_fn=initial_state_fn,
             flush_fn=flush_fn,
+            name=f"chunk({self.n})",
         )

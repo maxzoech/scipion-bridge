@@ -6,6 +6,7 @@ from typing import (
     Any,
     Dict,
     Optional,
+    SupportsIndex,
     Tuple,
     Type,
     TypeVar,
@@ -29,6 +30,7 @@ from .schema import (
 from ..utils.marker import Marker
 from .storage import _BaseStorage, StagingEngine
 from .exceptions import UninitializedFieldError
+from .key_path import KeyPath
 
 
 def _is_supported_scalar_value(cls: Type) -> bool:
@@ -514,3 +516,32 @@ class Struct(Trait, SchemaConvertible):
 
     def convert_to_entry(self) -> Entry:
         return SchemaEntry(schema=self.schema())
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        """Pickle views with only their own leaves.
+
+        A Struct obtained from a Set element (``s[i]``) or a nested field is a
+        view into a larger storage; pickling it by default would serialize the
+        entire parent storage. Views are pickled as their initialized leaves
+        and restored into a fresh storage. Structs owning their storage keep
+        the default pickling.
+        """
+        match self.storage.is_view:
+            case True:
+                leaves = {
+                    path: self.storage.read(key, entry)
+                    for path, entry in self.schema().tree_iter()
+                    if (key := self.storage.root.extend(path)) in self.storage
+                }
+                return (_struct_from_leaves, (type(self), leaves))
+            case False:
+                return super().__reduce_ex__(protocol)
+
+
+def _struct_from_leaves(cls: Type[Struct], leaves: Dict[KeyPath, Any]) -> Struct:
+    """Unpickle a Struct view serialized by ``Struct.__reduce_ex__``."""
+    struct = cls()
+    for path, entry in cls.schema().tree_iter():
+        if path in leaves:
+            struct.storage.write(struct.storage.root.extend(path), entry, leaves[path])
+    return struct

@@ -303,7 +303,7 @@ class RayBackend(StreamingBackendProvider):
             )
             python_path = ":".join(all_paths)
 
-            ray.init(
+            context = ray.init(
                 ignore_reinit_error=True,
                 runtime_env={
                     "env_vars": {
@@ -311,6 +311,11 @@ class RayBackend(StreamingBackendProvider):
                     },
                 },
             )
+
+            url = context.dashboard_url
+            if url:
+                clickable_url = url if url.startswith("http") else f"http://{url}"
+                print(f"\n🚀 Ray Dashboard: {clickable_url}\n")
 
     def compile(self, ir_sinks: List[IROp]) -> RayCompiledPipeline:
         """Compile a list of IR sink nodes into an executable RayCompiledPipeline."""
@@ -398,8 +403,8 @@ def _describe(node: IROp) -> str:
             return f"source({name})"
         case IRMap(func=func):
             return f"map({getattr(func, '__qualname__', type(func).__name__)})"
-        case IRAccumulate():
-            return "accumulate"
+        case IRAccumulate(name=name):
+            return name
         case IRSink(writer=writer):
             return f"sink({type(writer).__name__})"
         case _:

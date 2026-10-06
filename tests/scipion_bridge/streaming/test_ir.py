@@ -4,6 +4,7 @@ from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 from scipion_bridge.core.streaming.ir import IRSource, IRMap, IRSink, IRAccumulate
 from scipion_bridge.core.streaming.node import lower
 
+
 def test_linear_lowering():
     results = []
     writer = CallbackSinkWriter(lambda x: results.append(x))
@@ -95,3 +96,21 @@ def test_chunk_lowering():
     src_ir = accum_ir.upstream[0]
     assert isinstance(src_ir, IRSource)
     assert src_ir.downstream == [accum_ir]
+    assert accum_ir.name == "chunk(10)"
+
+
+def test_map_element_lowering():
+    def preprocess(x):
+        return x
+
+    source = Source("input")
+    sink_node = source.map_element(preprocess, workers=2).write_to(
+        CallbackSinkWriter(lambda x: None),
+    )
+
+    (sink_ir,) = lower([sink_node])
+    element_ir = sink_ir.upstream[0]
+
+    assert isinstance(element_ir, IRAccumulate)
+    assert element_ir.flush_fn is None
+    assert element_ir.name == f"map_element({preprocess.__qualname__})"

@@ -235,7 +235,7 @@ def test_stage_stats_count_items_per_stage():
 
     assert [label.split(":", 1)[1] for label in stats] == [
         "source(items)",
-        "accumulate",
+        "chunk(4)",
         f"map({identity.__qualname__})",
         "sink(CallbackSinkWriter)",
     ]

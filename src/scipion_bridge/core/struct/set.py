@@ -325,6 +325,9 @@ class Set(Marker[T], SchemaConvertible):
                     value.schema()
                 ):
                     source_path = value.storage.root.extend(path)
+                    if source_path not in value.storage:
+                        continue
+
                     data = value.storage.read(source_path, source_entry)
 
                     target_path = target_root.extend(path)

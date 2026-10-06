@@ -28,7 +28,7 @@ class IROp:
         """Wire a downstream edge and reciprocal upstream edge."""
         if child not in self.downstream:
             self.downstream.append(child)
-            
+
         if self not in child.upstream:
             child.upstream.append(self)
 
@@ -60,6 +60,7 @@ class IRAccumulate(IROp):
     )
     initial_state_fn: Callable[[], Any] = field(default=lambda: None)
     flush_fn: Optional[Callable[[Any], Tuple[Any, List[Any]]]] = None
+    name: str = "accumulate"
 
 
 @dataclass(eq=False)
@@ -67,4 +68,3 @@ class IRSink(IROp):
     """Terminal/Checkpoint node delegating to an async SinkWriter."""
 
     writer: Optional[SinkWriter] = None
-

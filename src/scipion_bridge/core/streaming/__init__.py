@@ -1,5 +1,6 @@
 from .node import Node, FlushSignal, FLUSH, lower, LoweringContext
-from .ops import Op, Source, MapOp, ChunkOp
+from .ops import Op, Source, MapOp, MapElementOp, ChunkOp
+from .element_mapper import ElementMapConfig
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
 from .ir import IROp, IRSource, IRMap, IRAccumulate, IRSink
@@ -11,6 +12,8 @@ __all__ = [
     "Op",
     "Source",
     "MapOp",
+    "MapElementOp",
+    "ElementMapConfig",
     "ChunkOp",
     "Sink",
     "FlushSignal",

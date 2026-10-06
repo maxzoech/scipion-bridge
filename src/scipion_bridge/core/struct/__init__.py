@@ -20,7 +20,6 @@ from .storage import (
     StorageView,
 )
 from .exceptions import UninitializedFieldError
-from .utils import dask_serialization
 
 __all__ = [
     "Struct",
