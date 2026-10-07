@@ -5,8 +5,9 @@ The IR is a backend-agnostic DAG representation of the streaming pipeline.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .sink_writer import SinkWriter
 
@@ -84,3 +85,29 @@ class IRSink(IROp):
     """Terminal/Checkpoint node delegating to an async SinkWriter."""
 
     writer: Optional[SinkWriter] = None
+
+
+def clone_ir(sinks: Sequence[IROp]) -> List[IROp]:
+    """Copy the IR DAG reachable upstream from ``sinks``.
+
+    Every node is copied with fresh edges, so the copy can be wired (e.g. to
+    a new sink) and compiled without touching the original. Upstream edges
+    keep their order, which preserves the input ports of multi-input stages.
+    Functions, writers and other attributes are shared, not copied.
+
+    Returns:
+        The copies of ``sinks``, in the same order.
+    """
+    copies: Dict[IROp, IROp] = {}
+
+    def copy(node: IROp) -> IROp:
+        if node in copies:
+            return copies[node]
+
+        node_copy = dataclasses.replace(node, upstream=[], downstream=[])
+        copies[node] = node_copy
+        for up in node.upstream:
+            copy(up).add_downstream(node_copy)
+        return node_copy
+
+    return [copy(sink) for sink in sinks]

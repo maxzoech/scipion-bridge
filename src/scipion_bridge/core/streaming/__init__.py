@@ -12,7 +12,7 @@ from .ops import (
 from .element_mapper import ElementMapConfig
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
-from .ir import IROp, IRSource, IRMap, IRAccumulate, IRSink, Tagged
+from .ir import IROp, IRSource, IRMap, IRAccumulate, IRSink, Tagged, clone_ir
 from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
 from .pipeline import Pipeline
 
@@ -38,6 +38,7 @@ __all__ = [
     "IRAccumulate",
     "IRSink",
     "Tagged",
+    "clone_ir",
     "lower",
     "replace_node",
     "LoweringContext",

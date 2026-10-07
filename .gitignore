@@ -216,3 +216,17 @@ __marimo__/
 *.star
 
 .agents
+
+# Placeholders the Claude Code Bash sandbox mounts over these paths, and local
+# Claude Code settings
+.claude/
+.mcp.json
+.idea
+.bash_profile
+.bashrc
+.profile
+.zprofile
+.zshrc
+.gitconfig
+.gitmodules
+.ripgreprc
