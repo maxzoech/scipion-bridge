@@ -11,6 +11,18 @@ from typing import Any, Callable, List, Optional, Tuple
 from .sink_writer import SinkWriter
 
 
+@dataclass(frozen=True)
+class Tagged:
+    """Item arriving on a stage with several inputs, tagged with its input port.
+
+    The port is the position of the sending stage among the upstream stages
+    of the receiving stage.
+    """
+
+    port: int
+    item: Any
+
+
 @dataclass(eq=False)
 class IROp:
     """Base class for all IR primitives with DAG edge management."""
@@ -62,6 +74,9 @@ class IRAccumulate(IROp):
     initial_state_fn: Callable[[], Any] = field(default=lambda: None)
     flush_fn: Optional[Callable[[Any], Tuple[Any, List[Any]]]] = None
     name: str = "accumulate"
+    # Pass items to accumulate_fn as Tagged(port, item), with the port they
+    # arrive on, to tell the upstream stages apart.
+    tag_inputs: bool = False
 
 
 @dataclass(eq=False)

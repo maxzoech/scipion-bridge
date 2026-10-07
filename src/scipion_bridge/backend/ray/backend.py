@@ -19,17 +19,20 @@ from scipion_bridge.core.streaming.ir import (
     IRMap,
     IRAccumulate,
     IRSink,
+    Tagged,
 )
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
 
-_QueueEntry = Tuple[Any, Optional[asyncio.Future[None]]]
+_Barrier = asyncio.Future[None]
+_InboxEntry = Tuple[Any, int, Optional[_Barrier]]
+_OutboxEntry = Tuple[Any, List[_Barrier]]
 
 
-def _fail(done: Optional[asyncio.Future[None]], error: BaseException) -> None:
-    """Fail a pending FLUSH barrier, if any."""
-    if done is not None:
-        done.set_exception(error)
+def _fail(barriers: List[_Barrier], error: BaseException) -> None:
+    """Fail pending FLUSH barriers."""
+    for barrier in barriers:
+        barrier.set_exception(error)
 
 
 class _PipelinedStage(abc.ABC):
@@ -48,7 +51,12 @@ class _PipelinedStage(abc.ABC):
 
     ``FLUSH`` acts as a barrier: ``push(FLUSH)`` returns only after all
     preceding items and the flush itself have propagated through every
-    downstream stage.
+    downstream stage. A stage with several upstream stages receives one FLUSH
+    from each; it finalizes and forwards a single FLUSH once all have arrived.
+
+    Each item is pushed with the ``port`` it arrives on: the position of the
+    sending stage among the upstream stages of the receiver. Stages with
+    several inputs use it to tell their inputs apart.
 
     A failure in a stage or downstream is stored and raised by every
     subsequent ``push``, so it propagates upstream to the driver. The failing
@@ -58,18 +66,33 @@ class _PipelinedStage(abc.ABC):
     """
 
     def __init__(self, queue_size: int) -> None:
-        self._inbox: asyncio.Queue[_QueueEntry] = asyncio.Queue(maxsize=queue_size)
-        self._outbox: asyncio.Queue[_QueueEntry] = asyncio.Queue(maxsize=queue_size)
-        self._downstream: List[Any] = []
+        self._inbox: asyncio.Queue[_InboxEntry] = asyncio.Queue(maxsize=queue_size)
+        self._outbox: asyncio.Queue[_OutboxEntry] = asyncio.Queue(maxsize=queue_size)
+        self._downstream: List[Tuple[Any, int]] = []
         self._sources: List[Any] = []
+        self._num_inputs = 1
+        self._pending_flushes: List[_Barrier] = []
         self._error: Optional[BaseException] = None
         self._tasks: List[asyncio.Task[None]] = []
         self._stats = StageStats()
 
-    async def connect(self, handles: List[Any], sources: List[Any]) -> None:
-        """Configure downstream and source actor handles and start the stage loops."""
-        self._downstream = handles
+    async def connect(
+        self,
+        downstream: List[Tuple[Any, int]],
+        sources: List[Any],
+        num_inputs: int,
+    ) -> None:
+        """Configure the stage and start its loops.
+
+        Args:
+            downstream: Downstream actor handles, each with the port this stage
+                feeds on it.
+            sources: Source actor handles of the pipeline, aborted on failure.
+            num_inputs: Number of upstream stages, each sending one FLUSH.
+        """
+        self._downstream = downstream
         self._sources = sources
+        self._num_inputs = num_inputs
         self._tasks = [
             asyncio.create_task(self._run_compute()),
             asyncio.create_task(self._run_emit()),
@@ -82,33 +105,38 @@ class _PipelinedStage(abc.ABC):
     async def abort(self, error: BaseException) -> None:
         """Fail this stage with an error raised elsewhere in the pipeline."""
         if self._error is None:
-            self._error = error
+            self._store_error(error)
 
     def _set_error(self, error: BaseException) -> None:
         """Fail this stage and abort the pipeline sources on the first error."""
         if self._error is not None:
             return
 
-        self._error = error
+        self._store_error(error)
         for source in self._sources:
             source.abort.remote(error)
 
-    async def push(self, item: Any) -> None:
+    def _store_error(self, error: BaseException) -> None:
+        self._error = error
+        _fail(self._pending_flushes, error)
+        self._pending_flushes = []
+
+    async def push(self, item: Any, port: int = 0) -> None:
         """Enqueue an item; for FLUSH, wait until the pipeline has drained."""
         if self._error is not None:
             raise self._error
 
         match item:
             case FlushSignal():
-                done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                await self._inbox.put((item, done))
+                done: _Barrier = asyncio.get_running_loop().create_future()
+                await self._inbox.put((item, port, done))
                 await done
             case _:
-                await self._inbox.put((item, None))
+                await self._inbox.put((item, port, None))
 
     @abc.abstractmethod
-    async def process(self, item: Any) -> List[Any]:
-        """Process a single item and return the items to emit downstream."""
+    async def process(self, item: Any, port: int) -> List[Any]:
+        """Process an item arriving on ``port`` and return the items to emit."""
         ...
 
     async def on_flush(self) -> List[Any]:
@@ -118,56 +146,76 @@ class _PipelinedStage(abc.ABC):
     async def _run_compute(self) -> None:
         while True:
             t_wait = time.perf_counter()
-            item, done = await self._inbox.get()
+            item, port, done = await self._inbox.get()
             t_start = time.perf_counter()
             self._stats.idle_s += t_start - t_wait
 
+            barriers = [] if done is None else [done]
             if self._error is not None:
-                _fail(done, self._error)
+                _fail(barriers, self._error)
                 continue
 
+            match item:
+                case FlushSignal():
+                    # Wait for the FLUSH of every upstream stage; the barriers of
+                    # all of them are released by the single forwarded FLUSH.
+                    self._pending_flushes.extend(barriers)
+                    if len(self._pending_flushes) < self._num_inputs:
+                        continue
+
+                    barriers, self._pending_flushes = self._pending_flushes, []
+
+                case _:
+                    self._stats.items_in += 1
+
             try:
-                match item:
-                    case FlushSignal():
-                        emissions = await self.on_flush()
-                    case _:
-                        self._stats.items_in += 1
-                        emissions = await self.process(item)
+                emissions = await self._compute(item, port)
             except Exception as error:
                 self._set_error(error)
-                _fail(done, error)
+                _fail(barriers, error)
                 continue
 
             t_processed = time.perf_counter()
             self._stats.process_s += t_processed - t_start
 
             for out_item in emissions:
-                await self._outbox.put((out_item, None))
-            if done is not None:
-                await self._outbox.put((item, done))
+                await self._outbox.put((out_item, []))
+            if barriers:
+                await self._outbox.put((item, barriers))
             self._stats.blocked_s += time.perf_counter() - t_processed
+
+    async def _compute(self, item: Any, port: int) -> List[Any]:
+        match item:
+            case FlushSignal():
+                return await self.on_flush()
+
+            case _:
+                return await self.process(item, port)
 
     async def _run_emit(self) -> None:
         while True:
-            item, done = await self._outbox.get()
+            item, barriers = await self._outbox.get()
             if self._error is not None:
-                _fail(done, self._error)
+                _fail(barriers, self._error)
                 continue
 
             t_start = time.perf_counter()
             try:
-                await asyncio.gather(*(h.push.remote(item) for h in self._downstream))
+                await asyncio.gather(
+                    *(h.push.remote(item, port) for h, port in self._downstream)
+                )
             except Exception as error:
                 self._set_error(error)
-                _fail(done, error)
+                _fail(barriers, error)
                 continue
 
-            match done:
-                case None:
+            match barriers:
+                case []:
                     self._stats.emit_s += time.perf_counter() - t_start
                     self._stats.items_out += 1
                 case _:
-                    done.set_result(None)
+                    for barrier in barriers:
+                        barrier.set_result(None)
 
 
 @ray.remote
@@ -178,7 +226,7 @@ class RaySourceActor(_PipelinedStage):
         super().__init__(queue_size)
         self.name = name
 
-    async def process(self, item: Any) -> List[Any]:
+    async def process(self, item: Any, port: int) -> List[Any]:
         return [item]
 
 
@@ -198,13 +246,17 @@ class RayWorkerActor(_PipelinedStage):
         super().__init__(queue_size)
         self.func = func
 
-    async def process(self, item: Any) -> List[Any]:
+    async def process(self, item: Any, port: int) -> List[Any]:
         return [await asyncio.to_thread(self.func, item)]
 
 
 @ray.remote
 class RayAccumulatorActor(_PipelinedStage):
-    """Stateful accumulation stage (IRAccumulate) of the streaming pipeline."""
+    """Stateful accumulation stage (IRAccumulate) of the streaming pipeline.
+
+    With ``tag_inputs``, every item is passed to ``accumulate_fn`` as
+    ``Tagged(port, item)`` so that it can tell its inputs apart.
+    """
 
     def __init__(
         self,
@@ -213,6 +265,7 @@ class RayAccumulatorActor(_PipelinedStage):
         queue_size: int,
         parameters: Mapping[str, Any],
         flush_fn: Optional[Callable[[Any], tuple[Any, List[Any]]]] = None,
+        tag_inputs: bool = False,
     ):
         from .container import configure_ray_env
 
@@ -220,13 +273,15 @@ class RayAccumulatorActor(_PipelinedStage):
         super().__init__(queue_size)
         self.accumulate_fn = accumulate_fn
         self.flush_fn = flush_fn
+        self.tag_inputs = tag_inputs
         self.state = initial_state_fn()
 
-    async def process(self, item: Any) -> List[Any]:
+    async def process(self, item: Any, port: int) -> List[Any]:
+        value = Tagged(port=port, item=item) if self.tag_inputs else item
         self.state, emissions = await asyncio.to_thread(
             self.accumulate_fn,
             self.state,
-            item,
+            value,
         )
         return emissions
 
@@ -246,7 +301,7 @@ class RaySinkActor(_PipelinedStage):
         super().__init__(queue_size)
         self.writer = writer
 
-    async def process(self, item: Any) -> List[Any]:
+    async def process(self, item: Any, port: int) -> List[Any]:
         await self.writer.write(item)
         return []
 
@@ -393,6 +448,7 @@ class RayBackend(StreamingBackendProvider):
                     accumulate_fn=accumulate_fn,
                     initial_state_fn=initial_state_fn,
                     flush_fn=flush_fn,
+                    tag_inputs=tag_inputs,
                 ):
                     actor_cls = RayAccumulatorActor
                     kwargs = {
@@ -401,6 +457,7 @@ class RayBackend(StreamingBackendProvider):
                         "queue_size": self.queue_size,
                         "parameters": self.parameters,
                         "flush_fn": flush_fn,
+                        "tag_inputs": tag_inputs,
                     }
                 case IRSink(writer=writer):
                     actor_cls = RaySinkActor
@@ -420,13 +477,16 @@ class RayBackend(StreamingBackendProvider):
             name: actor_map[src_node] for name, src_node in sources_map.items()
         }
 
-        # 3. Wire downstream and source actor handles and start the stage loops
+        # 3. Wire downstream and source actor handles and start the stage loops.
+        # Every stage feeds a downstream stage on the port given by its position
+        # among the upstream stages of the downstream stage.
         source_handles = list(compiled_sources.values())
         ray.get(
             [
                 actor.connect.remote(
-                    [actor_map[d] for d in node.downstream],
+                    [(actor_map[d], d.upstream.index(node)) for d in node.downstream],
                     source_handles,
+                    max(1, len(node.upstream)),
                 )
                 for node, actor in actor_map.items()
             ]

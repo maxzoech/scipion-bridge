@@ -1,9 +1,18 @@
 from .node import Node, FlushSignal, FLUSH, lower, replace_node, LoweringContext
-from .ops import Op, Source, MapOp, MapElementOp, ChunkOp, CollectOp, FlattenOp
+from .ops import (
+    Op,
+    Source,
+    MapOp,
+    MapElementOp,
+    ChunkOp,
+    CollectOp,
+    FlattenOp,
+    CombineLatestOp,
+)
 from .element_mapper import ElementMapConfig
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
-from .ir import IROp, IRSource, IRMap, IRAccumulate, IRSink
+from .ir import IROp, IRSource, IRMap, IRAccumulate, IRSink, Tagged
 from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
 from .pipeline import Pipeline
 
@@ -17,6 +26,7 @@ __all__ = [
     "ChunkOp",
     "CollectOp",
     "FlattenOp",
+    "CombineLatestOp",
     "Sink",
     "FlushSignal",
     "FLUSH",
@@ -27,6 +37,7 @@ __all__ = [
     "IRMap",
     "IRAccumulate",
     "IRSink",
+    "Tagged",
     "lower",
     "replace_node",
     "LoweringContext",

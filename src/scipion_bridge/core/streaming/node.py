@@ -31,6 +31,14 @@ class LoweringContext:
             up_ir = self.lower_node(up)
             up_ir.add_downstream(ir_node)
 
+        # Inputs are identified by their position among the upstream stages, so
+        # a stage cannot consume the same stream on several inputs.
+        if len(ir_node.upstream) != len(node.upstream):
+            raise ValueError(
+                f"{type(node).__name__} receives the same stream on several "
+                "inputs. Inputs of an operation must be distinct streams.",
+            )
+
         return ir_node
 
 

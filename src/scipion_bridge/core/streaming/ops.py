@@ -16,7 +16,7 @@ from ..struct import Set, concat
 from .node import Node, LoweringContext
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
-from .ir import IROp, IRSource, IRMap, IRAccumulate
+from .ir import IROp, IRSource, IRMap, IRAccumulate, Tagged
 from .element_mapper import (
     ElementMapConfig,
     Executor,
@@ -131,6 +131,33 @@ class Op(Node):
     def flatten(self) -> FlattenOp:
         """Emit every element of incoming lists or tuples as a separate item (1:N)."""
         return self.op(FlattenOp())
+
+    def combine_latest(self, other: Op) -> CombineLatestOp:
+        """Pair every item of this stream with the latest item of `other`.
+
+        Emits `(item, latest)` for every item of this stream, where `latest` is
+        the most recent item of `other`. Items arriving before `other` produced
+        its first item are buffered and emitted once it has. Items of `other`
+        only update `latest` and emit nothing themselves. Items still buffered
+        at the end of the stream (FlushSignal) are dropped, as `other` never
+        produced an item to pair them with.
+
+        Use it to apply a model trained on a sample of the stream to the whole
+        stream::
+
+            model = particles.collect(5_000).map(train)
+            particles.chunk(256).combine_latest(model).map(predict)
+
+        Args:
+            other: Stream providing the latest value. Must be a different stream
+                than this one.
+        """
+        if other is self:
+            raise ValueError("combine_latest() requires two different streams.")
+
+        node = self.op(CombineLatestOp())
+        other.op(node)
+        return node
 
     def write_to(self, writer: SinkWriter) -> Sink:
         """Attach a terminal SinkWriter."""
@@ -378,4 +405,58 @@ class FlattenOp(Op):
             accumulate_fn=_flatten,
             initial_state_fn=_no_state,
             name="flatten",
+        )
+
+
+class _CombineLatestState(NamedTuple):
+    latest: Any
+    has_latest: bool
+    pending: List[Any]
+
+
+def _combine_latest_initial_state() -> _CombineLatestState:
+    return _CombineLatestState(latest=None, has_latest=False, pending=[])
+
+
+def _combine_latest(
+    state: _CombineLatestState,
+    tagged: Tagged,
+) -> Tuple[_CombineLatestState, List[Tuple[Any, Any]]]:
+    match tagged:
+        case Tagged(port=0, item=item) if state.has_latest:
+            return (state, [(item, state.latest)])
+
+        case Tagged(port=0, item=item):
+            return (state._replace(pending=state.pending + [item]), [])
+
+        case Tagged(port=1, item=latest):
+            released = [(item, latest) for item in state.pending]
+            return (
+                _CombineLatestState(latest=latest, has_latest=True, pending=[]),
+                released,
+            )
+
+        case _:
+            raise ValueError(f"CombineLatestOp has two inputs, got {tagged!r}.")
+
+
+def _combine_latest_flush(
+    state: _CombineLatestState,
+) -> Tuple[_CombineLatestState, List[Tuple[Any, Any]]]:
+    return (state._replace(pending=[]), [])
+
+
+class CombineLatestOp(Op):
+    """Operation node pairing every item of its first input with the latest of its second."""
+
+    def __init__(self) -> None:
+        super().__init__(upstream=None)
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        return IRAccumulate(
+            accumulate_fn=_combine_latest,
+            initial_state_fn=_combine_latest_initial_state,
+            flush_fn=_combine_latest_flush,
+            name="combine_latest",
+            tag_inputs=True,
         )
