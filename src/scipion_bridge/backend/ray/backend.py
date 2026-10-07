@@ -5,6 +5,7 @@ import asyncio
 import os
 import sys
 import time
+import uuid
 import ray
 
 from scipion_bridge.core.streaming.backend import (
@@ -354,43 +355,52 @@ class RayBackend(StreamingBackendProvider):
         for sink in ir_sinks:
             _traverse(sink)
 
-        # 2. Instantiate Ray actors for every IR node
+        # 2. Instantiate Ray actors for every IR node. Actors are named so that
+        # stages can be identified in the Ray dashboard; the pipeline id keeps
+        # the names unique within the Ray namespace.
+        pipeline_id = uuid.uuid4().hex[:8]
         actor_map: Dict[IROp, Any] = {}
-        for node in all_nodes:
+        for index, node in enumerate(all_nodes):
             match node:
                 case IRSource(name=name):
-                    actor = RaySourceActor.remote(
-                        name=name,
-                        queue_size=self.queue_size,
-                    )
+                    actor_cls: Any = RaySourceActor
+                    kwargs: Dict[str, Any] = {
+                        "name": name,
+                        "queue_size": self.queue_size,
+                    }
                 case IRMap(func=func):
-                    actor = RayWorkerActor.remote(
-                        func=func,
-                        queue_size=self.queue_size,
-                        parameters=self.parameters,
-                    )
+                    actor_cls = RayWorkerActor
+                    kwargs = {
+                        "func": func,
+                        "queue_size": self.queue_size,
+                        "parameters": self.parameters,
+                    }
                 case IRAccumulate(
                     accumulate_fn=accumulate_fn,
                     initial_state_fn=initial_state_fn,
                     flush_fn=flush_fn,
                 ):
-                    actor = RayAccumulatorActor.remote(
-                        accumulate_fn=accumulate_fn,
-                        initial_state_fn=initial_state_fn,
-                        queue_size=self.queue_size,
-                        parameters=self.parameters,
-                        flush_fn=flush_fn,
-                    )
+                    actor_cls = RayAccumulatorActor
+                    kwargs = {
+                        "accumulate_fn": accumulate_fn,
+                        "initial_state_fn": initial_state_fn,
+                        "queue_size": self.queue_size,
+                        "parameters": self.parameters,
+                        "flush_fn": flush_fn,
+                    }
                 case IRSink(writer=writer):
-                    actor = RaySinkActor.remote(
-                        writer=writer,
-                        queue_size=self.queue_size,
-                    )
+                    actor_cls = RaySinkActor
+                    kwargs = {
+                        "writer": writer,
+                        "queue_size": self.queue_size,
+                    }
                 case _:
                     raise NotImplementedError(
                         f"Unsupported IR op type for Ray backend: {type(node).__name__}",
                     )
-            actor_map[node] = actor
+            actor_map[node] = actor_cls.options(
+                name=f"{pipeline_id}:{index}:{_describe(node)}",
+            ).remote(**kwargs)
 
         # 3. Wire downstream actor handles and start the stage loops
         ray.get(
@@ -417,8 +427,8 @@ def _describe(node: IROp) -> str:
     match node:
         case IRSource(name=name):
             return f"source({name})"
-        case IRMap(func=func):
-            return f"map({getattr(func, '__qualname__', type(func).__name__)})"
+        case IRMap(func=func, name=name):
+            return name or f"map({getattr(func, '__qualname__', type(func).__name__)})"
         case IRAccumulate(name=name):
             return name
         case IRSink(writer=writer):

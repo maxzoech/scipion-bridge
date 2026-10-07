@@ -45,6 +45,7 @@ class IRMap(IROp):
     """Stateless 1:1 batch/element transformation."""
 
     func: Callable[[Any], Any] = field(default=lambda x: x)
+    name: Optional[str] = None
 
 
 @dataclass(eq=False)

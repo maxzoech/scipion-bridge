@@ -179,3 +179,48 @@ def test_repeated_input_access_is_deduplicated():
     steps = chain.steps()
 
     assert _source_names(steps) == ["micrographs"]
+
+
+class RepeatedInput(Protocol):
+    """Uses its input twice, creating two Source nodes with the same name."""
+
+    particles: B.Input[B.Set[Particle]] = B.Input()
+
+    def outputs(self):
+        return {"result": B.Set[Particle]}
+
+    def steps(self):
+        left = self.particles.map(lambda p: p)
+        right = self.particles.map(lambda p: p)
+        final = left.map(lambda p: {"result": p})
+        right.op(final)
+        return final
+
+
+def test_chain_feeds_repeated_input_branches_from_one_adapter():
+    chain = Stage1().pipe(RepeatedInput())
+
+    sink_ir = LoweringContext().lower_node(chain.steps())
+    sources = [node for node in _walk_ir(sink_ir) if type(node).__name__ == "IRSource"]
+
+    # Only the source of the first protocol is left, and the adapter selecting
+    # its output fans out to both branches of the second protocol.
+    assert [source.name for source in sources] == ["particles"]
+    adapters = [
+        node
+        for node in _walk_ir(sink_ir)
+        if type(node).__name__ == "IRMap" and len(node.downstream) == 2
+    ]
+    assert len(adapters) == 1
+
+
+def _walk_ir(root):
+    seen, stack, order = set(), [root], []
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        order.append(node)
+        stack.extend(node.upstream)
+    return order

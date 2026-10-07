@@ -114,3 +114,38 @@ def test_map_element_lowering():
     assert isinstance(element_ir, IRAccumulate)
     assert element_ir.flush_fn is None
     assert element_ir.name == f"map_element({preprocess.__qualname__})"
+
+
+def test_same_named_sources_lower_to_one_ir_source():
+    w1 = CallbackSinkWriter(lambda x: None)
+    w2 = CallbackSinkWriter(lambda x: None)
+
+    # Two distinct nodes with the same name, as created by repeated accesses
+    # to the same protocol input.
+    branch1 = Source("x").map_batch(lambda x: x + 1).write_to(w1)
+    branch2 = Source("x").map_batch(lambda x: x + 2).write_to(w2)
+
+    ir_sinks = lower([branch1, branch2])
+
+    src_ir_1 = ir_sinks[0].upstream[0].upstream[0]
+    src_ir_2 = ir_sinks[1].upstream[0].upstream[0]
+    assert src_ir_1 is src_ir_2
+    assert isinstance(src_ir_1, IRSource)
+    assert len(src_ir_1.downstream) == 2
+
+
+def test_map_lowering_is_named():
+    def double(x):
+        return x * 2
+
+    sink_node = (
+        Source("input")
+        .map_batch(double)
+        .write_to(
+            CallbackSinkWriter(lambda x: None),
+        )
+    )
+
+    map_ir = lower([sink_node])[0].upstream[0]
+    assert isinstance(map_ir, IRMap)
+    assert map_ir.name.startswith("map(") and "double" in map_ir.name

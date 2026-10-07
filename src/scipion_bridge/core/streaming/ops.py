@@ -136,6 +136,11 @@ class Source(Op):
         self.name = name
 
     def lower(self, ctx: LoweringContext) -> IROp:
+        # Source nodes with the same name are one input of the pipeline, e.g.
+        # when a protocol accesses the same input several times.
+        if self.name in ctx.sources:
+            return ctx.sources[self.name]
+
         ir = IRSource(name=self.name)
         ctx.sources[self.name] = ir
         return ir
@@ -149,7 +154,8 @@ class MapOp(Op):
         self.func = func
 
     def lower(self, ctx: LoweringContext) -> IROp:
-        return IRMap(func=self.func)
+        func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
+        return IRMap(func=self.func, name=f"map({func_name})")
 
 
 class MapElementOp(Op):
