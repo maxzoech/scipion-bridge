@@ -51,20 +51,25 @@ class _PipelinedStage(abc.ABC):
     downstream stage.
 
     A failure in a stage or downstream is stored and raised by every
-    subsequent ``push``, so it propagates upstream to the driver.
+    subsequent ``push``, so it propagates upstream to the driver. The failing
+    stage also aborts the sources of the pipeline, so the driver's next
+    ``send`` fails immediately instead of only at the final FLUSH (a failed
+    stage may never receive another item, e.g. after a ``collect``).
     """
 
     def __init__(self, queue_size: int) -> None:
         self._inbox: asyncio.Queue[_QueueEntry] = asyncio.Queue(maxsize=queue_size)
         self._outbox: asyncio.Queue[_QueueEntry] = asyncio.Queue(maxsize=queue_size)
         self._downstream: List[Any] = []
+        self._sources: List[Any] = []
         self._error: Optional[BaseException] = None
         self._tasks: List[asyncio.Task[None]] = []
         self._stats = StageStats()
 
-    async def connect(self, handles: List[Any]) -> None:
-        """Configure downstream actor handles and start the stage loops."""
+    async def connect(self, handles: List[Any], sources: List[Any]) -> None:
+        """Configure downstream and source actor handles and start the stage loops."""
         self._downstream = handles
+        self._sources = sources
         self._tasks = [
             asyncio.create_task(self._run_compute()),
             asyncio.create_task(self._run_emit()),
@@ -73,6 +78,20 @@ class _PipelinedStage(abc.ABC):
     async def stats(self) -> StageStats:
         """Return the execution metrics of this stage."""
         return self._stats
+
+    async def abort(self, error: BaseException) -> None:
+        """Fail this stage with an error raised elsewhere in the pipeline."""
+        if self._error is None:
+            self._error = error
+
+    def _set_error(self, error: BaseException) -> None:
+        """Fail this stage and abort the pipeline sources on the first error."""
+        if self._error is not None:
+            return
+
+        self._error = error
+        for source in self._sources:
+            source.abort.remote(error)
 
     async def push(self, item: Any) -> None:
         """Enqueue an item; for FLUSH, wait until the pipeline has drained."""
@@ -115,7 +134,7 @@ class _PipelinedStage(abc.ABC):
                         self._stats.items_in += 1
                         emissions = await self.process(item)
             except Exception as error:
-                self._error = error
+                self._set_error(error)
                 _fail(done, error)
                 continue
 
@@ -139,7 +158,7 @@ class _PipelinedStage(abc.ABC):
             try:
                 await asyncio.gather(*(h.push.remote(item) for h in self._downstream))
             except Exception as error:
-                self._error = error
+                self._set_error(error)
                 _fail(done, error)
                 continue
 
@@ -327,11 +346,6 @@ class RayBackend(StreamingBackendProvider):
                 },
             )
 
-            url = context.dashboard_url
-            if url:
-                clickable_url = url if url.startswith("http") else f"http://{url}"
-                print(f"\n🚀 Ray Dashboard: {clickable_url}\n")
-
     def compile(self, ir_sinks: List[IROp]) -> RayCompiledPipeline:
         """Compile a list of IR sink nodes into an executable RayCompiledPipeline."""
         if not ir_sinks:
@@ -402,17 +416,22 @@ class RayBackend(StreamingBackendProvider):
                 name=f"{pipeline_id}:{index}:{_describe(node)}",
             ).remote(**kwargs)
 
-        # 3. Wire downstream actor handles and start the stage loops
+        compiled_sources = {
+            name: actor_map[src_node] for name, src_node in sources_map.items()
+        }
+
+        # 3. Wire downstream and source actor handles and start the stage loops
+        source_handles = list(compiled_sources.values())
         ray.get(
             [
-                actor.connect.remote([actor_map[d] for d in node.downstream])
+                actor.connect.remote(
+                    [actor_map[d] for d in node.downstream],
+                    source_handles,
+                )
                 for node, actor in actor_map.items()
             ]
         )
 
-        compiled_sources = {
-            name: actor_map[src_node] for name, src_node in sources_map.items()
-        }
         return RayCompiledPipeline(
             sources=compiled_sources,
             stages={

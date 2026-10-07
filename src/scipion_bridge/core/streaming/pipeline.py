@@ -77,4 +77,7 @@ class Pipeline:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.flush()
+        # On an exception the pipeline is failed; flushing it would only raise
+        # again and hide the original error.
+        if exc_type is None:
+            self.flush()

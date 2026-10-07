@@ -202,6 +202,41 @@ def test_stage_error_propagates_to_driver():
         pipeline.flush()
 
 
+def _reject(s):
+    raise ValueError("rejected sample")
+
+
+def test_stage_error_fails_send_before_flush():
+    # After collect emits its single item, the failed stage never receives
+    # another item; the error must still reach the driver while it is sending.
+    source = Source("items")
+    sink_node = source.collect(2).map(_reject).write_to(CallbackSinkWriter(print))
+
+    backend = RayBackend(init_ray=False)
+    pipeline = Pipeline.from_sink(sink_node, backend=backend)
+
+    sent = 0
+    with pytest.raises(ray.exceptions.RayTaskError) as exc_info:
+        for i in range(500):
+            pipeline.send(items=_make_set([i]))
+            sent += 1
+            time.sleep(0.01)
+
+    assert "rejected sample" in str(exc_info.value)
+    assert sent < 500
+
+
+def test_exception_in_pipeline_block_is_not_hidden_by_flush():
+    source = Source("items")
+    sink_node = source.collect(1).map(_reject).write_to(CallbackSinkWriter(print))
+
+    backend = RayBackend(init_ray=False)
+    with pytest.raises(KeyError, match="driver error"):
+        with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
+            pipeline.send(items=_make_set([1]))
+            raise KeyError("driver error")
+
+
 def test_accumulator_with_rapid_sends_emits_exact_chunks():
     collector = Collector.remote()
 

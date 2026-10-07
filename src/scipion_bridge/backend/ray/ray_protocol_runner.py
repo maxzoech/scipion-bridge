@@ -279,7 +279,7 @@ class RayPipelineRunner:
                 _convert_to_argname(name),
                 dest=name,
                 type=Path,
-                required=not field.optional,
+                required=(not field.optional) or field.default is not None,
                 default=field.default,
                 help=field.help,
             )
