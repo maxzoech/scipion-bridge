@@ -1,5 +1,5 @@
 from .node import Node, FlushSignal, FLUSH, lower, replace_node, LoweringContext
-from .ops import Op, Source, MapOp, MapElementOp, ChunkOp
+from .ops import Op, Source, MapOp, MapElementOp, ChunkOp, CollectOp, FlattenOp
 from .element_mapper import ElementMapConfig
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
@@ -15,6 +15,8 @@ __all__ = [
     "MapElementOp",
     "ElementMapConfig",
     "ChunkOp",
+    "CollectOp",
+    "FlattenOp",
     "Sink",
     "FlushSignal",
     "FLUSH",

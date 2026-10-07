@@ -6,6 +6,7 @@ from typing import (
     Any,
     Callable,
     List,
+    NamedTuple,
     Optional,
     Tuple,
     TypeVar,
@@ -110,6 +111,26 @@ class Op(Node):
                 batch size.
         """
         return self.op(ChunkOp(n=n, drop_last=drop_last))
+
+    def collect(self, n: int) -> CollectOp:
+        """Collect the first `n` elements of a stream of Set[T] into a single Set.
+
+        The collected Set is emitted once, as soon as `n` elements have arrived;
+        all later items are ignored. If the stream ends (FlushSignal) before `n`
+        elements arrived, the elements collected so far are emitted instead.
+
+        Use it to train a model on an initial sample of the stream::
+
+            model = particles.collect(5_000).map(train)
+
+        Args:
+            n: Number of elements to collect. Must be > 0.
+        """
+        return self.op(CollectOp(n=n))
+
+    def flatten(self) -> FlattenOp:
+        """Emit every element of incoming lists or tuples as a separate item (1:N)."""
+        return self.op(FlattenOp())
 
     def write_to(self, writer: SinkWriter) -> Sink:
         """Attach a terminal SinkWriter."""
@@ -257,4 +278,104 @@ class ChunkOp(Op):
             initial_state_fn=initial_state_fn,
             flush_fn=flush_fn,
             name=f"chunk({self.n})",
+        )
+
+
+class _CollectState(NamedTuple):
+    buffer: List[Set[Any]]
+    buffered: int
+    done: bool
+
+
+def _make_set_collect_accumulator(
+    n: int,
+) -> Tuple[
+    Callable[[_CollectState, Any], Tuple[_CollectState, List[Set[Any]]]],
+    Callable[[], _CollectState],
+    Callable[[_CollectState], Tuple[_CollectState, List[Set[Any]]]],
+]:
+    def initial_state() -> _CollectState:
+        return _CollectState(buffer=[], buffered=0, done=False)
+
+    def accumulate(
+        state: _CollectState,
+        item: Any,
+    ) -> Tuple[_CollectState, List[Set[Any]]]:
+        if not isinstance(item, Set):
+            raise TypeError(
+                f"CollectOp expected an instance of Set, got '{type(item).__name__}'.",
+            )
+
+        if state.done or len(item) == 0:
+            return (state, [])
+
+        buffer = state.buffer + [item]
+        buffered = state.buffered + len(item)
+        match buffered >= n:
+            case True:
+                collected = concat(buffer)[:n]
+                return (_CollectState(buffer=[], buffered=0, done=True), [collected])
+
+            case False:
+                return (_CollectState(buffer=buffer, buffered=buffered, done=False), [])
+
+    def flush(state: _CollectState) -> Tuple[_CollectState, List[Set[Any]]]:
+        match (state.done, state.buffered > 0):
+            case (False, True):
+                collected = concat(state.buffer)
+                return (_CollectState(buffer=[], buffered=0, done=True), [collected])
+
+            case _:
+                return (state, [])
+
+    return (accumulate, initial_state, flush)
+
+
+class CollectOp(Op):
+    """Operation node that collects the first `n` elements of a stream into one Set."""
+
+    def __init__(self, n: int):
+        super().__init__(upstream=None)
+        if n <= 0:
+            raise ValueError(f"Collect size n must be positive, got {n}.")
+        self.n = n
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        accumulate_fn, initial_state_fn, flush_fn = _make_set_collect_accumulator(
+            self.n,
+        )
+        return IRAccumulate(
+            accumulate_fn=accumulate_fn,
+            initial_state_fn=initial_state_fn,
+            flush_fn=flush_fn,
+            name=f"collect({self.n})",
+        )
+
+
+def _flatten(state: None, item: Any) -> Tuple[None, List[Any]]:
+    match item:
+        case list() | tuple():
+            return (state, list(item))
+
+        case _:
+            raise TypeError(
+                f"FlattenOp expected a list or tuple, got '{type(item).__name__}'.",
+            )
+
+
+def _no_state() -> None:
+    return None
+
+
+class FlattenOp(Op):
+    """Operation node emitting every element of incoming lists or tuples (1:N)."""
+
+    def __init__(self) -> None:
+        super().__init__(upstream=None)
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        return IRAccumulate(
+            accumulate_fn=_flatten,
+            initial_state_fn=_no_state,
+            name="flatten",
         )

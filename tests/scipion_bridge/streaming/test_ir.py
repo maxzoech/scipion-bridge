@@ -149,3 +149,23 @@ def test_map_lowering_is_named():
     map_ir = lower([sink_node])[0].upstream[0]
     assert isinstance(map_ir, IRMap)
     assert map_ir.name.startswith("map(") and "double" in map_ir.name
+
+
+def test_collect_and_flatten_lowering():
+    sink_node = (
+        Source("input")
+        .collect(7)
+        .map_batch(lambda s: [s])
+        .flatten()
+        .write_to(CallbackSinkWriter(lambda x: None))
+    )
+
+    flatten_ir = lower([sink_node])[0].upstream[0]
+    assert isinstance(flatten_ir, IRAccumulate)
+    assert flatten_ir.name == "flatten"
+    assert flatten_ir.flush_fn is None
+
+    collect_ir = flatten_ir.upstream[0].upstream[0]
+    assert isinstance(collect_ir, IRAccumulate)
+    assert collect_ir.name == "collect(7)"
+    assert collect_ir.flush_fn is not None
