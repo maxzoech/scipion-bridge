@@ -425,3 +425,147 @@ def test_ray_pipeline_runner_with_process_resource_multi_worker(tmp_path, monkey
 
     # 2 distinct worker actors each initialize their own process-local copy:
     assert ray.get(tracker.get_count.remote()) == 2
+
+
+class RechunkProtocol(Protocol):
+    chunked: B.Input[B.Set[Particle]]
+
+    def outputs(self):
+        return {"result": B.Set[Particle]}
+
+    def steps(self):
+        return Source("chunked").chunk(3).map(lambda p: {"result": p})
+
+
+def test_ray_pipeline_runner_executes_chained_protocols(tmp_path, monkeypatch):
+    """Verify that a chained protocol runs both stages as one Ray pipeline."""
+    monkeypatch.setenv("SCIPION_CHUNK_SIZE", "2")
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=8)
+    collector = OutputCollector.remote()
+
+    chain = StreamingParticleProtocol() | RechunkProtocol()
+    custom_sink = CallbackSinkWriter(
+        lambda out: ray.get(collector.append.remote(len(out["result"]))),
+    )
+    runner = RayPipelineRunner(chain, sink=custom_sink)
+
+    assert list(runner.input_resolvers) == ["particles"]
+
+    runner.run(particles=star_path)
+
+    results = ray.get(collector.get_items.remote())
+    assert results == [3, 3, 2]
+
+
+def test_ray_pipeline_runner_chain_validates_intermediate_outputs(tmp_path):
+    """Verify that outputs of the first protocol are validated inside the chain."""
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    chain = InvalidOutputProtocol().pipe(
+        RechunkProtocol(),
+        mapping={"output": "chunked"},
+    )
+    runner = RayPipelineRunner(chain)
+
+    with pytest.raises(ray.exceptions.RayTaskError) as exc_info:
+        runner.run(particles=star_path)
+
+    assert "Protocol steps output must be a dictionary" in str(exc_info.value)
+
+
+class Precision(Enum):
+    FP16 = "fp16"
+    FP32 = "fp32"
+
+
+class ParameterProtocol(Protocol):
+    particles: B.Input[B.Set[Particle]]
+    precision: B.Field[Precision] = B.Field(default=Precision.FP32)
+    scale: B.Field[int] = B.Field(default=1)
+
+    def outputs(self):
+        return {"output": B.Set[Particle], "tag": tuple}
+
+    def _tag(self, particles):
+        return {"output": particles, "tag": (self.precision.value, self.scale.value)}
+
+    def steps(self):
+        self.driver_values = (self.precision.value, self.scale.value)
+        return Source("particles").map_batch(self._tag)
+
+
+def _run_parameter_protocol(tmp_path, **runner_kwargs):
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    collector = OutputCollector.remote()
+    proto = ParameterProtocol()
+    runner = RayPipelineRunner(
+        proto,
+        sink=CallbackSinkWriter(
+            lambda out: ray.get(collector.append.remote(out["tag"])),
+        ),
+        **runner_kwargs,
+    )
+    runner.run(particles=star_path)
+    return proto, set(ray.get(collector.get_items.remote()))
+
+
+def test_ray_pipeline_runner_serves_parameters(tmp_path):
+    """Verify that parameter values reach steps() on the driver and the Ray stages."""
+    proto, tags = _run_parameter_protocol(
+        tmp_path,
+        parameters={"precision": Precision.FP16, "scale": 3},
+    )
+
+    assert proto.driver_values == (Precision.FP16, 3)
+    assert tags == {(Precision.FP16, 3)}
+
+
+def test_ray_pipeline_runner_parameters_default(tmp_path):
+    """Verify that parameters without a value resolve to their declared default."""
+    proto, tags = _run_parameter_protocol(tmp_path, parameters={"scale": 2})
+
+    assert proto.driver_values == (Precision.FP32, 2)
+    assert tags == {(Precision.FP32, 2)}
+
+
+def test_ray_pipeline_runner_rejects_unknown_parameters():
+    with pytest.raises(ValueError, match="Unknown parameters"):
+        RayPipelineRunner(ParameterProtocol(), parameters={"missing": 1})
+
+
+class RequiredParameterProtocol(Protocol):
+    particles: B.Input[B.Set[Particle]]
+    model: B.Field[str] = B.Field(optional=False)
+
+    def outputs(self):
+        return {"output": B.Set[Particle]}
+
+    def steps(self):
+        return Source("particles").map_batch(lambda p: {"output": p})
+
+
+def test_ray_pipeline_runner_requires_parameters_on_compile():
+    runner = RayPipelineRunner(RequiredParameterProtocol())
+
+    with pytest.raises(ValueError, match="required parameters"):
+        runner.pipeline
+
+    runner.set_parameters({"model": "small"})
+    assert isinstance(runner.pipeline, Pipeline)
+
+    with pytest.raises(RuntimeError):
+        runner.set_parameters({"model": "large"})
+
+
+def test_ray_pipeline_runner_cli_parameters(tmp_path, monkeypatch):
+    """Verify that command line parameters are converted and served to the protocol."""
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["prog", "--particles", str(star_path), "--precision", "FP16", "--scale", "5"],
+    )
+    proto = ParameterProtocol()
+    runner = RayPipelineRunner(proto)
+
+    runner.launch_as_terminal_application()
+
+    assert proto.driver_values == (Precision.FP16, 5)

@@ -27,6 +27,7 @@ from .core import protocol
 from .core.protocol import Protocol, Field, Input
 from .core.protocol import Protocol, Field, Input, Resource
 from .core.protocol import Protocol, Field, Input, Resource, ResourceScope
+from .core.protocol import ChainedProtocol
 from .core.environment.resource_provider import (
     ResourceProvider,
     DefaultResourceProvider,
@@ -65,6 +66,7 @@ __all__ = [
     "Domain",
     "protocol",
     "Protocol",
+    "ChainedProtocol",
     "Field",
     "Input",
     "Resource",

@@ -1,4 +1,4 @@
-from .node import Node, FlushSignal, FLUSH, lower, LoweringContext
+from .node import Node, FlushSignal, FLUSH, lower, replace_node, LoweringContext
 from .ops import Op, Source, MapOp, MapElementOp, ChunkOp
 from .element_mapper import ElementMapConfig
 from .sink import Sink
@@ -26,6 +26,7 @@ __all__ = [
     "IRAccumulate",
     "IRSink",
     "lower",
+    "replace_node",
     "LoweringContext",
     "CompiledPipeline",
     "StageStats",

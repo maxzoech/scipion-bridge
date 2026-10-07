@@ -9,6 +9,7 @@ from typing import (
     Any,
     Dict,
     List,
+    Mapping,
     Optional,
     OrderedDict,
     Type,
@@ -19,6 +20,13 @@ from typing import (
 )
 
 from ..streaming.ops import Op
+from .chain_utils import (
+    merge_inputs,
+    merge_parameters,
+    merge_pipelines,
+    merge_resources,
+    resolve_wires,
+)
 from .fields import Field, Input, Resource
 
 
@@ -170,6 +178,29 @@ class Protocol(metaclass=abc.ABCMeta):
     def validate_protocol_configuration(self):
         pass
 
+    def pipe(
+        self,
+        other: "Protocol",
+        mapping: Optional[Mapping[str, str]] = None,
+    ) -> "ChainedProtocol":
+        """Chain ``other`` after this protocol.
+
+        The outputs of this protocol feed the inputs of ``other``. Unless
+        ``mapping`` (output name -> input name of ``other``) is given, outputs
+        are matched to inputs by name, or by type if this protocol has a single
+        output. The result is again a protocol, whose inputs are the inputs of
+        this protocol plus the unwired inputs of ``other``.
+        """
+        return ChainedProtocol(self, other, mapping=mapping)
+
+    def __or__(self, other: Any) -> "ChainedProtocol":
+        match other:
+            case Protocol():
+                return self.pipe(other)
+
+            case _:
+                return NotImplemented
+
 
 def _extract_declaration_order_from_ast(cls: type) -> Optional[List[str]]:
     """Extract declaration order of annotated attributes from class source AST.
@@ -281,3 +312,58 @@ def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
         resources=resources,
         states=states,
     )
+
+
+class ChainedProtocol(Protocol):
+    """Two protocols executed as one: the outputs of ``first`` feed ``second``.
+
+    Created with ``first | second`` or ``first.pipe(second)``. The steps of both
+    protocols are merged into a single streaming pipeline; each batch emitted by
+    ``first`` is passed as one item to the inputs of ``second``. Inputs, parameters
+    and resources of both protocols are merged; the outputs are those of ``second``.
+    """
+
+    def __init__(
+        self,
+        first: Protocol,
+        second: Protocol,
+        *,
+        mapping: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        super().__init__()
+        self.first = first
+        self.second = second
+
+        first_config = first.configuration
+        second_config = second.configuration
+        self._wires = resolve_wires(first.outputs(), second_config.inputs, mapping)
+        self._chain_configuration = ProtocolConfiguration(
+            inputs=merge_inputs(first_config.inputs, second_config.inputs, self._wires),
+            parameters=merge_parameters(
+                first_config.parameters,
+                second_config.parameters,
+            ),
+            resources=merge_resources(first_config.resources, second_config.resources),
+        )
+
+    @property
+    def configuration(self) -> ProtocolConfiguration:
+        return self._chain_configuration
+
+    def setup(self) -> None:
+        self.first.setup()
+        self.second.setup()
+
+    def validate_protocol_configuration(self) -> None:
+        self.first.validate_protocol_configuration()
+        self.second.validate_protocol_configuration()
+
+    def outputs(self) -> Dict[str, Type]:
+        return self.second.outputs()
+
+    def steps(self) -> Op:
+        return merge_pipelines(
+            self.first.get_pipeline(),
+            self.second.steps(),
+            self._wires,
+        )

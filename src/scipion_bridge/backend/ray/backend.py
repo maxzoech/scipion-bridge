@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 import abc
 import asyncio
 import os
@@ -166,10 +166,15 @@ class RaySourceActor(_PipelinedStage):
 class RayWorkerActor(_PipelinedStage):
     """Transformation stage (IRMap) of the streaming pipeline."""
 
-    def __init__(self, func: Callable[[Any], Any], queue_size: int):
+    def __init__(
+        self,
+        func: Callable[[Any], Any],
+        queue_size: int,
+        parameters: Mapping[str, Any],
+    ):
         from .container import configure_ray_env
 
-        configure_ray_env()
+        configure_ray_env(parameters=parameters)
         super().__init__(queue_size)
         self.func = func
 
@@ -186,11 +191,12 @@ class RayAccumulatorActor(_PipelinedStage):
         accumulate_fn: Callable[[Any, Any], tuple[Any, List[Any]]],
         initial_state_fn: Callable[[], Any],
         queue_size: int,
+        parameters: Mapping[str, Any],
         flush_fn: Optional[Callable[[Any], tuple[Any, List[Any]]]] = None,
     ):
         from .container import configure_ray_env
 
-        configure_ray_env()
+        configure_ray_env(parameters=parameters)
         super().__init__(queue_size)
         self.accumulate_fn = accumulate_fn
         self.flush_fn = flush_fn
@@ -279,10 +285,17 @@ class RayBackend(StreamingBackendProvider):
     Streaming backend that compiles IR DAGs into persistent Ray actors with direct P2P messaging.
     """
 
-    def __init__(self, init_ray: bool = True, queue_size: int = 2):
+    def __init__(
+        self,
+        init_ray: bool = True,
+        queue_size: int = 2,
+        parameters: Optional[Mapping[str, Any]] = None,
+    ):
         """
         Args:
             init_ray: Initialize a local Ray instance if none is running.
+            parameters: Values of the protocol parameters, served to
+                ``Field.value`` inside the worker stages.
             queue_size: Number of items each stage buffers in its inbox and
                 outbox. Stages run concurrently while their queues have room;
                 the default of 2 double-buffers every stage.
@@ -290,6 +303,7 @@ class RayBackend(StreamingBackendProvider):
         if queue_size <= 0:
             raise ValueError(f"Queue size must be positive, got {queue_size}.")
         self.queue_size = queue_size
+        self.parameters = dict(parameters or {})
 
         if init_ray and not ray.is_initialized():
             extra_paths = [os.getcwd(), os.path.abspath("src")]
@@ -353,6 +367,7 @@ class RayBackend(StreamingBackendProvider):
                     actor = RayWorkerActor.remote(
                         func=func,
                         queue_size=self.queue_size,
+                        parameters=self.parameters,
                     )
                 case IRAccumulate(
                     accumulate_fn=accumulate_fn,
@@ -363,6 +378,7 @@ class RayBackend(StreamingBackendProvider):
                         accumulate_fn=accumulate_fn,
                         initial_state_fn=initial_state_fn,
                         queue_size=self.queue_size,
+                        parameters=self.parameters,
                         flush_fn=flush_fn,
                     )
                 case IRSink(writer=writer):

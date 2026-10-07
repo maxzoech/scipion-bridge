@@ -63,6 +63,20 @@ class Node(metaclass=abc.ABCMeta):
         ...
 
 
+def replace_node(old: Node, new: Node) -> None:
+    """Rewire every downstream consumer of ``old`` to consume ``new`` instead.
+
+    The position of ``old`` in each consumer's ``upstream`` list is preserved, so
+    the argument order of multi-input nodes does not change. ``old`` is left
+    without downstream nodes.
+    """
+    for consumer in old.downstream:
+        consumer.upstream = [new if up is old else up for up in consumer.upstream]
+        new.downstream.append(consumer)
+
+    old.downstream = []
+
+
 def lower(nodes: List["Node"]) -> List[IROp]:
     """Lower one or more DAG root/sink nodes into lowered IR nodes.
 

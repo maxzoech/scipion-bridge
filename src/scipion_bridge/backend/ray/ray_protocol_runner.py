@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any, Callable, Dict, Optional, Type, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Type, Union
 
 from ...core.typed.resolve import ComposedResolver, find_resolver
 from ...core.protocol.protocol_base import Protocol
@@ -14,6 +14,7 @@ from ...core.streaming.pipeline import Pipeline
 from ...core.streaming.sink import Sink
 from ...core.streaming.sink_writer import SinkWriter
 from .backend import RayBackend
+from .container import configure_ray_env
 
 
 def _convert_to_argname(name: str) -> str:
@@ -42,6 +43,52 @@ def _default_sink_handler(outputs: Dict[str, Any]) -> None:
     pass
 
 
+def _validate_parameters(
+    protocol: Protocol,
+    parameters: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Reject values for parameters that ``protocol`` does not declare."""
+    declared = protocol.configuration.parameters
+
+    unknown = [name for name in parameters if name not in declared]
+    if unknown:
+        raise ValueError(
+            f"Unknown parameters {unknown} for protocol "
+            f"{type(protocol).__name__}. Declared: {list(declared)}.",
+        )
+
+    return dict(parameters)
+
+
+def _check_required_parameters(
+    protocol: Protocol,
+    parameters: Mapping[str, Any],
+) -> None:
+    """Fail if a required parameter without default has no value."""
+    declared = protocol.configuration.parameters
+    missing = [
+        name
+        for name, field in declared.items()
+        if not field.optional and field.default is None and name not in parameters
+    ]
+    
+    if missing:
+        raise ValueError(
+            f"Missing values for required parameters {missing} of protocol "
+            f"{type(protocol).__name__}.",
+        )
+
+
+def _parse_cli_value(dtype: Any, value: Any) -> Any:
+    """Convert a parsed command line value to the parameter type."""
+    match dtype:
+        case type() if issubclass(dtype, Enum) and isinstance(value, str):
+            return dtype[value]
+
+        case _:
+            return value
+
+
 class RayPipelineRunner:
     """Ray pipeline runner for Scipion Bridge protocols.
 
@@ -54,25 +101,28 @@ class RayPipelineRunner:
         self,
         protocol: Protocol,
         *,
+        parameters: Optional[Mapping[str, Any]] = None,
         origin_types: Optional[Dict[str, Type]] = None,
         sink: Optional[Union[Sink, SinkWriter, Callable[[Any], Any]]] = None,
         queue_size: int = 2,
     ) -> None:
         """
         Args:
+            parameters: Values of the protocol parameters, served to
+                ``Field.value`` on the driver and inside every pipeline stage.
+                Parameters without a value resolve to their declared default.
             queue_size: Number of items each pipeline stage buffers. Overridden
                 by the ``SCIPION_STREAM_QUEUE_SIZE`` environment variable.
         """
         self.protocol = protocol
+        self.parameters = _validate_parameters(protocol, parameters or {})
         self.origin_types = origin_types or {}
-        self.backend = RayBackend(
-            queue_size=int(os.environ.get("SCIPION_STREAM_QUEUE_SIZE", queue_size)),
-        )
+        self.queue_size = int(os.environ.get("SCIPION_STREAM_QUEUE_SIZE", queue_size))
         self.sink = sink
         self._input_resolvers: Dict[str, ComposedResolver] = {}
+        self._pipeline: Optional[Pipeline] = None
 
         self._precompute_resolvers()
-        self._pipeline: Pipeline = self._compile_pipeline()
 
     def _precompute_resolvers(self) -> None:
         """Precompute ComposedResolver instances for all protocol inputs."""
@@ -93,6 +143,12 @@ class RayPipelineRunner:
 
     def _compile_pipeline(self) -> Pipeline:
         """Compile protocol streaming DAG into an executable Ray pipeline."""
+        _check_required_parameters(self.protocol, self.parameters)
+        configure_ray_env(parameters=self.parameters)
+        backend = RayBackend(
+            queue_size=self.queue_size,
+            parameters=self.parameters,
+        )
         steps = self.protocol.get_pipeline()
 
         sink_node = (
@@ -108,13 +164,25 @@ class RayPipelineRunner:
 
         return Pipeline.from_sink(
             sink_node,
-            backend=self.backend,
+            backend=backend,
         )
 
     @property
     def pipeline(self) -> Pipeline:
-        """Return the compiled streaming Pipeline."""
+        """Return the streaming Pipeline, compiling it on first access."""
+        if self._pipeline is None:
+            self._pipeline = self._compile_pipeline()
+
         return self._pipeline
+
+    def set_parameters(self, parameters: Mapping[str, Any]) -> None:
+        """Replace the parameter values. Only possible before the pipeline is compiled."""
+        if self._pipeline is not None:
+            raise RuntimeError(
+                "Parameters cannot be changed after the pipeline has been compiled.",
+            )
+
+        self.parameters = _validate_parameters(self.protocol, parameters)
 
     @property
     def input_resolvers(self) -> Dict[str, ComposedResolver]:
@@ -160,7 +228,8 @@ class RayPipelineRunner:
         total_chunks = 0
         total_items = 0
 
-        with self._pipeline:
+        pipeline = self.pipeline
+        with pipeline:
             while active_iterators:
                 for name in list(active_iterators.keys()):
                     chunk = next(
@@ -176,7 +245,7 @@ class RayPipelineRunner:
                     total_chunks += 1
                     total_items += len(chunk)
 
-                    self._pipeline.send(
+                    pipeline.send(
                         **{name: chunk},
                     )
 
@@ -187,11 +256,12 @@ class RayPipelineRunner:
             f"({total_chunks} chunks, {total_items} items, "
             f"{throughput:.1f} items/s)",
         )
-        print(_format_stats(self._pipeline.stats()))
+        print(_format_stats(pipeline.stats()))
 
     def close(self) -> None:
         """Terminate all actors allocated for the pipeline."""
-        self._pipeline.close()
+        if self._pipeline is not None:
+            self._pipeline.close()
 
     def __enter__(self) -> "RayPipelineRunner":
         return self
@@ -244,7 +314,7 @@ class RayPipelineRunner:
                 **kwargs,
             )
 
-        args, unparsed_args = parser.parse_known_args()
+        args = parser.parse_args()
 
         inputs = {
             name: val
@@ -252,6 +322,13 @@ class RayPipelineRunner:
             if (val := getattr(args, name, None)) is not None
         }
 
+        self.set_parameters(
+            {
+                name: _parse_cli_value(field.dtype, val)
+                for name, field in config.parameters.items()
+                if (val := getattr(args, name, None)) is not None
+            },
+        )
         self.run(
             inputs,
         )
