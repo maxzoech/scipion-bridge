@@ -469,6 +469,7 @@ class RayBackend(StreamingBackendProvider):
                     raise NotImplementedError(
                         f"Unsupported IR op type for Ray backend: {type(node).__name__}",
                     )
+                
             actor_map[node] = actor_cls.options(
                 name=f"{pipeline_id}:{index}:{_describe(node)}",
             ).remote(**kwargs)

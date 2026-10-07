@@ -12,7 +12,6 @@ from typing import (
     Dict,
     Optional,
     Sequence,
-    SupportsIndex,
     Tuple,
     Type,
     TypeVar,
@@ -45,7 +44,7 @@ from .utils.arrow_utils import (
     find_nested_column,
     leaf_from_arrow,
     leaf_to_arrow,
-    nest_columns,
+    leaves_to_batch,
 )
 from ..utils.marker import Marker
 
@@ -567,10 +566,9 @@ class Set(Marker[T], SchemaConvertible):
             for path, entry in self.schema().tree_iter()
             if (key := self._storage.root.extend(path)) in self._storage
         }
-        columns = nest_columns(self.schema(), leaves)
-        return pa.RecordBatch.from_arrays(
-            list(columns.values()),
-            names=list(columns),
+        return leaves_to_batch(
+            self.schema(),
+            leaves,
             metadata=_capacity_metadata(self._capacity),
         )
 
@@ -594,19 +592,9 @@ class Set(Marker[T], SchemaConvertible):
             )
         return result
 
-    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
-        """Pickle data-carrying Sets as Arrow RecordBatches.
-
-        Only the visible rows are serialized, so a slice no longer drags its
-        parent storage along, and Arrow buffers are transferred out-of-band
-        (zero-copy with pickle protocol 5, e.g. in Ray's object store).
-        Sets bound as field descriptors of a Struct keep the default pickling.
-        """
-        match self.name:
-            case None:
-                return (_set_from_arrow, (type(self), self.to_arrow()))
-            case _:
-                return super().__reduce_ex__(protocol)
+    @property
+    def is_descriptor(self) -> bool:
+        return self.name is not None
 
 
 _CAPACITY_KEY = b"scipion_bridge.capacity"
@@ -641,11 +629,6 @@ def _without_capacity(entry: ArrayEntryBase) -> ArrayEntryBase:
             return dataclasses.replace(entry, capacity=None)
         case _:
             return entry
-
-
-def _set_from_arrow(cls: Type[Set[Any]], batch: pa.RecordBatch) -> Set[Any]:
-    """Unpickle a Set serialized by ``Set.__reduce_ex__``."""
-    return cls.from_arrow(batch)
 
 
 def concat(sets: Sequence[Set[T]]) -> Set[T]:

@@ -13,6 +13,9 @@ from typing import (
     TypeVar,
     Union,
 )
+from typing_extensions import Self
+
+import pyarrow as pa
 
 from .schema import (
     CollectionEntry,
@@ -22,8 +25,9 @@ from .schema import (
     SchemaEntry,
 )
 from .storage import _BaseStorage, StagingEngine
-from .struct import Struct
+from .struct import Struct, leaf_columns, struct_leaf_arrays, write_struct_row
 from .set import Set
+from .utils.arrow_utils import leaves_to_batch, null_row
 from ..utils.marker import Marker
 
 T = TypeVar("T", bound=Struct)
@@ -272,6 +276,55 @@ class Collection(Marker[T], SchemaConvertible):
         active_items = [self[i] for i in self.initialized_indices()]
         return Set[self._dtype](active_items)
 
+    @property
+    def is_descriptor(self) -> bool:
+        return self.name is not None
+
+    def _pickle_cls(self) -> Type[SchemaConvertible]:
+        # The element type may be given per instance (``Collection(dtype=...)``).
+        return Collection[self._element_type()]
+
+    def _element_type(self) -> Type[Struct]:
+        assert self._dtype is not None, "Collection element type is not set."
+        return self._dtype
+
+    def to_arrow(self) -> pa.RecordBatch:
+        """Export the Collection to a RecordBatch with one row per slot.
+
+        Uninitialized slots, and fields not initialized in a slot, are null.
+        The size is stored in the batch metadata.
+        """
+        schema = self._element_type().schema()
+        slots = {
+            index: struct_leaf_arrays(self._storage.append(str(index)), schema)
+            for index in self.initialized_indices()
+        }
+        null_rows = {
+            path: null_row(leaf)
+            for leaves in slots.values()
+            for path, leaf in leaves.items()
+        }
+        leaves = {
+            path: pa.concat_arrays(
+                [slots.get(index, {}).get(path, missing) for index in range(self.size)],
+            )
+            for path, missing in null_rows.items()
+        }
+        return leaves_to_batch(schema, leaves, metadata=_size_metadata(self.size))
+
+    @classmethod
+    def from_arrow(cls, batch: pa.RecordBatch) -> Self:
+        """Construct a Collection from a RecordBatch produced by :meth:`to_arrow`."""
+        collection = cls(size=_size_from_metadata(batch.schema.metadata))
+        columns = leaf_columns(batch, collection._element_type().schema())
+        for index in range(batch.num_rows):
+            write_struct_row(
+                collection._storage.append(str(index)),
+                columns,
+                row=index,
+            )
+        return collection
+
     def __repr__(self) -> str:
         elem_type = (
             getattr(self._dtype, "__name__", str(self._dtype))
@@ -279,3 +332,17 @@ class Collection(Marker[T], SchemaConvertible):
             else "?"
         )
         return f"Collection[{elem_type}](size={self.size}, active={len(self.initialized_indices())})"
+
+
+_SIZE_KEY = b"scipion_bridge.size"
+
+
+def _size_metadata(size: int) -> Dict[bytes, bytes]:
+    return {_SIZE_KEY: str(size).encode()}
+
+
+def _size_from_metadata(metadata: Optional[Dict[bytes, bytes]]) -> int:
+    assert (
+        metadata is not None and _SIZE_KEY in metadata
+    ), "RecordBatch was not produced by Collection.to_arrow(): missing size."
+    return int(metadata[_SIZE_KEY])

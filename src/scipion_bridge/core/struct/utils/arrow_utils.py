@@ -403,6 +403,43 @@ def nest_columns(
     return columns
 
 
+def leaves_to_batch(
+    schema: Schema,
+    leaves: Dict[KeyPath, pa.Array],
+    metadata: Dict[bytes, bytes],
+) -> pa.RecordBatch:
+    """Assemble leaf arrays of equal length into a RecordBatch of nested columns."""
+    columns = nest_columns(schema, leaves)
+    return pa.RecordBatch.from_arrays(
+        list(columns.values()),
+        names=list(columns),
+        metadata=metadata,
+    )
+
+
+def null_row(example: pa.Array) -> pa.Array:
+    """A single null row of the type of ``example`` with valid child values.
+
+    ``pa.nulls`` fills the children of fixed-size lists with nulls, which
+    violates non-nullable child fields; the child values of ``example`` are
+    reused instead.
+    """
+    match example:
+        case pa.ExtensionArray():
+            return pa.ExtensionArray.from_storage(
+                example.type,
+                null_row(example.storage),
+            )
+        case pa.FixedSizeListArray():
+            return pa.FixedSizeListArray.from_arrays(
+                example.slice(0, 1).flatten(),
+                type=example.type,
+                mask=pa.array([True]),
+            )
+        case _:
+            return pa.nulls(1, example.type)
+
+
 def find_nested_column(batch: pa.RecordBatch, path: KeyPath) -> Optional[pa.Array]:
     """Resolve the leaf array at ``path`` in a batch built by :func:`nest_columns`.
 

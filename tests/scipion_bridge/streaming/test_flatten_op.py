@@ -30,7 +30,7 @@ class ItemCollector:
         return self.items
 
 
-@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("container", [list, tuple, iter])
 def test_flatten_emits_every_element(container):
     _, out = _flatten(None, container([1, (2, 3), "x"]))
     assert out == [1, (2, 3), "x"]
@@ -41,8 +41,38 @@ def test_flatten_of_empty_list_emits_nothing():
     assert out == []
 
 
-def test_flatten_rejects_non_sequences():
-    with pytest.raises(TypeError, match="FlattenOp expected a list or tuple"):
+def test_flatten_emits_dict_values():
+    _, out = _flatten(None, {"a": 1, "b": 2}.values())
+    assert out == [1, 2]
+
+
+def test_flatten_emits_initialized_collection_items_in_index_order():
+    collection = B.Collection[Item](size=5)
+    collection[3] = Item(id=30)
+    collection[1] = Item(id=10)
+
+    _, out = _flatten(None, collection)
+
+    assert [item.id for item in out] == [10, 30]
+
+
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        ("abc", "into characters"),
+        (b"abc", "into characters"),
+        ({"a": 1}, "does not flatten mappings"),
+        (42, "expected an iterable"),
+    ],
+)
+def test_flatten_rejects_non_flattenable_items(item, message):
+    with pytest.raises(TypeError, match=message):
+        _flatten(None, item)
+
+
+def test_flatten_rejects_sets():
+    # A Set is a batch of rows; its rows are not sent as separate items.
+    with pytest.raises(TypeError, match="expected an iterable"):
         _flatten(None, _make_set([1]))
 
 

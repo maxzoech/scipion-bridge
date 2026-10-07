@@ -6,7 +6,6 @@ from typing import (
     Any,
     Dict,
     Optional,
-    SupportsIndex,
     Tuple,
     Type,
     TypeVar,
@@ -15,22 +14,33 @@ from typing import (
     overload,
 )
 from typing_extensions import Self, TypeAlias
+import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
+import pyarrow as pa
 from functools import cache
 
 from .schema import (
     ArrayEntry,
+    ArrayEntryBase,
     SchemaConvertible,
     Entry,
     Schema,
     SchemaEntry,
     SchemaSetEntry,
+    SetEntryBase,
 )
 from ..utils.marker import Marker
 from .storage import _BaseStorage, StagingEngine
 from .exceptions import UninitializedFieldError
 from .key_path import KeyPath
+from .utils.arrow_utils import (
+    find_nested_column,
+    is_regular_awkward,
+    leaf_from_arrow,
+    leaf_to_arrow,
+    leaves_to_batch,
+)
 
 
 def _is_supported_scalar_value(cls: Type) -> bool:
@@ -227,6 +237,17 @@ class Array(Marker[T], SchemaConvertible):
             "Cannot get schema directly from an uninstantiated Array class."
         )
 
+    @property
+    def is_descriptor(self) -> bool:
+        return True
+
+    def to_arrow(self) -> pa.RecordBatch:
+        raise TypeError("Array is a field descriptor and holds no data.")
+
+    @classmethod
+    def from_arrow(cls, batch: pa.RecordBatch) -> Self:
+        raise TypeError("Array is a field descriptor and holds no data.")
+
     def convert_to_entry(self) -> Entry:
         if self.dtype is None:
             owner_name = (
@@ -400,6 +421,7 @@ class Struct(Trait, SchemaConvertible):
 
     _bridge_struct_marker: bool = True
     _bridge_schema: Schema
+    _is_field_descriptor: bool = False
 
     @classmethod
     def default(cls) -> "Struct":
@@ -457,6 +479,7 @@ class Struct(Trait, SchemaConvertible):
 
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
+        self._is_field_descriptor = True
 
     def __get__(
         self,
@@ -517,31 +540,112 @@ class Struct(Trait, SchemaConvertible):
     def convert_to_entry(self) -> Entry:
         return SchemaEntry(schema=self.schema())
 
-    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
-        """Pickle views with only their own leaves.
+    @property
+    def is_descriptor(self) -> bool:
+        return self._is_field_descriptor
 
-        A Struct obtained from a Set element (``s[i]``) or a nested field is a
-        view into a larger storage; pickling it by default would serialize the
-        entire parent storage. Views are pickled as their initialized leaves
-        and restored into a fresh storage. Structs owning their storage keep
-        the default pickling.
+    def to_arrow(self) -> pa.RecordBatch:
+        """Export the initialized fields to a RecordBatch with a single row.
+
+        For a view (a Set element, a Collection item or a nested field), only
+        the data of the view is exported. Nested Sets become nested list
+        columns.
         """
-        match self.storage.is_view:
-            case True:
-                leaves = {
-                    path: self.storage.read(key, entry)
-                    for path, entry in self.schema().tree_iter()
-                    if (key := self.storage.root.extend(path)) in self.storage
-                }
-                return (_struct_from_leaves, (type(self), leaves))
-            case False:
-                return super().__reduce_ex__(protocol)
+        return leaves_to_batch(
+            self.schema(),
+            struct_leaf_arrays(self.storage, self.schema()),
+            metadata={},
+        )
+
+    @classmethod
+    def from_arrow(cls, batch: pa.RecordBatch) -> Self:
+        """Construct a Struct owning its storage from a batch of :meth:`to_arrow`."""
+        struct = cls()
+        write_struct_row(struct.storage, leaf_columns(batch, cls.schema()), row=0)
+        return struct
 
 
-def _struct_from_leaves(cls: Type[Struct], leaves: Dict[KeyPath, Any]) -> Struct:
-    """Unpickle a Struct view serialized by ``Struct.__reduce_ex__``."""
-    struct = cls()
-    for path, entry in cls.schema().tree_iter():
-        if path in leaves:
-            struct.storage.write(struct.storage.root.extend(path), entry, leaves[path])
-    return struct
+def struct_leaf_arrays(
+    storage: _BaseStorage,
+    schema: Schema,
+) -> Dict[KeyPath, pa.Array]:
+    """Export the initialized leaves of the Struct at ``storage.root`` as 1-row arrays."""
+    return {
+        path: leaf_to_arrow(_with_row_axis(storage.read(key, entry)), entry)
+        for path, entry in schema.tree_iter()
+        if (key := storage.root.extend(path)) in storage
+    }
+
+
+_LeafColumn = Tuple[ArrayEntryBase, Union[np.ndarray, ak.Array], np.ndarray]
+
+
+def leaf_columns(
+    batch: pa.RecordBatch,
+    schema: Schema,
+) -> Dict[KeyPath, _LeafColumn]:
+    """Convert the leaf columns of ``batch`` into buffers, with their validity per row.
+
+    Every column is converted as a whole: Awkward ignores the offset of sliced
+    Arrow arrays with a validity bitmap, so rows are indexed afterwards.
+    """
+    return {
+        path: (
+            entry,
+            leaf_from_arrow(column, entry),
+            column.is_valid().to_numpy(zero_copy_only=False),
+        )
+        for path, entry in schema.tree_iter()
+        if (column := find_nested_column(batch, path)) is not None
+    }
+
+
+def write_struct_row(
+    storage: _BaseStorage,
+    columns: Dict[KeyPath, _LeafColumn],
+    row: int,
+) -> None:
+    """Write row ``row`` of the leaf columns into the Struct at ``storage.root``.
+
+    Leaves that are missing from the columns or null in the row stay
+    uninitialized.
+    """
+    for path, (entry, values, valid) in columns.items():
+        if not valid[row]:
+            continue
+
+        storage.write(
+            storage.root.extend(path),
+            entry,
+            _row_value(values[row], entry),
+        )
+
+
+def _with_row_axis(data: Union[np.ndarray, ak.Array]) -> Union[np.ndarray, ak.Array]:
+    """Add a leading axis of length 1, turning a Struct leaf into a 1-row column."""
+    match data:
+        case np.ndarray():
+            # Unlike np.newaxis, reshape gives the new axis a regular stride,
+            # which Arrow requires for tensor columns.
+            return data.reshape((1, *data.shape))
+        case ak.Array():
+            return ak.unflatten(data, [len(data)], axis=0)
+        case _:
+            raise TypeError(
+                f"Cannot export Struct leaf of type '{type(data).__name__}' to Arrow.",
+            )
+
+
+def _row_value(value: Any, entry: ArrayEntryBase) -> Any:
+    """Convert a row of a restored column into the leaf value of a Struct.
+
+    Regular array fields are restored as NumPy arrays, as they were written;
+    nested Sets keep their (possibly ragged) Awkward representation.
+    """
+    match (entry, value):
+        case (SetEntryBase(), _):
+            return value
+        case (_, ak.Array()) if is_regular_awkward(value):
+            return ak.to_numpy(value)
+        case _:
+            return value

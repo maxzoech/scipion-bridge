@@ -164,10 +164,11 @@ def test_pickle_roundtrip_nested_set(serializer):
 
 
 def test_pickled_slice_does_not_include_parent_storage():
-    samples = _make_samples(250)
+    # Large enough that the fixed size of the pickled schema does not matter.
+    samples = _make_samples(2500)
 
     full_size = len(pickle.dumps(samples, protocol=5))
-    slice_size = len(pickle.dumps(samples[:25], protocol=5))
+    slice_size = len(pickle.dumps(samples[:250], protocol=5))
 
     assert slice_size < 0.15 * full_size
 

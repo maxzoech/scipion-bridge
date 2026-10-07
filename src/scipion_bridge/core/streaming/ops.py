@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from typing import (
     Any,
     Callable,
@@ -129,7 +130,16 @@ class Op(Node):
         return self.op(CollectOp(n=n))
 
     def flatten(self) -> FlattenOp:
-        """Emit every element of incoming lists or tuples as a separate item (1:N)."""
+        """Emit every element of incoming iterables as a separate item (1:N).
+
+        Accepts any iterable, e.g. lists, tuples, generators or a Collection,
+        which yields its initialized items in index order. Strings, bytes and
+        mappings are rejected, as iterating them yields characters or keys.
+
+        A Set is a batch of rows, not an iterable, and is rejected as well:
+        sending its rows as separate items would be much more expensive than
+        sending the batch. Use ``chunk`` to change batch sizes instead.
+        """
         return self.op(FlattenOp())
 
     def combine_latest(self, other: Op) -> CombineLatestOp:
@@ -381,12 +391,23 @@ class CollectOp(Op):
 
 def _flatten(state: None, item: Any) -> Tuple[None, List[Any]]:
     match item:
-        case list() | tuple():
+        case str() | bytes():
+            raise TypeError(
+                f"FlattenOp does not flatten '{type(item).__name__}' into characters.",
+            )
+
+        case Mapping():
+            raise TypeError(
+                "FlattenOp does not flatten mappings; flatten their .values() or "
+                ".items() instead.",
+            )
+
+        case Iterable():
             return (state, list(item))
 
         case _:
             raise TypeError(
-                f"FlattenOp expected a list or tuple, got '{type(item).__name__}'.",
+                f"FlattenOp expected an iterable, got '{type(item).__name__}'.",
             )
 
 
@@ -395,7 +416,7 @@ def _no_state() -> None:
 
 
 class FlattenOp(Op):
-    """Operation node emitting every element of incoming lists or tuples (1:N)."""
+    """Operation node emitting every element of incoming iterables (1:N)."""
 
     def __init__(self) -> None:
         super().__init__(upstream=None)

@@ -29,9 +29,11 @@ from typing import (
     Union,
     TypeAlias,
     overload,
+    SupportsIndex,
 )
 
 import numpy as np
+import pyarrow as pa
 
 from .key_path import KeyPath
 
@@ -65,6 +67,76 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
 
     def __set_name__(self, owner: type, name: str) -> None:
         pass
+
+    @property
+    @abc.abstractmethod
+    def is_descriptor(self) -> bool:
+        """True for a field declared on a Struct class, which holds no data."""
+        ...
+
+    @abc.abstractmethod
+    def to_arrow(self) -> pa.RecordBatch:
+        """Export the initialized data to an Apache Arrow RecordBatch."""
+        ...
+
+    @classmethod
+    @abc.abstractmethod
+    def from_arrow(cls, batch: pa.RecordBatch) -> SchemaConvertible:
+        """Construct an instance from a RecordBatch produced by :meth:`to_arrow`."""
+        ...
+
+    def _pickle_cls(self) -> Type[SchemaConvertible]:
+        """Class restoring this instance from its RecordBatch when unpickled."""
+        return type(self)
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        """Pickle data-carrying instances as Arrow RecordBatches.
+
+        Only the data of the instance is serialized, so a view (a Set slice, a
+        Set element, a Collection item) never drags its parent storage along,
+        and Arrow buffers are transferred out-of-band (zero-copy with pickle
+        protocol 5, e.g. in Ray's object store). The class is pickled by
+        reference. Field descriptors keep the default pickling.
+
+        PyArrow's pickling of arrays drops the nullability of nested fields,
+        which Awkward would read back as option types. The exact schema is
+        therefore pickled in Arrow IPC form and restored by a zero-copy cast.
+        """
+        match self.is_descriptor:
+            case True:
+                return super().__reduce_ex__(protocol)
+            case False:
+                batch = self.to_arrow()
+                return (
+                    _from_arrow,
+                    (self._pickle_cls(), batch, batch.schema.serialize().to_pybytes()),
+                )
+
+
+def _from_arrow(
+    cls: Type[SchemaConvertible],
+    batch: pa.RecordBatch,
+    schema: bytes,
+) -> SchemaConvertible:
+    """Unpickle an instance serialized by ``SchemaConvertible.__reduce_ex__``."""
+    return cls.from_arrow(
+        _with_schema(batch, pa.ipc.read_schema(pa.py_buffer(schema))),
+    )
+
+
+def _with_schema(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
+    """Restore the exact schema of an unpickled batch by zero-copy casts.
+
+    Columns are cast one by one, and only where their type changed: casting
+    a whole batch fails for struct columns with extension type children.
+    """
+    return pa.RecordBatch.from_arrays(
+        [
+            column if column.type.equals(field.type) else column.cast(field.type)
+            for column, field in zip(batch.columns, schema)
+        ],
+        schema=schema,
+    )
 
 
 class Entry(metaclass=abc.ABCMeta):
