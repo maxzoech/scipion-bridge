@@ -9,6 +9,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
+from ..environment.compute import ComputeAssignment
 from .sink_writer import SinkWriter
 
 
@@ -66,6 +67,8 @@ class IRMap(IROp):
 
     func: Callable[[Any], Any] = field(default=lambda x: x)
     name: Optional[str] = None
+    # Resources every call of ``func`` requires; None requires no resources.
+    compute: Optional[ComputeAssignment] = None
 
 
 @dataclass(eq=False)

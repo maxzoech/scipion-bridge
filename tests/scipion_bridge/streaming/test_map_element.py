@@ -1,5 +1,6 @@
 """Tests for ``Op.map_element``: parallel in-place per-element processing."""
 
+import os
 import sys
 import threading
 
@@ -12,9 +13,10 @@ import ray
 import scipion_bridge as B
 from scipion_bridge.backend.ray.backend import RayBackend
 from scipion_bridge.core.streaming import element_mapper
+from scipion_bridge.core.environment.compute import CPUS_ENV_VAR
 from scipion_bridge.core.streaming.element_mapper import (
     ElementMapConfig,
-    make_element_mapper,
+    ElementMapper,
 )
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.pipeline import Pipeline
@@ -39,11 +41,15 @@ def _increment(x):
     return x + 1
 
 
+def _close(mapper):
+    element_mapper._pools.pop(mapper.stage).close()
+
+
 def _run(func, col, **config):
-    accumulate, initial_state = make_element_mapper(func, ElementMapConfig(**config))
-    state, emitted = accumulate(initial_state(), col)
-    state.close()
-    return emitted
+    mapper = ElementMapper(func, ElementMapConfig(**config))
+    result = mapper(col)
+    _close(mapper)
+    return result
 
 
 @pytest.mark.parametrize(
@@ -54,10 +60,9 @@ def _run(func, col, **config):
 def test_updates_collection_in_place_in_order(make_col):
     col = make_col()
 
-    emitted = _run(_increment, col, workers=4)
+    result = _run(_increment, col, workers=4)
 
-    assert emitted == [col]
-    assert emitted[0] is col
+    assert result is col
     assert list(col) == list(range(1, 21))
 
 
@@ -74,12 +79,10 @@ def test_updates_set_rows_in_place():
 
 
 def test_empty_collection_is_forwarded_without_pools():
-    accumulate, initial_state = make_element_mapper(_increment, ElementMapConfig())
+    mapper = ElementMapper(_increment, ElementMapConfig())
 
-    state, emitted = accumulate(initial_state(), [])
-
-    assert emitted == [[]]
-    assert state.threads is None
+    assert mapper([]) == []
+    assert mapper.stage not in element_mapper._pools
 
 
 def test_first_exception_propagates():
@@ -94,33 +97,54 @@ def test_first_exception_propagates():
 
 def test_auto_workers_follow_collection_length_capped_at_cpus(monkeypatch):
     monkeypatch.setattr(element_mapper, "_available_cpus", lambda: 4)
-    accumulate, initial_state = make_element_mapper(_increment, ElementMapConfig())
+    mapper = ElementMapper(_increment, ElementMapConfig())
 
-    state = initial_state()
-    assert state.size == 0
+    mapper(list(range(3)))
+    assert element_mapper._pools[mapper.stage].size == 3
 
-    state, _ = accumulate(state, list(range(3)))
-    assert state.size == 3
+    mapper(list(range(10)))
+    assert element_mapper._pools[mapper.stage].size == 4
 
-    state, _ = accumulate(state, list(range(10)))
-    assert state.size == 4
-
-    pools = state
-    state, _ = accumulate(state, list(range(2)))
-    assert state is pools
-    state.close()
+    pools = element_mapper._pools[mapper.stage]
+    mapper(list(range(2)))
+    assert element_mapper._pools[mapper.stage] is pools
+    _close(mapper)
 
 
-def test_fixed_workers_create_pools_eagerly():
-    accumulate, initial_state = make_element_mapper(
-        _increment, ElementMapConfig(workers=2)
-    )
+def test_available_cpus_are_all_cores_without_reservation(monkeypatch):
+    monkeypatch.delenv(CPUS_ENV_VAR, raising=False)
 
-    state = initial_state()
+    assert element_mapper._available_cpus() == len(os.sched_getaffinity(0))
 
-    assert state.size == 2
-    assert state.threads is not None
-    state.close()
+
+def test_available_cpus_are_the_reserved_cores(monkeypatch):
+    monkeypatch.setenv(CPUS_ENV_VAR, "3")
+
+    assert element_mapper._available_cpus() == 3
+
+
+def test_fixed_workers_do_not_depend_on_the_collection_length():
+    mapper = ElementMapper(_increment, ElementMapConfig(workers=2))
+
+    mapper([1, 2, 3, 4, 5])
+
+    assert element_mapper._pools[mapper.stage].size == 2
+    _close(mapper)
+
+
+def test_pickled_mapper_reuses_the_pools_of_the_process():
+    # Run as a Ray task, the mapper is pickled with every call.
+    mapper = ElementMapper(_increment, ElementMapConfig())
+    mapper([1, 2])
+    pools = element_mapper._pools[mapper.stage]
+
+    restored = cloudpickle.loads(cloudpickle.dumps(mapper))
+    col = [1, 2]
+    restored(col)
+
+    assert col == [2, 3]
+    assert element_mapper._pools[restored.stage] is pools
+    _close(mapper)
 
 
 @pytest.mark.parametrize(
@@ -139,20 +163,6 @@ def test_fixed_workers_create_pools_eagerly():
 def test_invalid_config_raises(config):
     with pytest.raises(ValueError):
         ElementMapConfig(**config)
-
-
-def test_mapper_functions_pickle_without_pools():
-    accumulate, initial_state = make_element_mapper(
-        _increment, ElementMapConfig(workers=2)
-    )
-
-    restored_accumulate = cloudpickle.loads(cloudpickle.dumps(accumulate))
-    restored_initial_state = cloudpickle.loads(cloudpickle.dumps(initial_state))
-
-    col = [1, 2]
-    state, _ = restored_accumulate(restored_initial_state(), col)
-    assert col == [2, 3]
-    state.close()
 
 
 @pytest.fixture

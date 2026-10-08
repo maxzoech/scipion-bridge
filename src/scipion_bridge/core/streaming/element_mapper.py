@@ -9,8 +9,11 @@ with the loop distributed over a thread pool, and forwards the same, modified
 collection. Any collection with a fixed length and random access works
 (``list``, ``np.ndarray``, ``Set``, ...).
 
-The pools are the state of an ``IRAccumulate`` stage: they are created on the
-worker executing the stage and reused for every collection. With
+The stage is a stateless map: :class:`ElementMapper` only carries the id of
+its pools, which cannot be pickled. Every process running the stage (e.g. a
+Ray task worker or a long-running executor) creates the pools on its first
+collection and keeps them in a cache of the process, reused for every later
+collection. With
 ``executor="process"`` the loop still runs in the thread pool and ``func`` is
 called in a process pool, started with ``spawn`` by default since forking a
 process that has initialized CUDA or JAX corrupts the child.
@@ -18,15 +21,19 @@ process that has initialized CUDA or JAX corrupts the child.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 import math
 import multiprocessing
 from multiprocessing.pool import Pool, ThreadPool
 import os
-from typing import Any, Callable, List, Literal, Optional, Tuple, Union
+import threading
+from typing import Any, Callable, Dict, Literal, Optional, Union
+import uuid
 
 import cloudpickle
+
+from ..environment.compute import CPUS_ENV_VAR
 
 Executor = Literal["thread", "process"]
 StartMethod = Literal["spawn", "forkserver", "fork"]
@@ -40,7 +47,8 @@ class ElementMapConfig:
     Attributes:
         workers: Number of parallel workers. ``"auto"`` uses one worker per
             element of the collection, capped at the CPUs available to the
-            process; after ``.chunk(n)`` this is ``min(n, CPUs)``.
+            process (the reserved cores if the backend reserved some); after
+            ``.chunk(n)`` this is ``min(n, CPUs)``.
         executor: ``"thread"`` runs ``func`` in the thread pool;
             ``"process"`` runs it in a process pool (for pure-Python work that
             holds the GIL).
@@ -110,46 +118,71 @@ class _ElementPools:
                 pool.terminate()
 
 
-def make_element_mapper(
-    func: Callable[[Any], Any],
-    config: ElementMapConfig,
-) -> Tuple[
-    Callable[[_ElementPools, Any], Tuple[_ElementPools, List[Any]]],
-    Callable[[], _ElementPools],
-]:
-    """Build the ``accumulate_fn`` and ``initial_state_fn`` of a map_element stage."""
+@dataclass(frozen=True)
+class ElementMapper:
+    """The function of a map_element stage: ``col -> col``, modified in place.
 
-    def initial_state() -> _ElementPools:
-        match config.workers:
-            case "auto":
-                # Sized on the first collection.
-                return _ElementPools()
-            case int(n):
-                return _create_pools(n, func, config)
+    Attributes:
+        func: Function applied to each element.
+        config: Execution options.
+        stage: Id of the stage's pools in the cache of each process.
+    """
 
-    def accumulate(state: _ElementPools, col: Any) -> Tuple[_ElementPools, List[Any]]:
+    func: Callable[[Any], Any]
+    config: ElementMapConfig
+    stage: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def __call__(self, col: Any) -> Any:
         n = len(col)
         match n:
             case 0:
-                return (state, [col])
+                return col
             case _:
-                size = _required_size(config, n)
-                pools = (
-                    state if size <= state.size else _resize(state, size, func, config)
+                pools = _get_pools(
+                    self.stage,
+                    _required_size(self.config, n),
+                    self.func,
+                    self.config,
                 )
                 assert pools.threads is not None
                 pools.threads.map(
-                    partial(_apply_at, col, func, pools.processes),
+                    partial(_apply_at, col, self.func, pools.processes),
                     range(n),
-                    _chunksize(config, n, pools.size),
+                    _chunksize(self.config, n, pools.size),
                 )
-                return (pools, [col])
+                return col
 
-    return accumulate, initial_state
+
+# Pools of the map_element stages that ran in this process, by stage id.
+_pools: Dict[str, _ElementPools] = {}
+_pools_lock = threading.Lock()
+
+
+def _get_pools(
+    stage: str,
+    size: int,
+    func: Callable[[Any], Any],
+    config: ElementMapConfig,
+) -> _ElementPools:
+    """Return the pools of ``stage`` with at least ``size`` workers."""
+    with _pools_lock:
+        pools = _pools.get(stage, _ElementPools())
+        match size <= pools.size:
+            case True:
+                return pools
+            case False:
+                pools.close()
+                _pools[stage] = _create_pools(size, func, config)
+                return _pools[stage]
 
 
 def _available_cpus() -> int:
-    return len(os.sched_getaffinity(0))
+    """CPU cores reserved for this process by the backend, else all available."""
+    match os.environ.get(CPUS_ENV_VAR):
+        case None:
+            return len(os.sched_getaffinity(0))
+        case cpus:
+            return max(1, int(float(cpus)))
 
 
 def _required_size(config: ElementMapConfig, n: int) -> int:
@@ -186,16 +219,6 @@ def _create_pools(
                 initargs=(cloudpickle.dumps(func),),
             )
     return _ElementPools(size=size, threads=ThreadPool(size), processes=processes)
-
-
-def _resize(
-    state: _ElementPools,
-    size: int,
-    func: Callable[[Any], Any],
-    config: ElementMapConfig,
-) -> _ElementPools:
-    state.close()
-    return _create_pools(size, func, config)
 
 
 def _apply_at(

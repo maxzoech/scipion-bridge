@@ -8,6 +8,7 @@ from typing import (
     Any,
     Callable,
     Generic,
+    Iterator,
     List,
     NamedTuple,
     Optional,
@@ -17,6 +18,7 @@ from typing import (
     overload,
 )
 
+from ..environment.compute import ComputeAssignment
 from ..struct import Set, concat
 from .node import Node, LoweringContext
 from .sink import Sink
@@ -24,10 +26,10 @@ from .sink_writer import SinkWriter, CallbackSinkWriter
 from .ir import IROp, IRSource, IRMap, IRAccumulate, IRDemux, Tagged
 from .element_mapper import (
     ElementMapConfig,
+    ElementMapper,
     Executor,
     StartMethod,
     Workers,
-    make_element_mapper,
 )
 
 _NodeT = TypeVar("_NodeT", bound=Node)
@@ -43,7 +45,12 @@ class Op(Node):
         self.downstream.append(node)
         return node
 
-    def map_batch(self, func: Callable[[Any], Any]) -> MapOp:
+    def map_batch(
+        self,
+        func: Callable[[Any], Any],
+        *,
+        cpu_only: bool = False,
+    ) -> MapOp:
         """Transform entire incoming stream item / batch (1:1).
 
         Every map is executed as its own pipeline stage, and consecutive stages
@@ -52,12 +59,18 @@ class Op(Node):
         batch with the GPU forward pass of the next::
 
             particles.chunk(256).map(forward).map(build_metadata)
-        """
-        return self.op(MapOp(func))
 
-    def map(self, func: Callable[[Any], Any]) -> MapOp:
+        Args:
+            func: Function applied to each item.
+            cpu_only: Run without the GPUs of the protocol's compute
+                resources (``@resources``), e.g. for cheap bookkeeping maps
+                that should not wait for a GPU.
+        """
+        return self.op(MapOp(func, cpu_only=cpu_only))
+
+    def map(self, func: Callable[[Any], Any], *, cpu_only: bool = False) -> MapOp:
         """Alias for map_batch."""
-        return self.map_batch(func)
+        return self.map_batch(func, cpu_only=cpu_only)
 
     def map_element(
         self,
@@ -67,6 +80,7 @@ class Op(Node):
         executor: Executor = "thread",
         start_method: Optional[StartMethod] = None,
         chunksize: Optional[int] = None,
+        cpu_only: bool = False,
     ) -> MapElementOp:
         """Apply ``func`` to every element of the incoming collections, in parallel.
 
@@ -93,6 +107,8 @@ class Op(Node):
                 with ``executor="process"``). Avoid ``"fork"`` in processes that
                 initialized CUDA or JAX.
             chunksize: Consecutive indices per pool task.
+            cpu_only: Run without the GPUs of the protocol's compute
+                resources (``@resources``).
         """
         return self.op(
             MapElementOp(
@@ -103,6 +119,7 @@ class Op(Node):
                     start_method=start_method,
                     chunksize=chunksize,
                 ),
+                cpu_only=cpu_only,
             )
         )
 
@@ -281,30 +298,42 @@ class Source(Op):
 class MapOp(Op):
     """1:1 batch/element mapping operation node."""
 
-    def __init__(self, func: Callable[[Any], Any]):
+    def __init__(self, func: Callable[[Any], Any], *, cpu_only: bool = False):
         super().__init__(upstream=None)
         self.func = func
+        self.cpu_only = cpu_only
+        # Set by the protocol whose steps created this op.
+        self.compute: Optional[ComputeAssignment] = None
 
     def lower(self, ctx: LoweringContext) -> IROp:
         func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
-        return IRMap(func=self.func, name=f"map({func_name})")
+        return IRMap(func=self.func, name=f"map({func_name})", compute=self.compute)
 
 
 class MapElementOp(Op):
     """Operation node applying a function to every element of a collection in parallel."""
 
-    def __init__(self, func: Callable[[Any], Any], config: ElementMapConfig):
+    def __init__(
+        self,
+        func: Callable[[Any], Any],
+        config: ElementMapConfig,
+        *,
+        cpu_only: bool = False,
+    ):
         super().__init__(upstream=None)
         self.func = func
         self.config = config
+        self.cpu_only = cpu_only
+        # Set by the protocol whose steps created this op.
+        self.compute: Optional[ComputeAssignment] = None
 
     def lower(self, ctx: LoweringContext) -> IROp:
-        accumulate_fn, initial_state_fn = make_element_mapper(self.func, self.config)
+        # A stateless map: the worker pools are cached per process.
         func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
-        return IRAccumulate(
-            accumulate_fn=accumulate_fn,
-            initial_state_fn=initial_state_fn,
+        return IRMap(
+            func=ElementMapper(self.func, self.config),
             name=f"map_element({func_name})",
+            compute=self.compute,
         )
 
 
@@ -637,3 +666,23 @@ class KeyedOp(Op, Generic[K]):
             max_keys=self.max_keys,
             name="group_by",
         )
+
+
+def lineage(node: Node) -> Iterator[Node]:
+    """Yield ``node`` and every node upstream of it, each once.
+
+    The pipelines of ``group_by`` ops belong to the lineage of the op.
+    """
+    seen: PySet[Node] = set()
+    stack: List[Node] = [node]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+
+        seen.add(current)
+        yield current
+        stack.extend(current.upstream)
+        match current:
+            case KeyedOp():
+                stack.append(current.exit_)

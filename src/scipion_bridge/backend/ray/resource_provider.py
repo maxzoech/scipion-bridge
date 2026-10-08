@@ -1,12 +1,33 @@
+import math
 from typing import Any, Callable, Dict, Optional
 import ray
 
 from ...core.environment.resource_provider import ResourceProvider, ResourceScope
 
+# Share of the cluster's CPU cores a SHARED resource is built with: enough to
+# precompute constants quickly without stalling the rest of the pipeline.
+SHARED_BUILD_CPU_FRACTION = 0.35
+
 
 @ray.remote
+def _build_shared(builder: Callable[[Any], Any], instance: Any) -> Any:
+    """Build a SHARED resource, holding the CPU cores of the task meanwhile."""
+    return builder(instance)
+
+
+def _shared_build_cpus() -> int:
+    """CPU cores of a SHARED build; Ray limits its NumPy/BLAS threads to them."""
+    cluster_cpus = ray.cluster_resources().get("CPU", 1)
+    return max(1, math.floor(SHARED_BUILD_CPU_FRACTION * cluster_cpus))
+
+
+@ray.remote(num_cpus=0)
 class RayResourceCoordinator:
-    """Cluster-wide coordinator managing shared ObjectRefs in Ray Plasma store."""
+    """Cluster-wide coordinator managing shared ObjectRefs in Ray Plasma store.
+
+    Every resource is built once, by a task holding a share of the cluster's
+    CPU cores only while it builds; the coordinator itself holds none.
+    """
 
     def __init__(self) -> None:
         self._refs: Dict[str, ray.ObjectRef] = {}
@@ -18,8 +39,9 @@ class RayResourceCoordinator:
         instance: Any,
     ) -> ray.ObjectRef:
         if key not in self._refs:
-            value = builder(instance)
-            self._refs[key] = ray.put(value)
+            self._refs[key] = _build_shared.options(
+                num_cpus=_shared_build_cpus(),
+            ).remote(builder, instance)
         return self._refs[key]
 
     def clear(self) -> None:

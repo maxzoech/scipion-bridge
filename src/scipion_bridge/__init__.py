@@ -21,13 +21,14 @@ from .core.typed.proxy import (
 )
 from .single_particle.proxies import ParticleStackProxy, StarfileProxy, MRCStackProxy
 from .core.environment.domain import Domain
+from .core.environment.compute import ComputeResources, TaskType
 from .core.utils.shell import shell_command
 
 from .core import protocol
 from .core.protocol import Protocol, Field, Input
 from .core.protocol import Protocol, Field, Input, Resource
 from .core.protocol import Protocol, Field, Input, Resource, ResourceScope
-from .core.protocol import ChainedProtocol
+from .core.protocol import ChainedProtocol, resources
 from .core.environment.resource_provider import (
     ResourceProvider,
     DefaultResourceProvider,
@@ -64,6 +65,9 @@ __all__ = [
     "estimate_optimal_chunk_size",
     "shell_command",
     "Domain",
+    "ComputeResources",
+    "TaskType",
+    "resources",
     "protocol",
     "Protocol",
     "ChainedProtocol",

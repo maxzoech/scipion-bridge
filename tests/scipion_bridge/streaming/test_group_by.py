@@ -305,7 +305,8 @@ def test_close_terminates_children():
     pipeline = _compile(Source("x").group_by(0, _chunk_ids).unkey().sink(print))
     pipeline.send("x", ("close-test", _make_set([1])))
     pipeline.flush()
-    assert len(_named_child_actors("close-test")) == 5
+    # Source, chunk and sink; the maps run as tasks of their upstream stage.
+    assert len(_named_child_actors("close-test")) == 3
 
     pipeline.close()
 

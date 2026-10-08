@@ -34,6 +34,8 @@ def init_ray_session():
     ray.init(
         ignore_reinit_error=True,
         num_cpus=2,
+        # Logical GPUs: Ray schedules them without a GPU driver.
+        num_gpus=2,
         runtime_env={"env_vars": {"PYTHONPATH": python_path}},
     )
     yield

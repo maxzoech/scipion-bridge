@@ -7,6 +7,8 @@ import uuid
 from dataclasses import dataclass
 from typing import (
     Any,
+    Callable,
+    ClassVar,
     Dict,
     List,
     Mapping,
@@ -19,7 +21,8 @@ from typing import (
     get_type_hints,
 )
 
-from ..streaming.ops import Op
+from ..environment.compute import ComputeAssignment, ComputeResources, TaskType
+from ..streaming.ops import MapElementOp, MapOp, Op, lineage
 from .chain_utils import (
     merge_inputs,
     merge_parameters,
@@ -82,6 +85,8 @@ def _bind_field(
 class Protocol(metaclass=abc.ABCMeta):
 
     _configuration: _ProtocolTypeConfiguration
+    # Resources of the stages created by ``steps``, set with ``@resources``.
+    compute_resources: ClassVar[Optional[ComputeResources]] = None
 
     @property
     def configuration(self) -> ProtocolConfiguration:
@@ -115,7 +120,34 @@ class Protocol(metaclass=abc.ABCMeta):
 
     def get_pipeline(self) -> Op:
         """Return the pipeline of operations for this protocol."""
-        return self.steps().map(self._verify_outputs)
+        return self._tagged_steps().map(self._verify_outputs)
+
+    def _tagged_steps(self) -> Op:
+        """Return ``steps()``, with its stages assigned this protocol's resources.
+
+        Only the user functions (``map``, ``map_element``) are assigned; the
+        stages of built-in ops need no resources. The stages of the protocol
+        form one group, which shares its resources if it is long-running.
+        """
+        steps = self.steps()
+        match self.compute_resources:
+            case None:
+                return steps
+            case resources:
+                assignment = ComputeAssignment(resources, group=self.protocol_id)
+                # cpu_only stages run without GPUs and outside the
+                # long-running executor of the protocol.
+                cpu_assignment = ComputeAssignment(
+                    ComputeResources(cpus=resources.cpus),
+                    group=self.protocol_id,
+                )
+                for node in lineage(steps):
+                    match node:
+                        case MapOp() | MapElementOp() if node.compute is None:
+                            node.compute = (
+                                cpu_assignment if node.cpu_only else assignment
+                            )
+                return steps
 
     def _verify_outputs(self, outputs: Any) -> Dict[str, Any]:
         """Validate step outputs against the declared outputs.
@@ -364,6 +396,39 @@ class ChainedProtocol(Protocol):
     def steps(self) -> Op:
         return merge_pipelines(
             self.first.get_pipeline(),
-            self.second.steps(),
+            self.second._tagged_steps(),
             self._wires,
         )
+
+
+ProtocolT = TypeVar("ProtocolT", bound=Type[Protocol])
+
+
+def resources(
+    *,
+    gpus: float = 0,
+    cpus: Optional[float] = None,
+    task: TaskType = TaskType.EPHEMERAL,
+) -> Callable[[ProtocolT], ProtocolT]:
+    """Declare the compute resources of a protocol's stages.
+
+    Every call of the protocol's ``map`` and ``map_element`` functions
+    requires the resources::
+
+        @B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+        class Inference(B.Protocol): ...
+
+    See :class:`ComputeResources` for the arguments.
+    """
+    compute = ComputeResources(gpus=gpus, cpus=cpus, task=task)
+
+    def decorate(cls: ProtocolT) -> ProtocolT:
+        if not issubclass(cls, Protocol):
+            raise TypeError(
+                f"@resources applies to Protocol classes, got '{cls.__qualname__}'.",
+            )
+
+        cls.compute_resources = compute
+        return cls
+
+    return decorate

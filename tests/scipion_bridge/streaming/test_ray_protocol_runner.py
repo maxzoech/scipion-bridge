@@ -286,6 +286,9 @@ class BuilderTracker:
         return self.call_count
 
 
+# Maps run as Ray tasks, possibly in several worker processes; a long-running
+# protocol keeps its process-scope resources in a single process.
+@B.resources(task=B.TaskType.LONG_RUNNING)
 class RayResourceProtocol(Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input(
         label="Input Particles",

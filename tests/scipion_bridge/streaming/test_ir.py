@@ -1,3 +1,4 @@
+from scipion_bridge.core.streaming.element_mapper import ElementMapper
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.sink import Sink
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
@@ -111,8 +112,10 @@ def test_map_element_lowering():
     (sink_ir,) = lower([sink_node])
     element_ir = sink_ir.upstream[0]
 
-    assert isinstance(element_ir, IRAccumulate)
-    assert element_ir.flush_fn is None
+    # A stateless map; the worker pools are cached per process.
+    assert isinstance(element_ir, IRMap)
+    assert isinstance(element_ir.func, ElementMapper)
+    assert element_ir.func.config.workers == 2
     assert element_ir.name == f"map_element({preprocess.__qualname__})"
 
 
