@@ -187,6 +187,67 @@ def test_collection_item_view_roundtrip(serializer):
     _assert_class_equal(restored, collection[2])
 
 
+def _class_with_sampling_rates(class_id: int, rates: list) -> Class2D:
+    particles = B.Set[Particle](capacity=len(rates))
+    particles["sampling_rate"] = np.array(rates, np.float64).reshape(-1, 1)
+    # Regular pixels, as read from a stack, are exported with non-nullable
+    # children, so unpickling restores the type of the particles column.
+    particles["pixels"] = np.full((len(rates), 4, 4), class_id, np.float32)
+    return Class2D(class_id=class_id, particles=particles)
+
+
+def _ragged_static_classes() -> B.Collection[Class2D]:
+    # Static particle fields of Sets with a different length per slot.
+    return _classes(
+        3,
+        {
+            0: _class_with_sampling_rates(0, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            2: _class_with_sampling_rates(1, [7.0, 8.0]),
+        },
+    )
+
+
+def test_collection_to_arrow_with_ragged_static_nested_sets():
+    batch = _ragged_static_classes().to_arrow()
+
+    batch.validate(full=True)
+    rates = batch.column("particles").field("sampling_rate")
+    assert pa.types.is_list(rates.type)
+    assert [row if row is None else len(row) for row in rates.to_pylist()] == [
+        6,
+        None,
+        2,
+    ]
+
+
+@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+def test_collection_with_ragged_static_nested_sets_roundtrip(serializer):
+    dumps, loads = _SERIALIZERS[serializer]
+    collection = _ragged_static_classes()
+
+    restored = loads(dumps(collection))
+
+    assert type(restored) is B.Collection[Class2D]
+    assert restored.size == 3
+    assert restored.initialized_indices() == [0, 2]
+    for index in [0, 2]:
+        rates = restored[index].particles["sampling_rate"]
+        assert restored[index].class_id == collection[index].class_id
+        assert isinstance(rates, np.ndarray)
+        assert np.array_equal(rates, collection[index].particles["sampling_rate"])
+        assert np.array_equal(
+            np.asarray(restored[index].particles["pixels"]),
+            np.asarray(collection[index].particles["pixels"]),
+        )
+
+
+def test_struct_with_empty_nested_set_of_static_rows_roundtrip():
+    restored = pickle.loads(pickle.dumps(_class_with_sampling_rates(4, [])))
+
+    assert restored.class_id == 4
+    assert restored.particles["sampling_rate"].shape == (0, 1)
+
+
 def test_collection_item_view_does_not_pickle_other_slots():
     small = _classes(20, {0: _class(0, n=2)})
     large = _classes(

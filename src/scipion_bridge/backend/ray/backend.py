@@ -19,7 +19,10 @@ from scipion_bridge.core.streaming.ir import (
     IRMap,
     IRAccumulate,
     IRSink,
+    IRDemux,
+    Keyed,
     Tagged,
+    clone_ir,
 )
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
@@ -312,6 +315,119 @@ class RaySinkActor(_PipelinedStage):
         return []
 
 
+class _DemuxResultWriter:
+    """Sink of a ``group_by`` child, handing its results back to the router."""
+
+    def __init__(self, router: Any, key: Any) -> None:
+        self.router = router
+        self.key = key
+
+    async def write(self, item: Any) -> None:
+        await self.router.emit.remote(self.key, item)
+
+    async def finalize(self) -> None:
+        pass
+
+
+@ray.remote
+class RayDemuxActor(_PipelinedStage):
+    """Router of a ``group_by`` (IRDemux) into a child pipeline per key.
+
+    The child pipeline of a key is compiled from a clone of the template when
+    the first item of the key arrives. Its sink hands every result back to
+    ``emit``, which forwards it as ``Keyed(key, result)``:
+
+    - The compute task pushes into the inbox of a child, whose sink waits for
+      room in the outbox of the router. The outbox is drained by the emitter
+      task, independently of the compute task, so the two never wait on each
+      other.
+    - On FLUSH, the router flushes every child before it forwards the FLUSH.
+      A child returns from its flush only after its sink handed back all
+      results, so they precede the FLUSH downstream.
+    - The children abort the abort targets of the router, so that a failing
+      child stops the enclosing pipeline.
+
+    The children are owned by the router and terminated together with it.
+    """
+
+    def __init__(
+        self,
+        key_fn: Callable[[Any], Any],
+        template: IROp,
+        source_name: str,
+        max_keys: Optional[int],
+        prefix: str,
+        queue_size: int,
+        parameters: Mapping[str, Any],
+    ):
+        from .container import configure_ray_env
+
+        configure_ray_env(parameters=parameters)
+        super().__init__(queue_size)
+        self.key_fn = key_fn
+        self.template = template
+        self.source_name = source_name
+        self.max_keys = max_keys
+        self.prefix = prefix
+        self.queue_size = queue_size
+        self.parameters = parameters
+        self._children: Dict[Any, RayCompiledPipeline] = {}
+
+    async def process(self, item: Any, port: int) -> List[Any]:
+        key = await asyncio.to_thread(self.key_fn, item)
+        if key not in self._children:
+            self._children[key] = await self._spawn(key)
+
+        await self._children[key].source_handle(self.source_name).push.remote(item)
+        return []
+
+    async def on_flush(self) -> List[Any]:
+        await asyncio.gather(
+            *(
+                child.source_handle(self.source_name).push.remote(FLUSH)
+                for child in self._children.values()
+            ),
+        )
+        return []
+
+    async def emit(self, key: Any, item: Any) -> None:
+        """Forward a result of the child pipeline of ``key``."""
+        await self._outbox.put((Keyed(key=key, value=item), []))
+
+    async def children_stats(self) -> Dict[str, StageStats]:
+        """Return the execution metrics of every stage of the children."""
+        stats = await asyncio.gather(
+            *(asyncio.to_thread(child.stats) for child in self._children.values()),
+        )
+        return {label: stage for child in stats for label, stage in child.items()}
+
+    async def _spawn(self, key: Any) -> RayCompiledPipeline:
+        if self.max_keys is not None and len(self._children) >= self.max_keys:
+            raise ValueError(
+                f"group_by received key {key!r} after max_keys={self.max_keys} "
+                f"keys: {list(self._children)}.",
+            )
+
+        (exit_,) = clone_ir([self.template])
+        sink = IRSink(
+            writer=_DemuxResultWriter(ray.get_runtime_context().current_actor, key),
+        )
+        exit_.add_downstream(sink)
+        backend = RayBackend(
+            init_ray=False,
+            queue_size=self.queue_size,
+            parameters=self.parameters,
+        )
+        # Compiling waits for the child actors; a thread keeps the event loop,
+        # and with it the emitter, running meanwhile.
+        return await asyncio.to_thread(
+            backend.compile,
+            [sink],
+            name=f"{self.prefix}group_by[{key}]:",
+            abort_targets=self._abort_targets,
+        )
+
+
 class RayCompiledPipeline(CompiledPipeline):
     """
     Executable compiled streaming pipeline running on Ray.
@@ -321,15 +437,19 @@ class RayCompiledPipeline(CompiledPipeline):
         self,
         sources: Dict[str, Any],
         stages: Dict[str, Any],
+        demuxes: Sequence[Any] = (),
     ):
         """
         Args:
             sources: Source actors keyed by input name.
             stages: All actors of the pipeline keyed by a readable stage label,
                 in topological order.
+            demuxes: The ``group_by`` routers among the stages, whose child
+                pipelines are reported by ``stats``.
         """
         self._sources = sources
         self._stages = stages
+        self._demuxes = list(demuxes)
 
     def source_handle(self, source_name: str) -> Any:
         """Return the actor handle of a named input source.
@@ -352,12 +472,22 @@ class RayCompiledPipeline(CompiledPipeline):
         ray.get([src.push.remote(FLUSH) for src in self._sources.values()])
 
     def stats(self) -> Dict[str, StageStats]:
-        """Return execution metrics per stage, in topological order."""
+        """Return execution metrics per stage, in topological order.
+
+        The stages of ``group_by`` children follow, labelled with their key.
+        """
         stats = ray.get([actor.stats.remote() for actor in self._stages.values()])
-        return dict(zip(self._stages, stats))
+        children = ray.get([demux.children_stats.remote() for demux in self._demuxes])
+        return {
+            **dict(zip(self._stages, stats)),
+            **{label: stage for child in children for label, stage in child.items()},
+        }
 
     def close(self) -> None:
-        """Terminate all actors allocated for this pipeline."""
+        """Terminate all actors allocated for this pipeline.
+
+        The children of ``group_by`` routers terminate with their router.
+        """
         for actor in self._stages.values():
             try:
                 ray.kill(actor)
@@ -493,6 +623,23 @@ class RayBackend(StreamingBackendProvider):
                         "writer": writer,
                         "queue_size": self.queue_size,
                     }
+                case IRDemux(
+                    key_fn=key_fn,
+                    template=template,
+                    source_name=template_source,
+                    max_keys=max_keys,
+                ):
+                    assert template is not None, "IRDemux has no template."
+                    actor_cls = RayDemuxActor
+                    kwargs = {
+                        "key_fn": key_fn,
+                        "template": template,
+                        "source_name": template_source,
+                        "max_keys": max_keys,
+                        "prefix": name,
+                        "queue_size": self.queue_size,
+                        "parameters": self.parameters,
+                    }
                 case _:
                     raise NotImplementedError(
                         f"Unsupported IR op type for Ray backend: {type(node).__name__}",
@@ -529,6 +676,9 @@ class RayBackend(StreamingBackendProvider):
                 f"{name}{index}:{_describe(node)}": actor_map[node]
                 for index, node in enumerate(all_nodes)
             },
+            demuxes=[
+                actor_map[node] for node in all_nodes if isinstance(node, IRDemux)
+            ],
         )
 
 
@@ -543,5 +693,7 @@ def _describe(node: IROp) -> str:
             return name
         case IRSink(writer=writer):
             return f"sink({type(writer).__name__})"
+        case IRDemux(name=name):
+            return name
         case _:
             return type(node).__name__

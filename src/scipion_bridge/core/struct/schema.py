@@ -30,6 +30,7 @@ from typing import (
     TypeAlias,
     overload,
     SupportsIndex,
+    List,
 )
 
 import numpy as np
@@ -99,8 +100,10 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         reference. Field descriptors keep the default pickling.
 
         PyArrow's pickling of arrays drops the nullability of nested fields,
-        which Awkward would read back as option types. The exact schema is
-        therefore pickled in Arrow IPC form and restored by a zero-copy cast.
+        which Awkward would read back as option types. The columns are
+        therefore pickled apart from the exact schema, which is pickled in
+        Arrow IPC form and restored by zero-copy casts. A pickled RecordBatch
+        would combine both when unpickled, which fails for some nested types.
         """
         match self.is_descriptor:
             case True:
@@ -109,34 +112,51 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
                 batch = self.to_arrow()
                 return (
                     _from_arrow,
-                    (self._pickle_cls(), batch, batch.schema.serialize().to_pybytes()),
+                    (
+                        self._pickle_cls(),
+                        batch.columns,
+                        batch.schema.serialize().to_pybytes(),
+                    ),
                 )
 
 
 def _from_arrow(
     cls: Type[SchemaConvertible],
-    batch: pa.RecordBatch,
-    schema: bytes,
+    columns: List[pa.Array],
+    serialized_schema: bytes,
 ) -> SchemaConvertible:
     """Unpickle an instance serialized by ``SchemaConvertible.__reduce_ex__``."""
+    schema = pa.ipc.read_schema(pa.py_buffer(serialized_schema))
     return cls.from_arrow(
-        _with_schema(batch, pa.ipc.read_schema(pa.py_buffer(schema))),
+        pa.RecordBatch.from_arrays(
+            [_with_type(column, field.type) for column, field in zip(columns, schema)],
+            schema=schema,
+        ),
     )
 
 
-def _with_schema(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
-    """Restore the exact schema of an unpickled batch by zero-copy casts.
+def _with_type(array: pa.Array, target: pa.DataType) -> pa.Array:
+    """Restore ``target`` on an unpickled array, casting only changed fields.
 
-    Columns are cast one by one, and only where their type changed: casting
-    a whole batch fails for struct columns with extension type children.
+    Casting (or viewing) a struct drops the children of extension arrays
+    nested in lists among its fields, so structs are rebuilt from their
+    fields instead, and fields of unchanged type are kept as they are.
     """
-    return pa.RecordBatch.from_arrays(
-        [
-            column if column.type.equals(field.type) else column.cast(field.type)
-            for column, field in zip(batch.columns, schema)
-        ],
-        schema=schema,
-    )
+    match target:
+        case _ if array.type.equals(target):
+            return array
+        case pa.StructType():
+            assert isinstance(array, pa.StructArray)
+            return pa.StructArray.from_arrays(
+                [
+                    _with_type(array.field(index), target.field(index).type)
+                    for index in range(target.num_fields)
+                ],
+                fields=list(target),
+                mask=array.is_null() if array.null_count > 0 else None,
+            )
+        case _:
+            return array.cast(target)
 
 
 class Entry(metaclass=abc.ABCMeta):

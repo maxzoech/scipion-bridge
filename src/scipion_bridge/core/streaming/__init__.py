@@ -8,11 +8,22 @@ from .ops import (
     CollectOp,
     FlattenOp,
     CombineLatestOp,
+    KeyedOp,
 )
 from .element_mapper import ElementMapConfig
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
-from .ir import IROp, IRSource, IRMap, IRAccumulate, IRSink, Tagged, clone_ir
+from .ir import (
+    IROp,
+    IRSource,
+    IRMap,
+    IRAccumulate,
+    IRSink,
+    IRDemux,
+    Keyed,
+    Tagged,
+    clone_ir,
+)
 from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
 from .pipeline import Pipeline
 
@@ -27,6 +38,7 @@ __all__ = [
     "CollectOp",
     "FlattenOp",
     "CombineLatestOp",
+    "KeyedOp",
     "Sink",
     "FlushSignal",
     "FLUSH",
@@ -37,6 +49,8 @@ __all__ = [
     "IRMap",
     "IRAccumulate",
     "IRSink",
+    "IRDemux",
+    "Keyed",
     "Tagged",
     "clone_ir",
     "lower",

@@ -643,6 +643,9 @@ def _row_value(value: Any, entry: ArrayEntryBase) -> Any:
     nested Sets keep their (possibly ragged) Awkward representation.
     """
     match (entry, value):
+        case (_, ak.Array()) if entry.is_static:
+            # A row of a ragged nested Set column; its own shape is regular.
+            return ak.to_numpy(value)
         case (SetEntryBase(), _):
             return value
         case (_, ak.Array()) if is_regular_awkward(value):

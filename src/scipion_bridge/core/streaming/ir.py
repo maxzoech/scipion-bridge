@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from .sink_writer import SinkWriter
 
@@ -22,6 +22,13 @@ class Tagged:
 
     port: int
     item: Any
+
+
+class Keyed(NamedTuple):
+    """Result of a ``group_by`` pipeline, together with the key of its group."""
+
+    key: Any
+    value: Any
 
 
 @dataclass(eq=False)
@@ -85,6 +92,23 @@ class IRSink(IROp):
     """Terminal/Checkpoint node delegating to an async SinkWriter."""
 
     writer: Optional[SinkWriter] = None
+
+
+@dataclass(eq=False)
+class IRDemux(IROp):
+    """Routing of items into a child pipeline per key (``group_by``).
+
+    ``template`` is the exit node of the child pipeline, lowered on its own; it
+    is not wired into the enclosing DAG. Its only source is ``source_name``.
+    The backend compiles a clone of it for every new key and emits the
+    results of each child as ``Keyed(key, result)``.
+    """
+
+    key_fn: Callable[[Any], Any] = field(default=lambda item: item)
+    template: Optional[IROp] = field(default=None, repr=False)
+    source_name: str = ""
+    max_keys: Optional[int] = None
+    name: str = "group_by"
 
 
 def clone_ir(sinks: Sequence[IROp]) -> List[IROp]:

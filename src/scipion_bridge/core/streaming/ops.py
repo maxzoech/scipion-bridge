@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import operator
+from collections.abc import Hashable, Iterable, Mapping
 from typing import (
     Any,
     Callable,
+    Generic,
     List,
     NamedTuple,
     Optional,
+    Set as PySet,
     Tuple,
     TypeVar,
+    overload,
 )
 
 from ..struct import Set, concat
 from .node import Node, LoweringContext
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
-from .ir import IROp, IRSource, IRMap, IRAccumulate, Tagged
+from .ir import IROp, IRSource, IRMap, IRAccumulate, IRDemux, Tagged
 from .element_mapper import (
     ElementMapConfig,
     Executor,
@@ -27,6 +31,7 @@ from .element_mapper import (
 )
 
 _NodeT = TypeVar("_NodeT", bound=Node)
+K = TypeVar("K", bound=Hashable)
 
 
 class Op(Node):
@@ -168,6 +173,75 @@ class Op(Node):
         node = self.op(CombineLatestOp())
         other.op(node)
         return node
+
+    @overload
+    def group_by(
+        self,
+        key: int | str,
+        pipeline: Callable[[Op], Op],
+        *,
+        max_keys: Optional[int] = None,
+    ) -> KeyedOp[Any]: ...
+
+    @overload
+    def group_by(
+        self,
+        key: Callable[[Any], K],
+        pipeline: Callable[[Op], Op],
+        *,
+        max_keys: Optional[int] = None,
+    ) -> KeyedOp[K]: ...
+
+    def group_by(
+        self,
+        key: int | str | Callable[[Any], Any],
+        pipeline: Callable[[Op], Op],
+        *,
+        max_keys: Optional[int] = None,
+    ) -> KeyedOp[Any]:
+        """Run ``pipeline`` separately on the items of every key (demux).
+
+        Every item is routed by its key into a pipeline of its own, so that
+        stateful operations (``chunk``, ``collect``, ``combine_latest``) only
+        see the items of one key. The pipeline of a key is created when its
+        first item arrives. Results are emitted as ``Keyed(key, result)``;
+        call ``unkey()`` to continue with the merged stream::
+
+            classes.flatten()
+                .group_by(lambda cls: cls.class_id, pipeline=refine)
+                .unkey()
+                .map(write_class)
+
+        Args:
+            key: Index or field name selecting the key of an item
+                (``item[key]``), or a function computing it. Keys must be
+                hashable.
+            pipeline: Builds the pipeline of one key from its input stream.
+                It may only consume that input, and every branch must lead to
+                the stream it returns.
+            max_keys: Maximum number of keys; a further key fails the
+                pipeline. Every key allocates the stages of its own pipeline.
+        """
+        if max_keys is not None and max_keys <= 0:
+            raise ValueError(f"max_keys must be positive, got {max_keys}.")
+
+        entry = Source(_GROUP_INPUT)
+        exit_ = pipeline(entry)
+        if not isinstance(exit_, Op):
+            raise TypeError(
+                "The group_by pipeline must return a stream (Op), got "
+                f"'{type(exit_).__name__}'.",
+            )
+
+        dangling = _branches_off(exit_)
+        if dangling:
+            raise ValueError(
+                "Every branch of a group_by pipeline must lead to the stream it "
+                "returns; found branches ending in "
+                f"{[type(node).__name__ for node in dangling]}.",
+            )
+
+        return self.op(KeyedOp(_make_key_extractor(key), entry, exit_, max_keys))
 
     def write_to(self, writer: SinkWriter) -> Sink:
         """Attach a terminal SinkWriter."""
@@ -480,4 +554,86 @@ class CombineLatestOp(Op):
             flush_fn=_combine_latest_flush,
             name="combine_latest",
             tag_inputs=True,
+        )
+
+
+_GROUP_INPUT = "group_by.input"
+
+
+def _make_key_extractor(
+    key: int | str | Callable[[Any], Any],
+) -> Callable[[Any], Any]:
+    match key:
+        case int() | str():
+            return operator.itemgetter(key)
+
+        case _ if callable(key):
+            return key
+
+        case _:
+            raise TypeError(
+                "group_by key must be an index, a field name or a function, got "
+                f"'{type(key).__name__}'.",
+            )
+
+
+def _branches_off(exit_: Node) -> List[Node]:
+    """Return the nodes consuming the lineage of ``exit_`` outside of it."""
+    lineage: PySet[Node] = set()
+    stack: List[Node] = [exit_]
+    while stack:
+        node = stack.pop()
+        if node in lineage:
+            continue
+
+        lineage.add(node)
+        stack.extend(node.upstream)
+
+    return [
+        consumer
+        for node in lineage
+        for consumer in node.downstream
+        if consumer not in lineage
+    ]
+
+
+class KeyedOp(Op, Generic[K]):
+    """Operation node routing items into a pipeline per key (``group_by``).
+
+    The pipeline is kept as a template, outside of the enclosing graph, and
+    lowered on its own.
+    """
+
+    def __init__(
+        self,
+        key_fn: Callable[[Any], K],
+        entry: Source,
+        exit_: Op,
+        max_keys: Optional[int],
+    ) -> None:
+        super().__init__(upstream=None)
+        self.key_fn = key_fn
+        self.entry = entry
+        self.exit_ = exit_
+        self.max_keys = max_keys
+
+    def unkey(self) -> Op:
+        """End the keyed region; the stream carries ``Keyed(key, result)`` items."""
+        return self
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        template_ctx = LoweringContext()
+        template = template_ctx.lower_node(self.exit_)
+        if set(template_ctx.sources) != {self.entry.name}:
+            raise ValueError(
+                "The group_by pipeline may only consume its input, but it "
+                f"consumes {sorted(template_ctx.sources)}.",
+            )
+
+        return IRDemux(
+            key_fn=self.key_fn,
+            template=template,
+            source_name=self.entry.name,
+            max_keys=self.max_keys,
+            name="group_by",
         )

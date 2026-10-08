@@ -5,6 +5,7 @@ from .backend import (
     RayWorkerActor,
     RayAccumulatorActor,
     RaySinkActor,
+    RayDemuxActor,
 )
 from .container import RayContainer, configure_ray_container, configure_ray_env
 from .ray_protocol_runner import RayPipelineRunner
@@ -17,6 +18,7 @@ __all__ = [
     "RayWorkerActor",
     "RayAccumulatorActor",
     "RaySinkActor",
+    "RayDemuxActor",
     "RayContainer",
     "configure_ray_container",
     "configure_ray_env",

@@ -340,19 +340,25 @@ def leaf_to_arrow(
     data: Union[np.ndarray, ak.Array],
     entry: ArrayEntryBase,
 ) -> pa.Array:
-    """Convert a leaf column buffer of a Set into an Arrow array.
+    """Convert a leaf column buffer into an Arrow array.
+
+    Axis 0 of ``data`` holds the rows and its last axes the shape of
+    ``entry``. Axes in between belong to nested Sets; their length varies
+    per row, so each becomes a list level instead of a tensor dimension.
 
     Static columns become FixedShapeTensorArrays (or primitive arrays for 1-D
     buffers) and ragged columns become (nested) list arrays. Contiguous NumPy
     buffers are wrapped without copying.
     """
     match (entry.is_static, data):
+        case (_, np.ndarray()) if data.ndim > len(entry.shape) + 1:
+            return _nested_set_to_arrow(data, entry)
         case (True, np.ndarray()) if data.ndim == 1:
             return pa.array(data)
         case (True, np.ndarray()):
-            return pa.FixedShapeTensorArray.from_numpy_ndarray(
-                np.ascontiguousarray(data),
-            )
+            # Unlike FixedShapeTensorArray.from_numpy_ndarray, this accepts
+            # zero rows, e.g. an empty nested Set.
+            return build_tensor_array(data, data.shape[1:], data.dtype)
         case (False, np.ndarray()):
             return ak.to_arrow(ak.Array(data), extensionarray=False)
         case (False, ak.Array()):
@@ -368,12 +374,41 @@ def leaf_from_arrow(
     column: pa.Array,
     entry: ArrayEntryBase,
 ) -> Union[np.ndarray, ak.Array]:
-    """Convert an Arrow array produced by :func:`leaf_to_arrow` back into a buffer."""
-    match entry.is_static:
-        case True:
+    """Convert an Arrow array produced by :func:`leaf_to_arrow` back into a buffer.
+
+    Nested Sets of equal length in every row are restored as a NumPy array,
+    otherwise as a ragged Awkward array.
+    """
+    match (entry.is_static, column):
+        case (True, pa.ListArray()):
+            return _nested_set_from_arrow(column, entry)
+        case (True, _):
             return arrow_to_numpy(column, entry.shape)
-        case False:
+        case (False, _):
             return ak.from_arrow(column)
+
+
+def _nested_set_to_arrow(data: np.ndarray, entry: ArrayEntryBase) -> pa.ListArray:
+    """Export axis 1 of ``data``, the axis of a nested Set, as a list level."""
+    rows, length = data.shape[:2]
+    values = leaf_to_arrow(data.reshape((rows * length, *data.shape[2:])), entry)
+    offsets = pa.array(np.arange(rows + 1, dtype=np.int32) * length)
+    return pa.ListArray.from_arrays(offsets, values)
+
+
+def _nested_set_from_arrow(
+    column: pa.ListArray,
+    entry: ArrayEntryBase,
+) -> Union[np.ndarray, ak.Array]:
+    """Restore a list level written by :func:`_nested_set_to_arrow`."""
+    counts = pc.list_value_length(column).fill_null(0).to_numpy()
+    # Unlike ``values``, ``flatten`` respects the offset and nulls of the column.
+    values = leaf_from_arrow(column.flatten(), entry)
+    match np.unique(counts).tolist():
+        case [length] if isinstance(values, np.ndarray):
+            return values.reshape((len(column), length, *values.shape[1:]))
+        case _:
+            return ak.unflatten(values, counts)
 
 
 def nest_columns(
