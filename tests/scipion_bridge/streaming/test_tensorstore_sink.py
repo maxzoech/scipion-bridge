@@ -3,7 +3,6 @@ import pytest
 import numpy as np
 import tensorstore as ts
 from pathlib import Path
-import ray
 
 import scipion_bridge as B
 from scipion_bridge.core.streaming.ops import Source
@@ -28,19 +27,6 @@ class DynamicParticle(B.Struct):
 class Class2D(B.Struct):
     representative: B.Array[np.float32] = B.Array(shape=(16, 16))
     particles: B.Set[Particle] = B.Set[Particle](capacity=10)
-
-
-@pytest.fixture(scope="module")
-def ray_cluster():
-    if not ray.is_initialized():
-        import sys
-
-        ray.init(
-            ignore_reinit_error=True,
-            num_cpus=2,
-            runtime_env={"env_vars": {"PYTHONPATH": ":".join(sys.path)}},
-        )
-    yield
 
 
 def test_tensorstore_sink_set_append(tmp_path: Path):

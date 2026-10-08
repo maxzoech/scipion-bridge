@@ -173,6 +173,7 @@ def test_pickled_slice_does_not_include_parent_storage():
     assert slice_size < 0.15 * full_size
 
 
+@pytest.mark.usefixtures("ray_cluster")
 def test_write_after_zero_copy_restore():
     samples = _make_samples(4)
 

@@ -7,6 +7,8 @@ from scipion_bridge.core.streaming.ops import Source, _make_set_collect_accumula
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 class Item(B.Struct):
     id: int
@@ -81,18 +83,13 @@ def test_collect_rejects_non_sets():
         accumulate(initial_state(), [1, 2, 3])
 
 
-@pytest.mark.parametrize(
-    ("n", "expected"),
-    [
-        (5, [[1, 2, 3, 4, 5]]),
-        (50, [[1, 2, 3, 4, 5, 6, 7]]),
-    ],
-)
-def test_collect_in_ray_pipeline(n, expected):
+def test_collect_in_ray_pipeline_emits_on_flush():
+    # The stream is shorter than n: the result is emitted by the stage's flush,
+    # before the sink flushes. Emitting a full collect is tested above.
     collector = SetCollector.remote()
     writer = CallbackSinkWriter(lambda s: ray.get(collector.append.remote(s)))
 
-    sink_node = Source("items").collect(n).write_to(writer)
+    sink_node = Source("items").collect(50).write_to(writer)
 
     backend = RayBackend(init_ray=False)
     with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
@@ -100,4 +97,4 @@ def test_collect_in_ray_pipeline(n, expected):
         pipeline.send(items=_make_set([4, 5, 6]))
         pipeline.send(items=_make_set([7]))
 
-    assert ray.get(collector.get.remote()) == expected
+    assert ray.get(collector.get.remote()) == [[1, 2, 3, 4, 5, 6, 7]]

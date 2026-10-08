@@ -22,6 +22,8 @@ from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 class Sample(B.Struct):
     image: B.Array[np.float32] = B.Array(shape=(2, 2))

@@ -19,6 +19,8 @@ from scipion_bridge.core.streaming.ops import (
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 class Item(B.Struct):
     id: int
@@ -140,18 +142,14 @@ def _describe_pair(pair):
     return (_ids(chunk), model)
 
 
-@pytest.mark.parametrize(
-    ("sample_size", "model"),
-    [
-        (3, 1 + 2 + 3),
-        # The stream is shorter than the sample: collect emits on flush.
-        (100, sum(range(1, 11))),
-    ],
-)
-def test_chunks_are_paired_with_model_trained_on_same_stream(sample_size, model):
+def test_chunks_are_paired_with_model_trained_on_same_stream():
+    # The stream is shorter than the sample: collect emits the model on flush,
+    # which releases every buffered chunk. Pairing with a latest value known
+    # mid-stream is tested on the accumulator above.
     collector = Collector.remote()
+    model = sum(range(1, 11))
 
-    model_stream = Source("items").collect(sample_size).map(_train)
+    model_stream = Source("items").collect(100).map(_train)
     sink_node = (
         Source("items")
         .chunk(4)

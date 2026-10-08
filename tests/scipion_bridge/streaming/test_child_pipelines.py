@@ -19,6 +19,8 @@ from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 class Item(B.Struct):
     id: int

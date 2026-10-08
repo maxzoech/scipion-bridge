@@ -1,5 +1,17 @@
-import pytest
-from scipion_bridge.backend.standalone.container import configure_default_env
+import os
+
+# Read by Ray on import: a test that needs Ray but does not request the
+# ray_cluster fixture fails instead of starting an unconfigured cluster.
+os.environ.setdefault("RAY_ENABLE_AUTO_CONNECT", "0")
+
+import sys  # noqa: E402
+
+import pytest  # noqa: E402
+import ray  # noqa: E402
+
+from scipion_bridge.backend.standalone.container import (  # noqa: E402
+    configure_default_env,
+)
 
 # Eagerly wire container so top-level Struct definitions in test modules collect cleanly
 _test_container = configure_default_env()
@@ -11,35 +23,40 @@ def setup_test_container():
     yield _test_container
 
 
-@pytest.fixture(scope="session", autouse=True)
-def init_ray_session():
-    """Initialize Ray session with comprehensive PYTHONPATH for test modules and Struct definitions."""
-    import os
-    import sys
-    import ray
+def pytest_collection_modifyitems(items):
+    """Mark the tests running on the Ray cluster, to select them with ``-m ray``."""
+    for item in items:
+        if "ray_cluster" in item.fixturenames:
+            item.add_marker(pytest.mark.ray)
 
-    if ray.is_initialized():
-        ray.shutdown()
 
-    extra_paths = [os.getcwd(), os.path.abspath("src")]
+@pytest.fixture(scope="session")
+def ray_cluster():
+    """Ray cluster with 2 CPUs and 2 logical GPUs, shared by the session.
+
+    The PYTHONPATH of the test modules and Struct definitions is exported to
+    the environment the raylet inherits rather than passed as a runtime_env:
+    workers with a runtime_env cannot reuse the processes Ray prestarts, which
+    costs about a second per actor. Every actor of a pipeline takes a worker
+    process of its own, and Ray starts only ``num_cpus`` of them at a time
+    unless ``worker_maximum_startup_concurrency`` raises the limit.
+    """
     tests_dir = os.path.abspath("tests")
-    if os.path.exists(tests_dir):
-        for root, _, _ in os.walk(tests_dir):
-            extra_paths.append(root)
-
-    all_paths = list(
-        dict.fromkeys(extra_paths + [os.path.abspath(p) for p in sys.path if p])
-    )
-    python_path = ":".join(all_paths)
-    ray.init(
-        ignore_reinit_error=True,
-        num_cpus=2,
-        # Logical GPUs: Ray schedules them without a GPU driver.
-        num_gpus=2,
-        runtime_env={"env_vars": {"PYTHONPATH": python_path}},
-    )
-    yield
-    if ray.is_initialized():
+    paths = [
+        os.getcwd(),
+        os.path.abspath("src"),
+        *(root for root, _, _ in os.walk(tests_dir)),
+        *(os.path.abspath(path) for path in sys.path if path),
+    ]
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("PYTHONPATH", ":".join(dict.fromkeys(paths)))
+        ray.init(
+            num_cpus=2,
+            # Logical GPUs: Ray schedules them without a GPU driver.
+            num_gpus=2,
+            _system_config={"worker_maximum_startup_concurrency": 8},
+        )
+        yield
         ray.shutdown()
 
 

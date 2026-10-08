@@ -37,6 +37,7 @@ optional = true
 pytest = "^8.3.5"
 pytest-mock = "*"
 pytest-cov = "*"
+pytest-xdist = "*"
 
 [build-system]
 requires = ["poetry-core>=1.0.0,<2.0.0"]
@@ -45,6 +46,11 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry.extras]
 pyworkflow = ["scipion-pyworkflow", "scipion-em", "zarr", "xmipp-metadata"]
 ray = ["ray", "tensorstore"]
+
+[tool.pytest.ini_options]
+markers = [
+    "ray: runs on the Ray test cluster, added to every test using the ray_cluster fixture; deselect with -m 'not ray'",
+]
 
 [tool.coverage.report]
 exclude_lines = [

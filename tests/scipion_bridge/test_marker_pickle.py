@@ -1,3 +1,4 @@
+import json
 import pickle
 import subprocess
 import sys
@@ -8,7 +9,6 @@ import ray.cloudpickle
 
 import scipion_bridge as B
 from scipion_bridge.core.utils.marker import Marker
-from scipion_bridge.core.utils.marker import Marker
 from scipion_bridge.single_particle.particle import Particle
 
 _SERIALIZERS = {
@@ -17,44 +17,52 @@ _SERIALIZERS = {
     "ray.cloudpickle": ray.cloudpickle.dumps,
 }
 
+_TYPES = {
+    "flat": (lambda: B.Set[Particle], "B.Set[Particle]"),
+    "nested": (lambda: Marker[B.Set[Particle]], "Marker[B.Set[Particle]]"),
+}
+
+# Unpickles every case in one fresh interpreter: starting one per case costs
+# about two seconds each for importing scipion_bridge.
 _LOAD_AND_COMPARE = """
+import json
 import pickle
 import sys
 import scipion_bridge as B
 from scipion_bridge.core.utils.marker import Marker
 from scipion_bridge.single_particle.particle import Particle
 
-loaded = pickle.loads(sys.stdin.buffer.read())
-expected = {expected}
-print(loaded is expected and isinstance(loaded, type))
+cases = pickle.loads(sys.stdin.buffer.read())
+print(json.dumps({
+    case: (loaded := pickle.loads(payload)) is eval(expected) and isinstance(loaded, type)
+    for case, (payload, expected) in cases.items()
+}))
 """
 
 
-def _roundtrip_in_subprocess(payload: bytes, expected_expr: str) -> bool:
-    """Unpickle ``payload`` in a fresh interpreter and compare with ``expected_expr``."""
+@pytest.fixture(scope="module")
+def roundtrips_in_subprocess() -> dict[str, bool]:
+    """Whether each pickled specialization is identical when unpickled in a fresh interpreter."""
+    cases = {
+        f"{kind}-{serializer}": (dumps(make_type()), expected)
+        for kind, (make_type, expected) in _TYPES.items()
+        for serializer, dumps in _SERIALIZERS.items()
+    }
     result = subprocess.run(
-        [sys.executable, "-c", _LOAD_AND_COMPARE.format(expected=expected_expr)],
-        input=payload,
+        [sys.executable, "-c", _LOAD_AND_COMPARE],
+        input=pickle.dumps(cases),
         capture_output=True,
         check=True,
     )
-    return result.stdout.decode().strip() == "True"
+    return json.loads(result.stdout)
 
 
 @pytest.mark.parametrize("serializer", list(_SERIALIZERS))
-@pytest.mark.parametrize(
-    ("make_type", "expected_expr"),
-    [
-        (lambda: B.Set[Particle], "B.Set[Particle]"),
-        (lambda: Marker[B.Set[Particle]], "Marker[B.Set[Particle]]"),
-    ],
-    ids=["flat", "nested"],
-)
+@pytest.mark.parametrize("kind", list(_TYPES))
 def test_marker_specialization_keeps_identity_across_processes(
-    serializer, make_type, expected_expr
+    roundtrips_in_subprocess, kind, serializer
 ):
-    payload = _SERIALIZERS[serializer](make_type())
-    assert _roundtrip_in_subprocess(payload, expected_expr)
+    assert roundtrips_in_subprocess[f"{kind}-{serializer}"]
 
 
 @pytest.mark.parametrize("serializer", list(_SERIALIZERS))
@@ -72,7 +80,10 @@ def test_marker_specialization_is_resolved_by_name():
 
 
 def test_marker_specialization_repr_is_readable():
-    assert repr(B.Set[Particle]) == "<class 'scipion_bridge.core.struct.set.Set[Particle]'>"
+    assert (
+        repr(B.Set[Particle])
+        == "<class 'scipion_bridge.core.struct.set.Set[Particle]'>"
+    )
 
 
 def test_marker_specialization_with_local_argument_falls_back_to_by_value():
@@ -82,7 +93,10 @@ def test_marker_specialization_with_local_argument_falls_back_to_by_value():
     specialization = Marker[LocalItem]
 
     assert specialization.__qualname__ == "Marker[LocalItem]"
-    assert cloudpickle.loads(cloudpickle.dumps(specialization)).__name__ == "Marker[LocalItem]"
+    assert (
+        cloudpickle.loads(cloudpickle.dumps(specialization)).__name__
+        == "Marker[LocalItem]"
+    )
 
 
 def test_module_getattr_raises_attribute_error_for_unknown_names():
@@ -90,4 +104,3 @@ def test_module_getattr_raises_attribute_error_for_unknown_names():
 
     with pytest.raises(AttributeError):
         getattr(module, "does_not_exist")
-

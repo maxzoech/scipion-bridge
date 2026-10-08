@@ -13,6 +13,8 @@ import ray.cloudpickle
 import scipion_bridge as B
 from scipion_bridge.single_particle.particle import Class2D, Particle
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 class Frame(B.Struct):
     pixels: B.Array[float] = B.Array(shape=(2, 2))

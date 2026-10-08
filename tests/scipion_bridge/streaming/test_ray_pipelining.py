@@ -15,6 +15,12 @@ from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
+# Timing assertions: run on one xdist worker, after one another.
+pytestmark = [
+    pytest.mark.usefixtures("ray_cluster"),
+    pytest.mark.xdist_group("timing"),
+]
+
 
 class PipeItem(B.Struct):
     id: int

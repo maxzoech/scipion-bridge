@@ -5,6 +5,8 @@ from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.backend.ray.backend import RayBackend
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 @ray.remote
 class Collector:

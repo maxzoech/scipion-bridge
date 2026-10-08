@@ -1,9 +1,12 @@
+import pytest
 import numpy as np
 import ray
 import scipion_bridge as B
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
+
+pytestmark = pytest.mark.usefixtures("ray_cluster")
 
 
 class Metadata(B.Struct):

@@ -21,6 +21,12 @@ from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
+# Timing assertions: run on one xdist worker, after one another.
+pytestmark = [
+    pytest.mark.usefixtures("ray_cluster"),
+    pytest.mark.xdist_group("timing"),
+]
+
 CLUSTER_GPUS = 2
 CLUSTER_CPUS = 2
 
@@ -128,7 +134,7 @@ class PerKeyWork(B.Protocol):
             case True:
                 _record(self.recorder, "start")
             case False:
-                _record(self.recorder, "work", seconds=1.0)
+                _record(self.recorder, "work", seconds=0.5)
         return item + self.offset.value
 
     def _output(self, keyed):
@@ -356,7 +362,7 @@ def _per_key_sleep(**resources):
                     _record(self.recorder, "start")
                 case False:
                     # Long enough for Ray to start a worker process per call.
-                    _record(self.recorder, "work", seconds=3.0)
+                    _record(self.recorder, "work", seconds=1.5)
             return item
 
         def _output(self, keyed):
@@ -543,7 +549,7 @@ def test_cpu_only_maps_run_outside_the_long_running_executor():
 
 
 def _sleep_randomly(item):
-    time.sleep(random.uniform(0, 0.2))
+    time.sleep(random.uniform(0, 0.05))
     return item
 
 

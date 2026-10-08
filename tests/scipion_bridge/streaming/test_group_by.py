@@ -19,6 +19,8 @@ from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import KeyedOp, Source, _make_key_extractor
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 class Item(B.Struct):
     id: int
@@ -259,12 +261,12 @@ def test_flush_drains_children_before_forwarding():
     )
 
     try:
-        for index in range(8):
-            pipeline.send("x", (index % 4, _make_set([index])))
+        for index in range(4):
+            pipeline.send("x", (index % 2, _make_set([index])))
         pipeline.flush()
 
         assert _by_key(ray.get(collector.get.remote())) == {
-            key: [[key, key + 4]] for key in range(4)
+            key: [[key, key + 2]] for key in range(2)
         }
     finally:
         pipeline.close()

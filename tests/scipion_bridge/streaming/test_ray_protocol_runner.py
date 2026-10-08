@@ -17,6 +17,8 @@ from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 from scipion_bridge.single_particle.particle import Particle
 from scipion_bridge.backend.ray.ray_protocol_runner import RayPipelineRunner
 
+pytestmark = pytest.mark.usefixtures("ray_cluster")
+
 
 class StreamingParticleProtocol(Protocol):
     particles: B.Input[B.Set[Particle]]

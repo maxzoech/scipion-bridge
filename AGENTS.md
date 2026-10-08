@@ -33,7 +33,66 @@ while this library requires at least Python 3.11.
 
 
 ## Verification
-Testing is implemented under the directory `test/` and uses pytests for testing.
+Testing is implemented under the directory `tests/` and uses pytest. Install
+the test dependencies with `pip install pytest pytest-mock pytest-cov
+pytest-xdist ".[ray]"`.
+
+### Running the tests
+Almost all of the suite's runtime is in the Ray streaming tests
+(`tests/scipion_bridge/streaming/`). Pick the smallest run that covers a
+change:
+
+| Command | Runs | Time |
+|---|---|---|
+| `pytest -m "not ray" tests` | struct, typed, protocol and all in-process tests; Ray never starts | ~15 s |
+| `pytest tests/scipion_bridge/streaming/test_<file>.py` | the Ray tests of one module | seconds to ~2 min |
+| `pytest -n auto --dist loadgroup tests` | the full suite in parallel | ~3 min |
+| `pytest tests` | the full suite in one process | ~6 min |
+
+Run the full suite only when a change touches shared backend code that the
+targeted modules cannot cover. CI runs the non-Ray tests first, then the Ray
+tests in parallel, and combines their coverage.
+
+Ray needs local networking to start its cluster. In a sandbox that blocks it,
+`ray.init()` times out during startup and every Ray test errors; the non-Ray
+tests still run there.
+
+### The Ray test cluster
+- Tests that need Ray request the session fixture `ray_cluster` from
+  `tests/conftest.py`, through `pytestmark = pytest.mark.usefixtures("ray_cluster")`
+  for a module or `@pytest.mark.usefixtures("ray_cluster")` for a single test.
+  Do not call `ray.init()` in a test module.
+- Every test using the fixture is marked `ray` automatically, so
+  `-m "not ray"` and `-m ray` select the two halves of the suite.
+- The cluster has 2 CPUs and 2 logical GPUs. Tests that assert scheduling
+  (overlap of calls, queuing on GPUs) rely on these numbers.
+- Ray's auto-init is disabled: a test that uses Ray without the fixture fails
+  instead of starting an unconfigured cluster.
+- Every actor of a pipeline starts a worker process of its own, which imports
+  `scipion_bridge` (about 1.5 s). The worker count, not the item count, makes
+  a Ray test slow.
+
+### Writing tests
+- Test logic in-process first. Operators lower to plain functions: for example,
+  the `accumulate_fn`, `initial_state_fn` and `flush_fn` of an `IRAccumulate`
+  can be called directly (see `streaming/test_chunk_op.py`). Keep one Ray
+  integration test per feature for the behavior that only exists across actors,
+  such as flush ordering, backpressure or resource scheduling.
+- Keep sleeps in timing tests as short as the assertion allows, and assert
+  relations (overlap, order) rather than absolute durations.
+- Modules with timing assertions are marked `pytest.mark.xdist_group("timing")`
+  so that parallel runs execute them on one worker, one after another. Add new
+  timing-sensitive modules to that group.
+- Starting a Python subprocess costs about 2 s for the imports. Batch work into
+  one subprocess where possible (see `test_marker_pickle.py`).
+
+### Coverage
+Line coverage (`--cov=scipion_bridge`) only measures the pytest process. Code
+that runs inside Ray actors and tasks is not counted: Ray stops actors with
+`ray.kill`, which discards the coverage data of the worker. Coverage of the Ray
+backend's worker-side code therefore comes only from in-process tests, which is
+one more reason to test logic outside of Ray. Do not remove a Ray test because
+coverage reports no unique lines for it.
 
 Verify that the library is correctly typed with pyright.
 

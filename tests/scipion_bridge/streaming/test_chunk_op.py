@@ -3,6 +3,8 @@ import pytest
 import ray
 import scipion_bridge as B
 from scipion_bridge.backend.ray.backend import RayBackend
+from scipion_bridge.core.streaming.ir import IRAccumulate
+from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
@@ -40,94 +42,74 @@ def test_chunk_op_validation():
         source.chunk(-5)
 
 
+def _chunks(op, batches):
+    """Run the accumulator ``op`` lowers to in-process, as its stage does on flush."""
+    (sink,) = lower([op.sink(print)])
+    (accumulate,) = sink.upstream
+    assert isinstance(accumulate, IRAccumulate)
+    assert accumulate.flush_fn is not None
+
+    state = accumulate.initial_state_fn()
+    emitted = []
+    for batch in batches:
+        state, emissions = accumulate.accumulate_fn(state, batch)
+        emitted.extend(emissions)
+    _, emissions = accumulate.flush_fn(state)
+    return [(len(s), [int(x) for x in s["id"].flatten()]) for s in emitted + emissions]
+
+
 def test_chunk_sub_batches_drop_last_false():
-    collector = ChunkCollector.remote()
-    writer = CallbackSinkWriter(lambda s: ray.get(collector.append.remote(s)))
+    chunks = _chunks(
+        Source("items").chunk(5, drop_last=False),
+        [
+            _make_set([1, 2, 3]),
+            _make_set([4, 5, 6]),
+            _make_set([7, 8, 9]),
+            _make_set([10]),
+            _make_set([11, 12]),
+        ],
+    )
 
-    source = Source("items")
-    sink_node = source.chunk(5, drop_last=False).write_to(writer)
-
-    backend = RayBackend(init_ray=False)
-    with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
-        pipeline.send(items=_make_set([1, 2, 3]))
-        pipeline.send(items=_make_set([4, 5, 6]))
-        pipeline.send(items=_make_set([7, 8, 9]))
-        pipeline.send(items=_make_set([10]))
-        pipeline.send(items=_make_set([11, 12]))
-
-    chunks = ray.get(collector.get.remote())
-    assert len(chunks) == 3
-    assert chunks[0] == (5, [1, 2, 3, 4, 5])
-    assert chunks[1] == (5, [6, 7, 8, 9, 10])
-    assert chunks[2] == (2, [11, 12])
+    assert chunks == [
+        (5, [1, 2, 3, 4, 5]),
+        (5, [6, 7, 8, 9, 10]),
+        (2, [11, 12]),
+    ]
 
 
 def test_chunk_sub_batches_drop_last_true():
-    collector = ChunkCollector.remote()
-    writer = CallbackSinkWriter(lambda s: ray.get(collector.append.remote(s)))
+    chunks = _chunks(
+        Source("items").chunk(5, drop_last=True),
+        [_make_set([1, 2, 3]), _make_set([4, 5, 6]), _make_set([7, 8])],
+    )
 
-    source = Source("items")
-    sink_node = source.chunk(5, drop_last=True).write_to(writer)
-
-    backend = RayBackend(init_ray=False)
-    with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
-        pipeline.send(items=_make_set([1, 2, 3]))
-        pipeline.send(items=_make_set([4, 5, 6]))
-        pipeline.send(items=_make_set([7, 8]))
-
-    chunks = ray.get(collector.get.remote())
-    assert len(chunks) == 1
-    assert chunks[0] == (5, [1, 2, 3, 4, 5])
+    assert chunks == [(5, [1, 2, 3, 4, 5])]
 
 
 def test_chunk_oversized_batch_splitting():
-    collector = ChunkCollector.remote()
-    writer = CallbackSinkWriter(lambda s: ray.get(collector.append.remote(s)))
+    chunks = _chunks(
+        Source("items").chunk(4, drop_last=False),
+        [_make_set(list(range(1, 11)))],
+    )
 
-    source = Source("items")
-    sink_node = source.chunk(4, drop_last=False).write_to(writer)
-
-    backend = RayBackend(init_ray=False)
-    with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
-        pipeline.send(items=_make_set(list(range(1, 11))))
-
-    chunks = ray.get(collector.get.remote())
-    assert len(chunks) == 3
-    assert chunks[0] == (4, [1, 2, 3, 4])
-    assert chunks[1] == (4, [5, 6, 7, 8])
-    assert chunks[2] == (2, [9, 10])
+    assert chunks == [(4, [1, 2, 3, 4]), (4, [5, 6, 7, 8]), (2, [9, 10])]
 
 
 def test_chunk_oversized_batch_splitting_drop_last():
-    collector = ChunkCollector.remote()
-    writer = CallbackSinkWriter(lambda s: ray.get(collector.append.remote(s)))
+    chunks = _chunks(
+        Source("items").chunk(4, drop_last=True),
+        [_make_set(list(range(1, 11)))],
+    )
 
-    source = Source("items")
-    sink_node = source.chunk(4, drop_last=True).write_to(writer)
-
-    backend = RayBackend(init_ray=False)
-    with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
-        pipeline.send(items=_make_set(list(range(1, 11))))
-
-    chunks = ray.get(collector.get.remote())
-    assert len(chunks) == 2
-    assert chunks[0] == (4, [1, 2, 3, 4])
-    assert chunks[1] == (4, [5, 6, 7, 8])
+    assert chunks == [(4, [1, 2, 3, 4]), (4, [5, 6, 7, 8])]
 
 
 def test_chunk_non_set_raises():
-    writer = CallbackSinkWriter(lambda s: None)
-    source = Source("items")
-    sink_node = source.chunk(4).write_to(writer)
-
-    backend = RayBackend(init_ray=False)
-    with pytest.raises(Exception) as exc_info:
-        with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
-            pipeline.send(items="not_a_set")
-
-    assert "ChunkOp expected an instance of Set" in str(exc_info.value)
+    with pytest.raises(TypeError, match="ChunkOp expected an instance of Set"):
+        _chunks(Source("items").chunk(4), ["not_a_set"])
 
 
+@pytest.mark.usefixtures("ray_cluster")
 def test_chunk_in_multi_stage_pipeline():
     collector = ChunkCollector.remote()
     writer = CallbackSinkWriter(lambda s: ray.get(collector.append.remote(s)))
