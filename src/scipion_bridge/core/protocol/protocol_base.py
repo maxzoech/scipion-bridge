@@ -407,6 +407,7 @@ ProtocolT = TypeVar("ProtocolT", bound=Type[Protocol])
 def resources(
     *,
     gpus: float = 0,
+    min_vram: Optional[float] = None,
     cpus: Optional[float] = None,
     task: TaskType = TaskType.EPHEMERAL,
 ) -> Callable[[ProtocolT], ProtocolT]:
@@ -420,7 +421,7 @@ def resources(
 
     See :class:`ComputeResources` for the arguments.
     """
-    compute = ComputeResources(gpus=gpus, cpus=cpus, task=task)
+    compute = ComputeResources(gpus=gpus, min_vram=min_vram, cpus=cpus, task=task)
 
     def decorate(cls: ProtocolT) -> ProtocolT:
         if not issubclass(cls, Protocol):

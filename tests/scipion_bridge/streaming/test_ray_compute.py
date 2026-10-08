@@ -3,8 +3,10 @@
 The test cluster has 2 CPUs and 2 logical GPUs (see conftest).
 """
 
+import logging
 import os
 import random
+import subprocess
 import time
 from typing import Any
 
@@ -12,6 +14,7 @@ import pytest
 import ray
 
 import scipion_bridge as B
+from scipion_bridge.backend.ray import backend
 from scipion_bridge.backend.ray.backend import RayBackend
 from scipion_bridge.core.environment.compute import CPUS_ENV_VAR
 from scipion_bridge.core.streaming.node import lower
@@ -330,8 +333,8 @@ def test_shared_resources_are_built_with_a_share_of_the_cpus():
 # -- CPUs --------------------------------------------------------------------
 
 
-def _per_key_sleep(cpus):
-    @B.resources(cpus=cpus)
+def _per_key_sleep(**resources):
+    @B.resources(**resources)
     class PerKeySleep(B.Protocol):
         items: B.Input[int] = B.Input()
         recorder: Any
@@ -362,8 +365,8 @@ def _per_key_sleep(cpus):
     return PerKeySleep()
 
 
-def _overlapping_work(cpus):
-    protocol = _per_key_sleep(cpus)
+def _overlapping_work(**resources):
+    protocol = _per_key_sleep(**resources)
     protocol.recorder = Recorder.remote()
     pipeline = _compile(protocol, Collector.remote())
 
@@ -381,7 +384,7 @@ def _overlapping_work(cpus):
             if call["label"] == "work"
         ]
         assert len(calls) == 6
-        return _max_overlap(calls)
+        return calls
     finally:
         pipeline.close()
 
@@ -389,11 +392,11 @@ def _overlapping_work(cpus):
 def test_calls_without_reserved_cpus_are_not_limited_by_the_cpus():
     # Ray starts worker processes a few at a time, so not all 6 calls need
     # to overlap; more than the 2 CPUs do.
-    assert _overlapping_work(None) > CLUSTER_CPUS
+    assert _max_overlap(_overlapping_work(cpus=None)) > CLUSTER_CPUS
 
 
 def test_reserved_cpus_limit_the_calls_running_at_once():
-    assert _overlapping_work(1) == CLUSTER_CPUS
+    assert _max_overlap(_overlapping_work(cpus=1)) == CLUSTER_CPUS
 
 
 def _environment(item):
@@ -406,8 +409,8 @@ def _environment(item):
     }
 
 
-def _reports_environment(cpus):
-    @B.resources(cpus=cpus)
+def _reports_environment(**resources):
+    @B.resources(**resources)
     class ReportsEnvironment(B.Protocol):
         items: B.Input[int] = B.Input()
 
@@ -422,7 +425,7 @@ def _reports_environment(cpus):
 
 def test_calls_without_reserved_cpus_use_all_cores():
     collector = Collector.remote()
-    pipeline = _compile(_reports_environment(None), collector)
+    pipeline = _compile(_reports_environment(cpus=None), collector)
 
     try:
         pipeline.send("items", 0)
@@ -438,7 +441,7 @@ def test_calls_without_reserved_cpus_use_all_cores():
 
 def test_calls_with_reserved_cpus_learn_their_number():
     collector = Collector.remote()
-    pipeline = _compile(_reports_environment(1), collector)
+    pipeline = _compile(_reports_environment(cpus=1), collector)
 
     try:
         pipeline.send("items", 0)
@@ -591,3 +594,84 @@ def test_maps_have_no_actors_and_report_stats():
         assert all(stats[f"{i}:map(_sleep_randomly)"].items_in == 3 for i in (1, 2, 3))
     finally:
         pipeline.close()
+
+
+# -- min_vram ----------------------------------------------------------------
+
+
+@pytest.fixture
+def gpus_of_16_gib(monkeypatch):
+    """The 2 logical GPUs of the test cluster, with 16 GiB each."""
+    monkeypatch.setattr(backend, "_probe_cluster_gpu_memory", lambda: (16.0, 16.0))
+
+
+def test_memory_claims_share_the_gpus(gpus_of_16_gib):
+    # 8 of 16 GiB: half a GPU per call, so 2 calls share each of the 2 GPUs.
+    calls = _overlapping_work(min_vram=8)
+
+    assert 2 < _max_overlap(calls) <= 2 * CLUSTER_GPUS
+    assert {len(call["gpus"]) for call in calls} == {1}
+
+
+def test_memory_claims_of_long_running_executors(gpus_of_16_gib):
+    collector = Collector.remote()
+    protocol = _reports_environment(min_vram=8, task=B.TaskType.LONG_RUNNING)
+    pipeline = _compile(protocol, collector)
+
+    try:
+        pipeline.send("items", 0)
+        pipeline.flush()
+
+        (result,) = ray.get(collector.get.remote())
+        assert result["out"]["assigned"]["GPU"] == 0.5
+    finally:
+        pipeline.close()
+
+
+def test_memory_claim_is_resolved_for_group_by_children(gpus_of_16_gib):
+    # The children compile in the router's process, where the patched probe
+    # is not visible: the router passes on the memory probed by the parent.
+    calls = _overlapping_work(min_vram=4)
+
+    assert {len(call["gpus"]) for call in calls} == {1}
+    assert _max_overlap(calls) > CLUSTER_GPUS
+
+
+def _fake_nvidia_smi(output):
+    def run(args, **kwargs):
+        assert args[0] == "nvidia-smi"
+        return subprocess.CompletedProcess(args, 0, stdout=output)
+
+    return run
+
+
+def test_gpu_memory_is_read_from_nvidia_smi(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", _fake_nvidia_smi("15360\n24576\n"))
+
+    assert backend._read_gpu_memory() == [15.0, 24.0]
+
+
+def test_gpu_memory_is_empty_without_nvidia_smi(monkeypatch):
+    def missing(args, **kwargs):
+        raise FileNotFoundError(args[0])
+
+    monkeypatch.setattr(subprocess, "run", missing)
+
+    assert backend._read_gpu_memory() == []
+
+
+def test_cluster_probe_reports_the_gpus_of_every_node():
+    # The test cluster is a single node: the probe sees its physical GPUs.
+    probed = backend._probe_cluster_gpu_memory.__wrapped__()
+
+    assert probed == tuple(backend._read_gpu_memory())
+
+
+def test_claims_are_sized_for_the_smallest_gpu(caplog):
+    caplog.set_level(logging.INFO, logger=backend.__name__)
+
+    num_gpus = backend._resolve_gpus(B.ComputeResources(min_vram=8), (24.0, 16.0))
+
+    assert num_gpus == 0.5
+    assert "sized for the smallest GPU (16 GiB)" in caplog.text
+    assert "33% of the 24 GiB GPUs stays unused" in caplog.text

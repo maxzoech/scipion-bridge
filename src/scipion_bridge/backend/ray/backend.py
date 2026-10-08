@@ -15,17 +15,22 @@ from typing import (
 )
 import abc
 import asyncio
+import logging
+import math
 import os
+import subprocess
 import sys
 import time
 import uuid
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from scipion_bridge.core.environment.compute import (
     CPUS_ENV_VAR,
     ComputeAssignment,
     ComputeResources,
     TaskType,
+    gpu_claim,
 )
 from scipion_bridge.core.streaming.backend import (
     CompiledPipeline,
@@ -45,6 +50,8 @@ from scipion_bridge.core.streaming.ir import (
 )
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
+
+logger = logging.getLogger(__name__)
 
 _Barrier = asyncio.Future[None]
 _InboxEntry = Tuple[Any, int, Optional[_Barrier]]
@@ -86,6 +93,8 @@ class _Apply:
     label: str
     func: Callable[[Any], Any]
     compute: Optional[ComputeAssignment]
+    # Ray options of the task of every call (resources, runtime env).
+    options: Dict[str, Any]
     # Coordinator of the executor of a long-running compute group.
     group: Optional[Any]
     parameters: Mapping[str, Any]
@@ -485,8 +494,10 @@ def _cluster_cpus() -> int:
     return int(ray.cluster_resources().get("CPU", 1))
 
 
-def _ray_options(resources: ComputeResources) -> Dict[str, Any]:
+def _ray_options(resources: ComputeResources, num_gpus: float) -> Dict[str, Any]:
     """Ray options of a task or actor holding ``resources``.
+
+    ``num_gpus`` is the GPU claim resolved from ``gpus`` and ``min_vram``.
 
     Without reserved CPUs, the process may use all cores of the machine and
     the OS schedules them. Ray would set ``OMP_NUM_THREADS`` to the number of
@@ -497,7 +508,7 @@ def _ray_options(resources: ComputeResources) -> Dict[str, Any]:
     match resources.cpus:
         case None:
             return {
-                "num_gpus": resources.gpus,
+                "num_gpus": num_gpus,
                 "num_cpus": 0,
                 "runtime_env": {
                     "env_vars": {"OMP_NUM_THREADS": str(_cluster_cpus())},
@@ -505,10 +516,89 @@ def _ray_options(resources: ComputeResources) -> Dict[str, Any]:
             }
         case cpus:
             return {
-                "num_gpus": resources.gpus,
+                "num_gpus": num_gpus,
                 "num_cpus": cpus,
                 "runtime_env": {"env_vars": {CPUS_ENV_VAR: str(cpus)}},
             }
+
+
+def _read_gpu_memory() -> List[float]:
+    """Memory in GiB of every GPU of this node, or none without nvidia-smi."""
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    # nvidia-smi reports MiB.
+    return [float(mib) / 1024 for mib in output.split()]
+
+
+@ray.remote(num_cpus=0, num_gpus=0)
+def _node_gpu_memory() -> List[float]:
+    """Probe of the GPU memory of the node the task runs on.
+
+    A task without GPUs does not know which GPUs Ray manages on its node, so
+    it reports all of them; a GPU hidden from Ray only makes claims larger.
+    """
+    return _read_gpu_memory()
+
+
+@cache
+def _probe_cluster_gpu_memory() -> Tuple[float, ...]:
+    """Memory in GiB of every GPU of the cluster, probed once per process."""
+    nodes = [
+        node["NodeID"]
+        for node in ray.nodes()
+        if node["Alive"] and node["Resources"].get("GPU", 0) > 0
+    ]
+    probes = [
+        _node_gpu_memory.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(node, soft=False),
+        ).remote()
+        for node in nodes
+    ]
+    return tuple(memory for node in ray.get(probes) for memory in node)
+
+
+@cache
+def _resolve_gpus(resources: ComputeResources, gpu_memory: Tuple[float, ...]) -> float:
+    """The GPU claim of ``resources``, logged once per process.
+
+    Ray treats the GPUs of a node as interchangeable and a call requests a
+    single number of GPUs, so memory claims are sized for the smallest GPU.
+    """
+    num_gpus = gpu_claim(resources, min(gpu_memory, default=None))
+    match (resources.min_vram, gpu_memory):
+        case (None, _) | (_, ()):
+            pass
+        case (min_vram, _):
+            logger.info(
+                "min_vram=%g GiB -> %g GPU, sized for the smallest GPU (%g GiB)%s.",
+                min_vram,
+                num_gpus,
+                min(gpu_memory),
+                _unused_share(min_vram, num_gpus, gpu_memory),
+            )
+    return num_gpus
+
+
+def _unused_share(
+    min_vram: float,
+    num_gpus: float,
+    gpu_memory: Tuple[float, ...],
+) -> str:
+    """Note on the memory of larger GPUs that claims sized for the smallest leave."""
+    calls_per_gpu = math.floor(1 / min(num_gpus, 1.0))
+    return "".join(
+        f"; {1 - calls_per_gpu * min_vram / size:.0%} of the {size:g} GiB GPUs "
+        "stays unused"
+        for size in sorted(set(gpu_memory))
+        if size > min(gpu_memory)
+    )
 
 
 @ray.remote
@@ -538,11 +628,11 @@ class RayComputeGroup:
 
     def __init__(
         self,
-        resources: ComputeResources,
+        options: Dict[str, Any],
         members: int,
         parameters: Mapping[str, Any],
     ) -> None:
-        self._resources = resources
+        self._options = options
         self._members = members
         self._parameters = parameters
         self._executor: Optional[Any] = None
@@ -555,7 +645,7 @@ class RayComputeGroup:
             if self._executor is None:
                 self._executor = RayComputeExecutor.options(
                     max_concurrency=self._members,
-                    **_ray_options(self._resources),
+                    **self._options,
                 ).remote(self._parameters)
             return self._executor
 
@@ -586,6 +676,7 @@ class _MapRunner:
     def __init__(self, route: _Apply) -> None:
         self._func = route.func
         self._compute = route.compute
+        self._options = route.options
         self._group = route.group
         self._parameters = route.parameters
         self.stats = StageStats()
@@ -603,10 +694,8 @@ class _MapRunner:
                 async with self._lock:
                     executor = await self._acquire()
                     result = await _done(executor.call.remote(self._func, item))
-            case ComputeAssignment(resources=resources):
-                result = await _done(self._submit(resources, item))
-            case None:
-                result = await _done(self._submit(ComputeResources(), item))
+            case _:
+                result = await _done(self._submit(item))
 
         self.stats.items_in += 1
         self.stats.items_out += 1
@@ -622,8 +711,8 @@ class _MapRunner:
                 self._executor = None
                 await group.release.remote()
 
-    def _submit(self, resources: ComputeResources, item: Any) -> ray.ObjectRef:
-        return _run_in_task.options(**_ray_options(resources)).remote(
+    def _submit(self, item: Any) -> ray.ObjectRef:
+        return _run_in_task.options(**self._options).remote(
             self._func,
             self._parameters,
             item,
@@ -703,11 +792,13 @@ class RayDemuxActor(_PipelinedStage):
         prefix: str,
         queue_size: int,
         parameters: Mapping[str, Any],
+        gpu_memory: Optional[Tuple[float, ...]] = None,
     ):
         from .container import configure_ray_env
 
         configure_ray_env(parameters=parameters)
         super().__init__(queue_size)
+        self.gpu_memory = gpu_memory
         self.key_fn = key_fn
         self.template = template
         self.source_name = source_name
@@ -761,6 +852,7 @@ class RayDemuxActor(_PipelinedStage):
             init_ray=False,
             queue_size=self.queue_size,
             parameters=self.parameters,
+            gpu_memory=self.gpu_memory,
         )
         # Compiling waits for the child actors; a thread keeps the event loop,
         # and with it the emitter, running meanwhile.
@@ -867,12 +959,16 @@ class RayBackend(StreamingBackendProvider):
         init_ray: bool = True,
         queue_size: int = 2,
         parameters: Optional[Mapping[str, Any]] = None,
+        gpu_memory: Optional[Sequence[float]] = None,
     ):
         """
         Args:
             init_ray: Initialize a local Ray instance if none is running.
             parameters: Values of the protocol parameters, served to
                 ``Field.value`` inside the worker stages.
+            gpu_memory: Memory in GiB of the cluster's GPUs, for claims of
+                ``min_vram``. Probed on the cluster when a map needs it if not
+                given; ``group_by`` children receive it from their parent.
             queue_size: Number of items each stage buffers in its inbox and
                 outbox. Stages run concurrently while their queues have room;
                 the default of 2 double-buffers every stage.
@@ -881,6 +977,7 @@ class RayBackend(StreamingBackendProvider):
             raise ValueError(f"Queue size must be positive, got {queue_size}.")
         self.queue_size = queue_size
         self.parameters = dict(parameters or {})
+        self._gpu_memory = None if gpu_memory is None else tuple(gpu_memory)
 
         if init_ray and not ray.is_initialized():
             extra_paths = [os.getcwd(), os.path.abspath("src")]
@@ -953,7 +1050,12 @@ class RayBackend(StreamingBackendProvider):
             node: f"{name}{index}:{_describe(node)}"
             for index, node in enumerate(all_nodes)
         }
-        groups = self._compute_groups(all_nodes)
+        claims = {
+            node.compute: self._claim(node.compute)
+            for node in all_nodes
+            if isinstance(node, IRMap)
+        }
+        groups = self._compute_groups(all_nodes, claims)
         actor_map: Dict[IROp, Any] = {
             node: actor_cls.options(name=f"{pipeline_id}:{labels[node]}").remote(
                 **kwargs,
@@ -973,7 +1075,7 @@ class RayBackend(StreamingBackendProvider):
         # position among the upstream stages of the downstream stage; maps in
         # between are applied on the way. A failing stage aborts the sources
         # and the further abort targets.
-        builder = _RouteBuilder(actor_map, labels, groups, self.parameters)
+        builder = _RouteBuilder(actor_map, labels, groups, claims, self.parameters)
         abort_handles = [*compiled_sources.values(), *abort_targets]
         ray.get(
             [
@@ -1042,39 +1144,67 @@ class RayBackend(StreamingBackendProvider):
                     "prefix": name,
                     "queue_size": self.queue_size,
                     "parameters": self.parameters,
+                    "gpu_memory": (
+                        self._cluster_gpu_memory()
+                        if _needs_gpu_memory(template)
+                        else self._gpu_memory
+                    ),
                 }
             case _:
                 raise NotImplementedError(
                     f"Unsupported IR op type for Ray backend: {type(node).__name__}",
                 )
 
-    def _compute_groups(self, nodes: Sequence[IROp]) -> Dict[str, Any]:
-        """Create a coordinator for every long-running group among ``nodes``.
+    def _claim(self, compute: Optional[ComputeAssignment]) -> Dict[str, Any]:
+        """Ray options of the calls of a map, with the GPU claim resolved.
 
         Raises:
-            ValueError: If a stage requires more resources than the cluster
+            ValueError: If a map requires more resources than the cluster
                 has; Ray would wait for them forever.
         """
-        assignments = [
-            node.compute
-            for node in nodes
-            if isinstance(node, IRMap) and node.compute is not None
-        ]
-        for assignment in set(assignments):
-            _check_cluster_fits(assignment)
+        match compute:
+            case None:
+                return _ray_options(ComputeResources(), 0)
+            case ComputeAssignment(resources=resources):
+                num_gpus = self._num_gpus(resources)
+                _check_cluster_fits(compute, num_gpus)
+                return _ray_options(resources, num_gpus)
 
+    def _num_gpus(self, resources: ComputeResources) -> float:
+        match resources.min_vram:
+            case None:
+                return resources.gpus
+            case _:
+                return _resolve_gpus(resources, self._cluster_gpu_memory())
+
+    def _cluster_gpu_memory(self) -> Tuple[float, ...]:
+        if self._gpu_memory is None:
+            self._gpu_memory = _probe_cluster_gpu_memory()
+        return self._gpu_memory
+
+    def _compute_groups(
+        self,
+        nodes: Sequence[IROp],
+        claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Create a coordinator for every long-running group among ``nodes``."""
         members: Dict[str, int] = {}
-        resources: Dict[str, ComputeResources] = {}
-        for assignment in assignments:
-            match assignment.resources:
-                case ComputeResources(task=TaskType.LONG_RUNNING):
-                    members[assignment.group] = members.get(assignment.group, 0) + 1
-                    resources[assignment.group] = assignment.resources
+        options: Dict[str, Dict[str, Any]] = {}
+        for node in nodes:
+            match node:
+                case IRMap(
+                    compute=ComputeAssignment(
+                        resources=ComputeResources(task=TaskType.LONG_RUNNING),
+                        group=group,
+                    ) as compute,
+                ):
+                    members[group] = members.get(group, 0) + 1
+                    options[group] = claims[compute]
                 case _:
                     pass
 
         return {
-            group: RayComputeGroup.remote(resources[group], count, self.parameters)
+            group: RayComputeGroup.remote(options[group], count, self.parameters)
             for group, count in members.items()
         }
 
@@ -1105,6 +1235,7 @@ class _RouteBuilder:
     actor_map: Mapping[IROp, Any]
     labels: Mapping[IROp, str]
     groups: Mapping[str, Any]
+    claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]]
     parameters: Mapping[str, Any]
 
     def stage_routes(self, node: IROp) -> List[_Route]:
@@ -1123,6 +1254,7 @@ class _RouteBuilder:
             label=self.labels[node],
             func=node.func,
             compute=node.compute,
+            options=self.claims[node.compute],
             group=_group_of(self.groups, node.compute),
             parameters=self.parameters,
             routes=self._routes(node),
@@ -1166,14 +1298,30 @@ def _host_of(node: IROp) -> IROp:
             return node
 
 
-def _check_cluster_fits(assignment: ComputeAssignment) -> None:
+def _needs_gpu_memory(node: IROp) -> bool:
+    """Whether a map upstream of ``node``, or in a ``group_by`` there, sets min_vram."""
+    match node:
+        case IRMap(
+            compute=ComputeAssignment(
+                resources=ComputeResources(min_vram=float() | int())
+            )
+        ):
+            return True
+        case IRDemux(template=IROp() as template) if _needs_gpu_memory(template):
+            return True
+        case _:
+            return any(_needs_gpu_memory(upstream) for upstream in node.upstream)
+
+
+def _check_cluster_fits(assignment: ComputeAssignment, num_gpus: float) -> None:
     resources = assignment.resources
     cluster = ray.cluster_resources()
     gpus, cpus = cluster.get("GPU", 0), cluster.get("CPU", 0)
     reserved_cpus = 0 if resources.cpus is None else resources.cpus
-    if resources.gpus > gpus or reserved_cpus > cpus:
+    if num_gpus > gpus or reserved_cpus > cpus:
         raise ValueError(
-            f"The stages of protocol {assignment.group} require {resources}, "
+            f"The stages of protocol {assignment.group} require {resources} "
+            f"({num_gpus:g} GPUs), "
             f"but the Ray cluster has {gpus} GPUs and {cpus} CPUs.",
         )
 

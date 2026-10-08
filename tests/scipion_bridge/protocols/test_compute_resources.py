@@ -3,10 +3,10 @@
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.core.environment.compute import ComputeAssignment
+from scipion_bridge.core.environment.compute import ComputeAssignment, gpu_claim
 from scipion_bridge.core.streaming.ir import IRMap
 from scipion_bridge.core.streaming.node import lower
-from scipion_bridge.core.streaming.ops import MapElementOp, MapOp, lineage
+from scipion_bridge.core.streaming.ops import MapElementOp, MapOp, Source, lineage
 from scipion_bridge.single_particle.particle import Particle
 
 
@@ -77,7 +77,7 @@ def test_default_resources():
     )
 
 
-@pytest.mark.parametrize("kwargs", [{"gpus": -1}, {"cpus": -0.5}])
+@pytest.mark.parametrize("kwargs", [{"gpus": -1}, {"cpus": -0.5}, {"min_vram": -1}])
 def test_negative_resources_raise(kwargs):
     with pytest.raises(ValueError, match="must not be negative"):
         B.ComputeResources(**kwargs)
@@ -198,3 +198,49 @@ def test_cpu_only_maps_keep_only_the_cpus():
         (False, ComputeAssignment(WithBookkeeping.compute_resources, group=group)),
         (True, ComputeAssignment(B.ComputeResources(cpus=2), group=group)),
     }
+
+
+@pytest.mark.parametrize(
+    "gpus, min_vram, claim",
+    [
+        (0, 8, 0.5),
+        (0, 3, 0.25),
+        (0, 1, 0.125),
+        (0, 5, 0.5),  # Rounded up to the next fraction.
+        (0, 16, 1.0),
+        (1, 8, 1.0),  # The count wins over a smaller memory claim.
+        (2, 8, 2.0),  # min_vram applies to every GPU.
+        (0.25, 8, 0.5),  # The larger claim wins.
+        (1, None, 1.0),
+    ],
+)
+def test_gpu_claim_is_the_larger_of_count_and_memory(gpus, min_vram, claim):
+    resources = B.ComputeResources(gpus=gpus, min_vram=min_vram)
+
+    assert gpu_claim(resources, gpu_memory=16.0) == claim
+
+
+def test_memory_larger_than_a_gpu_claims_whole_gpus_with_a_warning(caplog):
+    claim = gpu_claim(B.ComputeResources(min_vram=20), gpu_memory=16.0)
+
+    assert claim == 1.0
+    assert "does not fit on a GPU with 16" in caplog.text
+
+
+def test_unknown_gpu_memory_claims_whole_gpus_with_a_warning(caplog):
+    claim = gpu_claim(B.ComputeResources(min_vram=4), gpu_memory=None)
+
+    assert claim == 1.0
+    assert "Cannot read the GPU memory" in caplog.text
+
+
+def test_decorator_passes_min_vram():
+    @B.resources(min_vram=6)
+    class Small(B.Protocol):
+        def outputs(self):
+            return {}
+
+        def steps(self):
+            return Source("x")
+
+    assert Small.compute_resources == B.ComputeResources(min_vram=6)
