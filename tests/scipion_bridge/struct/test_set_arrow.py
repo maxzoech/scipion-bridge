@@ -12,7 +12,7 @@ import ray.cloudpickle
 
 import scipion_bridge as B
 from scipion_bridge.core.struct.exceptions import UninitializedFieldError
-from scipion_bridge.single_particle.particle import Particle
+from scipion_bridge.single_particle.particle import Class2D, Particle
 
 
 class Sample(B.Struct):
@@ -193,3 +193,134 @@ def test_set_field_descriptor_keeps_default_pickling():
 
     assert restored.name == "frames"
     assert restored.capacity == 3
+
+
+# -- Regular data in dynamic fields --------------------------------------------
+
+
+def _regular_particles(n: int) -> B.Set[Particle]:
+    particles = B.Set[Particle](capacity=n)
+    particles["pixels"] = np.arange(n * 12, dtype=np.float32).reshape(n, 3, 4)
+    return particles
+
+
+def _assert_same_numpy(actual: object, expected: object) -> None:
+    assert isinstance(expected, np.ndarray)
+    assert isinstance(actual, np.ndarray)
+    assert actual.shape == expected.shape
+    assert actual.dtype == expected.dtype
+    assert np.array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+def test_regular_dynamic_column_pickles_as_numpy(serializer):
+    dumps, loads = _SERIALIZERS[serializer]
+    particles = _regular_particles(4)
+
+    restored = loads(dumps(particles))
+
+    _assert_same_numpy(restored["pixels"], particles["pixels"])
+
+
+def test_regular_dynamic_column_arrow_roundtrip_as_numpy():
+    particles = _regular_particles(4)
+
+    restored = B.Set[Particle].from_arrow(particles.to_arrow())
+
+    _assert_same_numpy(restored["pixels"], particles["pixels"])
+
+
+def test_regular_dynamic_column_of_a_slice_roundtrips_as_numpy():
+    particles = _regular_particles(6)
+
+    restored = pickle.loads(pickle.dumps(particles[2:5], protocol=5))
+
+    _assert_same_numpy(restored["pixels"], np.asarray(particles["pixels"])[2:5])
+
+
+@pytest.mark.parametrize(
+    "index",
+    [slice(1, 3), np.array([0, 2]), np.array([True, False, True, True])],
+    ids=["slice", "int-array", "bool-mask"],
+)
+def test_restored_numpy_column_selections_read_numpy(index):
+    particles = _regular_particles(4)
+    restored = pickle.loads(pickle.dumps(particles, protocol=5))
+
+    _assert_same_numpy(
+        restored[index]["pixels"],
+        np.asarray(particles["pixels"])[index],
+    )
+
+
+def test_restored_numpy_columns_concat_as_numpy():
+    parts = [pickle.loads(pickle.dumps(_regular_particles(2))) for _ in range(3)]
+
+    joined = B.concat(parts)
+
+    _assert_same_numpy(
+        joined["pixels"],
+        np.concatenate([np.asarray(part["pixels"]) for part in parts]),
+    )
+
+
+def test_row_write_after_restoring_numpy_column():
+    particles = _regular_particles(3)
+    restored = pickle.loads(pickle.dumps(particles, protocol=5))
+
+    restored[1].pixels = np.full((3, 4), -1.0, dtype=np.float32)
+
+    assert np.all(np.asarray(restored["pixels"])[1] == -1.0)
+    assert np.array_equal(
+        np.asarray(restored["pixels"])[0],
+        np.asarray(particles["pixels"])[0],
+    )
+    assert np.all(np.asarray(particles["pixels"])[1] != -1.0)
+
+
+def test_ragged_dynamic_column_stays_awkward_after_roundtrip():
+    particles = B.Set[Particle](
+        [
+            Particle(pixels=np.zeros((1, 1), np.float32)),
+            Particle(pixels=np.ones((2, 2), np.float32)),
+        ],
+    )
+
+    restored = pickle.loads(pickle.dumps(particles))
+
+    assert isinstance(restored["pixels"], ak.Array)
+    assert ak.to_list(restored["pixels"]) == ak.to_list(particles["pixels"])
+
+
+def test_missing_rows_stay_missing_after_roundtrip():
+    particles = B.Set[Particle](capacity=3)
+    particles[0] = Particle(pixels=np.ones((3, 4), np.float32))
+    particles[2] = Particle(pixels=np.ones((3, 4), np.float32))
+
+    restored = pickle.loads(pickle.dumps(particles))
+
+    assert isinstance(restored["pixels"], ak.Array)
+    assert ak.to_list(ak.is_none(restored["pixels"])) == [False, True, False]
+    assert ak.to_list(restored["pixels"]) == ak.to_list(particles["pixels"])
+    with pytest.raises(UninitializedFieldError):
+        _ = restored[1].pixels
+
+
+@pytest.mark.parametrize("counts", [(2, 2), (1, 3), (0, 2)])
+def test_nested_set_of_dynamic_rows_roundtrip(counts):
+    classes = B.Set[Class2D](
+        [
+            Class2D(class_id=k, particles=_regular_particles(n))
+            for k, n in enumerate(counts)
+        ],
+    )
+
+    restored = pickle.loads(pickle.dumps(classes))
+
+    for k, n in enumerate(counts):
+        pixels = restored[k].particles["pixels"]
+        assert len(pixels) == n
+        assert np.array_equal(
+            np.asarray(pixels).reshape(n, 3, 4),
+            np.asarray(_regular_particles(n)["pixels"]),
+        )

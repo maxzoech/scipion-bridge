@@ -1,5 +1,7 @@
 """group_by / unkey: routing items into a pipeline per key."""
 
+import asyncio
+import threading
 import time
 
 import numpy as np
@@ -19,7 +21,11 @@ from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import KeyedOp, Source, _make_key_extractor
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
-pytestmark = pytest.mark.usefixtures("ray_cluster")
+# Timing assertions: run on one xdist worker, after one another.
+pytestmark = [
+    pytest.mark.usefixtures("ray_cluster"),
+    pytest.mark.xdist_group("timing"),
+]
 
 
 class Item(B.Struct):
@@ -272,6 +278,71 @@ def test_flush_drains_children_before_forwarding():
         pipeline.close()
 
 
+def _time_new_keys(keys):
+    """Time from sending one item per new key until the flush has drained."""
+    pipeline = _compile(
+        Source("x")
+        .group_by(0, lambda stream: stream.map(_second))
+        .unkey()
+        .sink(lambda item: None),
+    )
+    try:
+        t_start = time.perf_counter()
+        for key in keys:
+            pipeline.send("x", (key, _make_set([1])))
+        pipeline.flush()
+        return time.perf_counter() - t_start
+    finally:
+        pipeline.close()
+
+
+def test_children_of_new_keys_start_in_parallel():
+    # Starting a child waits for its actors' processes; the router starts the
+    # children of a burst of new keys at once instead of one after another.
+    # The first pipeline also waits for Ray to start its worker pool.
+    _time_new_keys(["parallel-warm-up"])
+    one = _time_new_keys(["parallel-0"])
+    four = _time_new_keys([f"parallel-{index}" for index in range(1, 5)])
+
+    assert four < 3 * one
+
+
+def test_items_of_starting_children_keep_their_order():
+    collector = Collector.remote()
+    pipeline = _compile(
+        Source("x")
+        .group_by(0, lambda stream: stream.map(_second).map(_ids))
+        .unkey()
+        .write_to(_collecting_writer(collector)),
+    )
+
+    try:
+        # Every item arrives before the children of its key have started.
+        for index in range(12):
+            pipeline.send("x", (index % 3, _make_set([index])))
+        pipeline.flush()
+
+        assert _by_key(ray.get(collector.get.remote())) == {
+            key: [[index] for index in range(key, 12, 3)] for key in range(3)
+        }
+    finally:
+        pipeline.close()
+
+
+def test_max_keys_counts_starting_children():
+    pipeline = _compile(
+        Source("x").group_by(0, _chunk_ids, max_keys=1).unkey().sink(print),
+    )
+
+    try:
+        with pytest.raises(ray.exceptions.RayTaskError, match="max_keys=1"):
+            pipeline.send("x", ("a", _make_set([1])))
+            pipeline.send("x", ("b", _make_set([2])))
+            pipeline.flush()
+    finally:
+        pipeline.close()
+
+
 def _reject(s):
     raise ValueError("child failed")
 
@@ -416,5 +487,103 @@ def test_pipeline_using_its_input_twice():
             0: [[4, 5], [6, 7]],
             1: [[40, 50]],
         }
+    finally:
+        pipeline.close()
+
+
+def _send_in_thread(pipeline, items, flush):
+    """Send ``items`` (and flush) from a thread; returns it and its errors."""
+    errors = []
+
+    def run():
+        try:
+            for item in items:
+                pipeline.send("x", item)
+            if flush:
+                pipeline.flush()
+        except Exception as error:
+            errors.append(error)
+
+    sender = threading.Thread(target=run, daemon=True)
+    sender.start()
+    return sender, errors
+
+
+def test_children_with_single_item_buffers_do_not_deadlock():
+    collector = Collector.remote()
+    pipeline = _compile(
+        Source("x")
+        .group_by(0, _refine)
+        .unkey()
+        .write_to(_collecting_writer(collector)),
+        queue_size=1,
+        max_in_flight=1,
+        buffer_size=1,
+    )
+
+    try:
+        sender, errors = _send_in_thread(
+            pipeline,
+            [(index % 2, _make_set([index])) for index in range(12)],
+            flush=True,
+        )
+        sender.join(timeout=120.0)
+        assert not sender.is_alive(), "The pipeline deadlocked."
+        assert errors == []
+
+        # Models: 0 + 2 for key 0, 1 + 3 for key 1.
+        assert _by_key(ray.get(collector.get.remote())) == {
+            0: [[2, 4], [6, 8], [10, 12]],
+            1: [[5, 7], [9, 11], [13, 15]],
+        }
+    finally:
+        pipeline.close()
+
+
+@ray.remote
+class Gate:
+    """Async actor blocking callers of ``wait`` until ``open`` is called."""
+
+    def __init__(self):
+        self._event = asyncio.Event()
+
+    async def wait(self):
+        await self._event.wait()
+
+    def open(self):
+        self._event.set()
+
+
+def test_blocked_child_stops_the_driver():
+    # The router queues at most buffer_size items for a child; beyond them it
+    # waits, and so does every stage upstream of it.
+    gate = Gate.remote()
+    pipeline = _compile(
+        Source("x")
+        .group_by(0, lambda stream: stream.map(_second))
+        .unkey()
+        .sink(lambda item: ray.get(gate.wait.remote())),
+        queue_size=1,
+        max_in_flight=1,
+        buffer_size=1,
+    )
+
+    try:
+        n_items = 40
+        sender, errors = _send_in_thread(
+            pipeline,
+            [("a", _make_set([index])) for index in range(n_items)],
+            flush=False,
+        )
+        sender.join(timeout=5.0)
+        assert sender.is_alive()
+
+        ray.get(gate.open.remote())
+        sender.join(timeout=60.0)
+        assert not sender.is_alive()
+        assert errors == []
+        pipeline.flush()
+        stats = pipeline.stats()
+        assert max(stage.buffered_peak for stage in stats.values()) <= 1
     finally:
         pipeline.close()

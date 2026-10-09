@@ -6,6 +6,9 @@ os.environ.setdefault("RAY_ENABLE_AUTO_CONNECT", "0")
 
 import sys  # noqa: E402
 
+from numpy._core.multiarray import (  # noqa: E402
+    _set_madvise_hugepage,  # pyright: ignore[reportAttributeAccessIssue]
+)
 import pytest  # noqa: E402
 import ray  # noqa: E402
 
@@ -58,6 +61,18 @@ def ray_cluster():
         )
         yield
         ray.shutdown()
+
+
+@pytest.fixture
+def numpy_hugepage_hint():
+    """Restores NumPy's hugepage hint of the test process after the test.
+
+    Creating a RayBackend switches the hint of the driver.
+    """
+    previous = _set_madvise_hugepage(False)
+    _set_madvise_hugepage(previous)
+    yield
+    _set_madvise_hugepage(previous)
 
 
 @pytest.fixture(

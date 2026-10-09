@@ -2,6 +2,7 @@ import math
 from typing import Any, Callable, Dict, Optional
 import ray
 
+from ...core.environment.compute import numpy_hugepage_env
 from ...core.environment.resource_provider import ResourceProvider, ResourceScope
 
 # Share of the cluster's CPU cores a SHARED resource is built with: enough to
@@ -41,6 +42,7 @@ class RayResourceCoordinator:
         if key not in self._refs:
             self._refs[key] = _build_shared.options(
                 num_cpus=_shared_build_cpus(),
+                runtime_env={"env_vars": numpy_hugepage_env()},
             ).remote(builder, instance)
         return self._refs[key]
 
@@ -97,6 +99,7 @@ class RayResourceProvider(ResourceProvider):
                     namespace="scipion_bridge",
                     lifetime="detached",
                     get_if_exists=True,
+                    runtime_env={"env_vars": numpy_hugepage_env()},
                 ).remote()
 
                 ref = ray.get(

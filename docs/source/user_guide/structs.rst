@@ -241,9 +241,10 @@ API. Struct fields return a ``Set`` of the nested struct:
    Scalar fields have shape ``(1,)`` per element, so their columns have shape
    ``(N, 1)``. Use ``.ravel()`` to get a flat vector.
 
-   Fields with dynamic (``None``) dimensions are returned as `Awkward Arrays
-   <https://awkward-array.org>`_. Convert them with ``ak.to_numpy`` when all
-   elements have the same shape.
+   A field with dynamic (``None``) dimensions is returned as a NumPy array
+   while all its elements have the same shape, and as an `Awkward Array
+   <https://awkward-array.org>`_ once they differ or some are missing. See
+   :ref:`ragged-arrays`.
 
 Slicing and lensing
 ^^^^^^^^^^^^^^^^^^^
@@ -288,20 +289,71 @@ Concatenation
 
     both = B.concat([particles[:100], particles[500:]])
 
+.. _ragged-arrays:
+
 Ragged arrays
 ^^^^^^^^^^^^^
 
-When an array field declares ``None`` dimensions, elements may have different
-shapes. The storage starts as a regular dense array. When a sample with a
-different shape is written, the storage is **promoted** to a ragged
-representation: a flat buffer plus offsets and shapes, implemented with
-Awkward Array.
+A **dynamic** field, one with a ``None`` dimension such as
+``pixels = B.Array(shape=(None, None))``, *allows* elements of different
+shapes. How its column is stored depends on the data:
+
+* While all elements have the same shape, the column is a NumPy array of shape
+  ``(N, *element_shape)``, exactly like the column of a static field. Slicing,
+  masking and serializing it cost what they cost in NumPy.
+* Once elements differ in shape, or some are missing, the column becomes an
+  `Awkward Array <https://awkward-array.org>`_. Awkward stores the elements in
+  one flat buffer plus offsets, so elements of different shapes sit next to
+  each other without padding.
 
 .. code-block:: text
 
-    root.pixels   [   pixel array   ]  ── add irregular sample ──►  [ flat pixel buffer ]
-                                                                     [ offsets          ]
-                                                                     [ shapes           ]
+    all 64 × 64      NumPy    (3, 64, 64)              [ img 0 ][ img 1 ][ img 2 ]
+    64 × 64, 32 × 32 Awkward  3 * var * var * float32  [ flat pixel buffer    ]
+                                                       [ offsets per element  ]
+
+The switch to Awkward happens only when the data needs it: writing an element
+of a different shape, concatenating sets whose images differ in size, or
+leaving elements unwritten. It is one-way; a column does not turn back into
+NumPy when you read it. Code that needs a NumPy array can call
+``np.asarray(column)`` or ``ak.to_numpy(column)``; both accept either type.
+
+Writing a single element of a dynamic column, as in ``particles[1].pixels = img``,
+splits the column into one buffer per row, writes the row, and joins the rows
+again the next time the whole column is read (as NumPy if all rows share a
+shape). You never see this intermediate state, but it makes a loop of element
+writes cheap: the column is rebuilt once, not once per write. When you can,
+assign the whole column at once.
+
+The :ref:`developer guide <struct-storage>` describes the storage in detail.
+
+Empty selections and missing elements
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A selection that matches no row is a valid, empty ``Set``. Its columns are
+empty arrays, and it can be assigned like any other set:
+
+.. code-block:: python
+
+    members = particles[assignments == k]       # may be empty
+    cls = Class2D(class_id=k, particles=members)
+    len(cls.particles)                          # 0 for an empty class
+
+An element that was never written is *missing*, which is different from empty.
+This happens when only some rows of a field are written:
+
+.. code-block:: python
+
+    particles = B.Set[Particle]()
+    particles["sampling_rate"] = np.ones((3, 1))   # the set has 3 rows
+    particles[2].pixels = img                      # rows 0 and 1 stay missing
+
+    particles["pixels"]       # [None, None, img]
+    particles[0].pixels       # raises UninitializedFieldError
+
+Only dynamic fields can tell a missing element apart. A static column is a
+NumPy array that is allocated with zeros, so a missing element of a static field
+reads as zeros.
 
 Collections
 -----------

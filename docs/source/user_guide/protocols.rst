@@ -195,8 +195,15 @@ declarations; the standalone and pyworkflow backends ignore them.
    The GPU memory (GiB) a call needs on each of its GPUs. The backend claims
    the smallest share of a GPU (1/8, 1/4, 1/2 or 1) that provides this much
    memory on the *smallest* GPU of the cluster, or ``gpus`` if that is more.
-   Memory is not enforced: calls that share a GPU must stay within their
-   claim.
+
+A call that claims a fraction of a GPU (through ``gpus`` or ``min_vram``) runs
+with its memory limited for frameworks that preallocate it: JAX/XLA may
+preallocate 90% of the claimed share (``XLA_PYTHON_CLIENT_MEM_FRACTION``), and
+TensorFlow allocates on demand (``TF_FORCE_GPU_ALLOW_GROWTH``). PyTorch
+allocates on demand and is not limited; the share is exported as
+``SCIPION_BRIDGE_GPU_FRACTION`` for
+``torch.cuda.set_per_process_memory_fraction``. Other memory use is not
+enforced: calls that share a GPU must stay within their claim.
 
 ``cpus``
    The number of CPU cores reserved per call. ``None`` reserves none, and the

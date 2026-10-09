@@ -31,7 +31,7 @@ from .schema import (
     SetEntryBase,
 )
 from ..utils.marker import Marker
-from .storage import _BaseStorage, StagingEngine
+from .storage import _BaseStorage, RootEngine
 from .exceptions import UninitializedFieldError
 from .key_path import KeyPath
 from .utils.arrow_utils import (
@@ -463,7 +463,7 @@ class Struct(Trait, SchemaConvertible):
             )
 
         self._storage = storage
-        self._storage = storage if storage is not None else StagingEngine()
+        self._storage = storage if storage is not None else RootEngine()
 
         for k, v in kwargs.items():
             setattr(self, k, v)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from scipion_bridge.core.struct.schema import SchemaConvertible
@@ -25,13 +26,17 @@ class SinkWriter(Protocol):
 
 
 class CallbackSinkWriter:
-    """Async adapter wrapping a callable as a SinkWriter for testing/debugging."""
+    """Async adapter wrapping a callable as a SinkWriter for testing/debugging.
+
+    The callback runs in a thread, so that a slow callback does not block the
+    event loop of the stage writing, which keeps accepting items meanwhile.
+    """
 
     def __init__(self, callback: Callable[[Any], Any]):
         self.callback = callback
 
     async def write(self, item: Any) -> None:
-        self.callback(item)
+        await asyncio.to_thread(self.callback, item)
 
     async def finalize(self) -> None:
         pass

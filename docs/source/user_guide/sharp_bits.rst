@@ -79,16 +79,19 @@ Boolean masks must be one-dimensional, so ``ravel()`` before filtering:
 
     good = particles[particles["ctf"]["resolution"].ravel() < 4.0]
 
-Dynamic dimensions give Awkward arrays
---------------------------------------
+Dynamic dimensions can give Awkward arrays
+------------------------------------------
 
-Fields declared with ``None`` dimensions are returned as Awkward arrays, even
-when every element happens to have the same shape. Convert them explicitly:
+A field declared with ``None`` dimensions is a NumPy array while all its
+elements have the same shape. Once they differ, for example after concatenating
+sets with images of different sizes, or when some elements were never written,
+the field is returned as an Awkward array instead. Code that expects NumPy
+should convert explicitly; this works for both types:
 
 .. code-block:: python
 
     import awkward as ak
-    pixels = ak.to_numpy(particles["pixels"])
+    pixels = ak.to_numpy(particles["pixels"])   # raises if the images differ in shape
 
 Views share memory
 ------------------
@@ -133,6 +136,36 @@ The Ray runner discards outputs without a sink
 ``RayPipelineRunner`` validates the protocol's outputs but does nothing else
 with them unless you pass ``sink=``. To keep the results, pass a
 ``SinkWriter`` such as ``TensorStoreSinkWriter``, or a callback.
+
+The Ray backend turns off NumPy's transparent hugepages
+-------------------------------------------------------
+
+On Linux, NumPy asks the kernel to back every array of 4 MiB or more with
+transparent hugepages. On a long-running, shared host this can stall a
+pipeline progressively: stages moving large stacks of particles slow from
+about a second to minutes per item, memory pressure (``full`` in the cgroup's
+``memory.pressure``) is high, and ``compact_stall`` keeps growing in
+``/proc/vmstat``.
+
+The cause is the kernel setting ``defrag=madvise``
+(``/sys/kernel/mm/transparent_hugepage/defrag``) combined with fragmented
+physical memory. A page fault in such an array makes the kernel compact memory
+synchronously to build a 2 MiB page. When the Ray object store in
+``/dev/shm``, the page cache and pinned CUDA memory have fragmented the RAM,
+``/proc/buddyinfo`` shows no free 2 MiB blocks, and most compactions fail
+after stalling the process.
+
+The Ray backend therefore sets ``NUMPY_MADVISE_HUGEPAGE=0`` in the
+``runtime_env`` of the Ray job and of every actor and task it creates. In the
+driver, where NumPy is already imported, ``RayBackend`` switches the hint off
+at runtime. The standalone backend leaves NumPy unchanged.
+
+To keep hugepages, set the variable before starting the driver; the backend
+passes its value on to every worker:
+
+.. code-block:: bash
+
+    NUMPY_MADVISE_HUGEPAGE=1 python run_pipeline.py
 
 The pickled ``Set[T]`` needs an importable ``T``
 ------------------------------------------------

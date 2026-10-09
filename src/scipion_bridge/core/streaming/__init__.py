@@ -25,6 +25,7 @@ from .ir import (
     clone_ir,
 )
 from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
+from .spill import PickleSpillStore, SpillStore, SpillStoreFactory, pickle_spill_store
 from .pipeline import Pipeline
 
 __all__ = [
@@ -59,5 +60,9 @@ __all__ = [
     "CompiledPipeline",
     "StageStats",
     "StreamingBackendProvider",
+    "SpillStore",
+    "SpillStoreFactory",
+    "PickleSpillStore",
+    "pickle_spill_store",
     "Pipeline",
 ]

@@ -39,7 +39,7 @@ from .schema import (
 )
 from .exceptions import UninitializedFieldError
 from .key_path import KeyPath
-from .storage import _BaseStorage, StagingEngine, StorageView
+from .storage import _BaseStorage, RootEngine, StorageView
 from .utils.arrow_utils import (
     find_nested_column,
     leaf_from_arrow,
@@ -93,7 +93,7 @@ class Set(Marker[T], SchemaConvertible):
         super().__init__(**kwargs)
 
         items = list(items)
-        self._storage = storage if storage is not None else StagingEngine()
+        self._storage = storage if storage is not None else RootEngine()
 
         resolved_cap = capacity.value if isinstance(capacity, Arg) else capacity
 

@@ -3,20 +3,28 @@
 The test cluster has 2 CPUs and 2 logical GPUs (see conftest).
 """
 
+import json
 import logging
 import os
 import random
 import subprocess
+import sys
 import time
 from typing import Any
 
+from numpy._core.multiarray import (
+    _set_madvise_hugepage,  # pyright: ignore[reportAttributeAccessIssue]
+)
 import pytest
 import ray
 
 import scipion_bridge as B
 from scipion_bridge.backend.ray import backend
 from scipion_bridge.backend.ray.backend import RayBackend
-from scipion_bridge.core.environment.compute import CPUS_ENV_VAR
+from scipion_bridge.core.environment.compute import (
+    CPUS_ENV_VAR,
+    NUMPY_HUGEPAGE_ENV_VAR,
+)
 from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import Source
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
@@ -246,6 +254,66 @@ def test_long_running_resources_are_released_on_flush():
         pipeline.close()
 
 
+def _restore_slowly(value):
+    time.sleep(0.2)  # Stands in for deserializing a large chunk.
+    return SlowItem(value)
+
+
+class SlowItem:
+    """Item that takes a while to deserialize in the receiving process."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __reduce__(self):
+        return _restore_slowly, (self.value,)
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+class SlowInputInference(B.Protocol):
+    items: B.Input[SlowItem] = B.Input()
+    recorder: Any
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(self._forward)
+
+    def _forward(self, item):
+        _record(self.recorder, "forward", seconds=0.4)
+        return {"out": item.value}
+
+
+def test_long_running_calls_overlap_with_the_transfer_of_the_next():
+    protocol = SlowInputInference()
+    protocol.recorder = Recorder.remote()
+    collector = Collector.remote()
+    pipeline = _compile(protocol, collector)
+
+    try:
+        for item in range(6):
+            pipeline.send("items", SlowItem(item))
+        pipeline.flush()
+
+        calls = sorted(
+            ray.get(protocol.recorder.get_calls.remote()),
+            key=lambda call: call["start"],
+        )
+        # The next item is deserialized while the current one computes, so
+        # the function runs back to back, one call at a time. The first gap
+        # also waits for the second item to reach the executor.
+        gaps = [
+            after["start"] - before["end"] for before, after in zip(calls, calls[1:])
+        ]
+        assert _max_overlap(calls) == 1
+        assert sum(gaps[1:]) / len(gaps[1:]) < 0.1
+        results = ray.get(collector.get.remote())
+        assert [result["out"] for result in results] == list(range(6))
+    finally:
+        pipeline.close()
+
+
 @B.resources(gpus=CLUSTER_GPUS + 1, task=B.TaskType.LONG_RUNNING)
 class TooLarge(B.Protocol):
     items: B.Input[int] = B.Input()
@@ -405,12 +473,22 @@ def test_reserved_cpus_limit_the_calls_running_at_once():
     assert _max_overlap(_overlapping_work(cpus=1)) == CLUSTER_CPUS
 
 
+def _numpy_hugepages():
+    """NumPy's hugepage setting of this process: the variable and the hint."""
+    # _set_madvise_hugepage returns the previous state of the hint.
+    hint = _set_madvise_hugepage(False)
+    _set_madvise_hugepage(hint)
+    return {"hugepage": os.environ.get(NUMPY_HUGEPAGE_ENV_VAR), "hint": hint}
+
+
 def _environment(item):
     return {
         "out": {
             "omp": os.environ.get("OMP_NUM_THREADS"),
             "cpus": os.environ.get(CPUS_ENV_VAR),
+            "xla": os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
             "assigned": ray.get_runtime_context().get_assigned_resources(),
+            **_numpy_hugepages(),
         },
     }
 
@@ -441,6 +519,7 @@ def test_calls_without_reserved_cpus_use_all_cores():
         assert result["omp"] == str(CLUSTER_CPUS)
         assert result["cpus"] is None
         assert "CPU" not in result["assigned"]
+        assert (result["hugepage"], result["hint"]) == ("0", False)
     finally:
         pipeline.close()
 
@@ -457,8 +536,64 @@ def test_calls_with_reserved_cpus_learn_their_number():
         assert result["omp"] == "1"
         assert result["cpus"] == "1"
         assert result["assigned"]["CPU"] == 1
+        assert (result["hugepage"], result["hint"]) == ("0", False)
     finally:
         pipeline.close()
+
+
+def _process(item):
+    return {
+        "out": {
+            "pid": os.getpid(),
+            "gpus": ray.get_gpu_ids(),
+            "cuda": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        },
+    }
+
+
+def _reports_process(**resources):
+    @B.resources(**resources)
+    class ReportsProcess(B.Protocol):
+        items: B.Input[int] = B.Input()
+
+        def outputs(self):
+            return {"out": dict}
+
+        def steps(self):
+            return self.items.map(_process)
+
+    return ReportsProcess()
+
+
+def _processes_of_consecutive_calls(protocol, calls=4):
+    collector = Collector.remote()
+    pipeline = _compile(protocol, collector)
+
+    try:
+        for item in range(calls):
+            pipeline.send("items", item)
+            pipeline.flush()
+
+        return [result["out"] for result in ray.get(collector.get.remote())]
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize("gpus", [1, 0.5])
+def test_every_gpu_call_runs_in_a_process_of_its_own(gpus):
+    # CUDA binds a process to its first GPU; a reused worker would keep it.
+    results = _processes_of_consecutive_calls(_reports_process(gpus=gpus))
+
+    assert len({result["pid"] for result in results}) == len(results)
+    assert all(
+        result["cuda"] == ",".join(map(str, result["gpus"])) for result in results
+    )
+
+
+def test_cpu_calls_reuse_worker_processes():
+    results = _processes_of_consecutive_calls(_reports_process())
+
+    assert len({result["pid"] for result in results}) < len(results)
 
 
 # -- cpu_only ----------------------------------------------------------------
@@ -634,6 +769,29 @@ def test_memory_claims_of_long_running_executors(gpus_of_16_gib):
         pipeline.close()
 
 
+@pytest.mark.parametrize(
+    ("resources", "xla"),
+    [
+        ({"min_vram": 8}, "0.450"),
+        ({"gpus": 0.25, "task": B.TaskType.LONG_RUNNING}, "0.225"),
+        ({"gpus": 1}, None),
+    ],
+)
+def test_shares_of_a_gpu_limit_xla_preallocation(gpus_of_16_gib, resources, xla):
+    collector = Collector.remote()
+    pipeline = _compile(_reports_environment(**resources), collector)
+
+    try:
+        pipeline.send("items", 0)
+        pipeline.flush()
+
+        (result,) = ray.get(collector.get.remote())
+        assert result["out"]["xla"] == xla
+        assert (result["out"]["hugepage"], result["out"]["hint"]) == ("0", False)
+    finally:
+        pipeline.close()
+
+
 def test_memory_claim_is_resolved_for_group_by_children(gpus_of_16_gib):
     # The children compile in the router's process, where the patched probe
     # is not visible: the router passes on the memory probed by the parent.
@@ -681,3 +839,131 @@ def test_claims_are_sized_for_the_smallest_gpu(caplog):
     assert num_gpus == 0.5
     assert "sized for the smallest GPU (16 GiB)" in caplog.text
     assert "33% of the 24 GiB GPUs stays unused" in caplog.text
+
+
+# -- NumPy hugepages ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, {"hugepage": "0", "hint": False}), ("1", {"hugepage": "1", "hint": True})],
+)
+def test_every_process_of_a_pipeline_gets_the_numpy_hugepage_setting(
+    monkeypatch,
+    numpy_hugepage_hint,
+    value,
+    expected,
+):
+    match value:
+        case None:
+            monkeypatch.delenv(NUMPY_HUGEPAGE_ENV_VAR, raising=False)
+        case _:
+            monkeypatch.setenv(NUMPY_HUGEPAGE_ENV_VAR, value)
+    collector = Collector.remote()
+    # The writer runs in the sink actor, whose options do not come from the
+    # compute resources of a map.
+    writer = CallbackSinkWriter(
+        lambda item: ray.get(
+            collector.append.remote({"map": item, "sink": _numpy_hugepages()}),
+        ),
+    )
+    (sink,) = lower(
+        [Source("items").map(lambda _: _numpy_hugepages()).write_to(writer)],
+    )
+    pipeline = RayBackend(init_ray=False).compile([sink])
+
+    try:
+        pipeline.send("items", 0)
+        pipeline.flush()
+
+        (result,) = ray.get(collector.get.remote())
+        assert result == {"map": expected, "sink": expected}
+        # The driver has imported NumPy already: the backend switches it.
+        assert _numpy_hugepages()["hint"] is expected["hint"]
+    finally:
+        pipeline.close()
+
+
+# Runs a pipeline on a Ray instance started by the backend, so that the
+# workers get the runtime_env of the job and of their task or actor.
+_JOB_ENVIRONMENT = """
+import json
+import os
+
+from numpy._core.multiarray import _set_madvise_hugepage
+import ray
+
+from scipion_bridge.backend.ray.backend import RayBackend
+from scipion_bridge.core.streaming.node import lower
+from scipion_bridge.core.streaming.ops import Source
+from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
+
+
+def environment():
+    hint = _set_madvise_hugepage(False)
+    _set_madvise_hugepage(hint)
+    return {
+        "hugepage": os.environ.get("NUMPY_MADVISE_HUGEPAGE"),
+        "hint": hint,
+        "pythonpath": os.environ.get("PYTHONPATH"),
+        "omp": os.environ.get("OMP_NUM_THREADS"),
+    }
+
+
+@ray.remote
+class Collector:
+    def __init__(self):
+        self.items = []
+
+    def append(self, item):
+        self.items.append(item)
+
+    def get(self):
+        return self.items
+
+
+backend = RayBackend()
+driver_hint = _set_madvise_hugepage(False)
+collector = Collector.remote()
+writer = CallbackSinkWriter(
+    lambda item: ray.get(collector.append.remote({"map": item, "sink": environment()})),
+)
+(sink,) = lower([Source("items").map(lambda _: environment()).write_to(writer)])
+pipeline = backend.compile([sink])
+pipeline.send("items", 0)
+pipeline.flush()
+(result,) = ray.get(collector.get.remote())
+pipeline.close()
+print(json.dumps({**result, "driver_hint": driver_hint}))
+"""
+
+
+def test_job_and_stage_environments_are_merged_in_the_workers():
+    environment = {
+        **{
+            name: value
+            for name, value in os.environ.items()
+            # PYTHONPATH must reach the workers through the job's runtime_env.
+            if name not in {NUMPY_HUGEPAGE_ENV_VAR, "PYTHONPATH"}
+        },
+        # A Ray instance of its own with 2 CPUs, not the cluster of the session.
+        "RAY_ADDRESS": "local",
+        "RAY_OVERRIDE_RESOURCES": json.dumps({"CPU": CLUSTER_CPUS}),
+    }
+    output = subprocess.run(
+        [sys.executable, "-c", _JOB_ENVIRONMENT],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=180,
+    ).stdout
+    result = json.loads(output.splitlines()[-1])
+
+    assert result["driver_hint"] is False
+    for process in ("map", "sink"):
+        assert result[process]["hugepage"] == "0"
+        assert result[process]["hint"] is False
+        assert os.path.abspath("src") in result[process]["pythonpath"].split(":")
+    # Set by the options of the map only, merged with the job's variables.
+    assert result["map"]["omp"] == str(CLUSTER_CPUS)

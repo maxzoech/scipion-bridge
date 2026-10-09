@@ -370,10 +370,12 @@ def test_resolve_awkward_to_ndarray():
     s[0].embeddings = np.array([1.0, 2.0, 3.0])
     s[1].embeddings = np.array([4.0, 5.0, 6.0])
 
-    ragged = s["embeddings"]
-    assert isinstance(ragged, ak.Array)
+    # Rows of one shape are stored as NumPy, also for dynamic fields.
+    assert isinstance(s["embeddings"], np.ndarray)
 
     expected = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    ragged = ak.Array(expected.tolist())
+    assert isinstance(ragged, ak.Array)
 
     # Direct resolution from ak.Array to np.ndarray
     resolved = sb.resolve(ragged, astype=np.ndarray)

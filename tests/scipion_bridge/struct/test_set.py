@@ -1,4 +1,4 @@
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 import pytest
 import numpy as np
@@ -1256,6 +1256,15 @@ class MockEngine(_BaseStorage):
 
     def write(self, key: KeyPath, entry: Entry, data: Any) -> None:
         print(f"Write key {key} for entry {entry}")
+
+    def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
+        return None
+
+    def clear(self, key: Optional[KeyPath] = None) -> None:
+        pass
+
+    def is_initialized(self, key: KeyPath) -> bool:
+        return True
 
     def concat(
         self,

@@ -19,9 +19,16 @@ class StageStats:
             starved by its upstream.
         process_s: Time spent in the stage logic.
         blocked_s: Time spent waiting for room in the outbox. High values mean
-            the stage is throttled by its downstream.
+            that the maps on the routes of the stage, which run at most
+            ``max_in_flight`` items at a time, are throttling it.
         emit_s: Time spent forwarding items downstream, including
             serialization.
+        buffered_peak: Most items waiting at once for the stage. High values
+            mean the stage is slower than its upstream.
+        spilled: Items that overflowed the buffer into the spill store.
+        fetch_s: Time spent reading waiting items, from the object store or
+            the spill store.
+        spill_s: Time spent writing items to the spill store.
     """
 
     items_in: int = 0
@@ -30,6 +37,10 @@ class StageStats:
     process_s: float = 0.0
     blocked_s: float = 0.0
     emit_s: float = 0.0
+    buffered_peak: int = 0
+    spilled: int = 0
+    fetch_s: float = 0.0
+    spill_s: float = 0.0
 
 
 class CompiledPipeline(abc.ABC):

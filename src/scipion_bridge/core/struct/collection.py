@@ -24,7 +24,7 @@ from .schema import (
     SchemaConvertible,
     SchemaEntry,
 )
-from .storage import _BaseStorage, StagingEngine
+from .storage import _BaseStorage, RootEngine
 from .struct import Struct, leaf_columns, struct_leaf_arrays, write_struct_row
 from .set import Set
 from .utils.arrow_utils import leaves_to_batch, null_row
@@ -65,7 +65,7 @@ class Collection(Marker[T], SchemaConvertible):
                 )
 
         self.size = size
-        self._storage = storage if storage is not None else StagingEngine()
+        self._storage = storage if storage is not None else RootEngine()
         self._owner_cls: Optional[type] = None
 
         if items is not None:

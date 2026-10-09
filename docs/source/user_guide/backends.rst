@@ -28,7 +28,9 @@ Each backend is a container that provides these services:
    * - ``temp_file_provider``
      - Creates and deletes temporary files for proxies.
    * - ``storage_provider``
-     - Storage engine for the array types (Arrow).
+     - Creates array groups (in memory, or Zarr in a Scipion protocol). The
+       array types keep their data in memory and do not use it; see
+       :ref:`struct-storage`.
    * - ``protocol_config_provider``
      - Serves parameter values to ``Field.value``.
    * - ``resource_provider``
@@ -80,10 +82,65 @@ The Ray backend compiles a streaming graph into Ray actors and tasks:
   declared with ``@B.resources``. Long-running protocols get a dedicated
   executor actor that holds their GPUs.
 
-Stages run concurrently and push results downstream in order. Bounded queues
-provide backpressure, so the driver slows down when the cluster cannot keep up.
-Ray moves ``Set`` batches as Arrow buffers through its shared-memory object
-store.
+Stages run concurrently and push results downstream in order. Ray moves
+``Set`` batches as Arrow buffers through its shared-memory object store.
+
+Buffering and spilling
+^^^^^^^^^^^^^^^^^^^^^^
+
+Every stage has a **mailbox**: items sent to it wait there until the stage is
+ready for them. A stage therefore keeps working while the stage downstream of
+it is busy, as long as that stage's mailbox has room. When a mailbox is full,
+the stage upstream of it waits, and so on as far as the driver: ``send`` (and
+``RayPipelineRunner.run``) then waits too. A slow stage throttles the pipeline
+instead of piling up its input.
+
+Waiting items are held in Ray's object store, and Ray needs that store for
+every transfer between processes, including the inputs and results of a GPU
+model. An unbounded backlog fills the store, after which every stage waits
+for Ray to spill and restore objects at disk speed. Bound the backlog, or
+spill it.
+
+* ``buffer_size`` caps how many items may wait for a stage (default 4).
+  ``None`` removes the cap, so a slow stage never stalls the stages upstream of
+  it. Combine that with spilling.
+* ``spill_threshold`` caps how many waiting items a stage keeps in the object
+  store (default 4). Further items go to a **spill store** and are read back
+  when the stage gets to them. Spilling only happens when the threshold is
+  below ``buffer_size``, so with the defaults nothing spills. ``None`` never
+  spills. The default store pickles every item into a temporary directory that
+  is removed when the pipeline closes. A ``SpillStore`` decides what to
+  persist, so a custom store, passed as ``spill_store``, can for example write
+  only the columns of a ``Set`` that changed.
+* ``max_in_flight`` is the number of items on their way out of a stage at once,
+  through all the ``map`` calls between it and the next stage (default 16). An
+  item keeps its place until it has passed every map, so a slow map behind a
+  fast one needs enough places for the fast map to keep working. A long-running
+  map has two calls in flight: one computes while the next one's input is
+  transferred.
+
+Both caps count **items, not bytes**. A chunk of 64 particles of 336×336
+pixels (33 MB) and a single particle (0.4 MB) each count as one. Besides its
+mailbox, a stage holds up to ``queue_size`` items in its inbox, ``queue_size``
+in its outbox and ``max_in_flight`` on its routes. Size the caps for the
+largest items of the pipeline.
+
+Some operators keep items in their own state, outside of these caps.
+``combine_latest`` keeps the items of its first input until the second input
+has produced its first item, and ``collect`` keeps its sample. Their mailboxes
+keep accepting items meanwhile, so they never block the pipeline, but their
+state can grow.
+
+A ``group_by`` starts the pipeline of a key when the first item of the key
+arrives, without waiting for it: the items of the key wait until it has started,
+and the items of other keys are routed on. The pipelines of a burst of new keys
+start in parallel. Up to ``buffer_size`` items wait per key; beyond that, the
+``group_by`` waits like any other stage.
+
+The statistics table of a run shows per stage the most items that waited
+(``buffered``), the items spilled, and the time spent reading waiting items
+(``fetch_s``) and spilling them (``spill_s``). A stage with many waiting items is
+the bottleneck of the pipeline.
 
 Running a protocol: ``RayPipelineRunner``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -103,7 +160,7 @@ Running a protocol: ``RayPipelineRunner``
     ) as runner:
         runner.run(particles=Path("particles.star"))
 
-``RayPipelineRunner(protocol, *, parameters=None, origin_types=None, sink=None, queue_size=2)``
+``RayPipelineRunner(protocol, *, parameters=None, origin_types=None, sink=None, queue_size=2, max_in_flight=None, buffer_size=4, spill_threshold=4, spill_store=None, profile=None, profile_log_level=logging.INFO)``
 
 ``parameters``
    Values of the protocol's fields. Unknown names raise ``ValueError``, and so
@@ -123,7 +180,15 @@ Running a protocol: ``RayPipelineRunner``
    a callback. **Without a sink, outputs are discarded.**
 
 ``queue_size``
-   The number of items each stage buffers.
+   The number of items each stage reads ahead of its computation.
+
+``max_in_flight``, ``buffer_size``, ``spill_threshold``, ``spill_store``
+   How stages buffer the items waiting for them, see `Buffering and spilling`_.
+   By default, up to 4 items wait for every stage, and ``send`` waits beyond
+   that.
+
+``profile``, ``profile_log_level``
+   Profile the pipeline into a trace file, see `Profiling`_.
 
 ``run(**inputs)`` resolves every input in chunks and sends the chunks into the
 pipeline, interleaving the inputs. When all inputs are exhausted, it flushes
@@ -148,9 +213,29 @@ Environment variables
        estimated (default 32 MiB).
    * - ``SCIPION_STREAM_QUEUE_SIZE``
      - Overrides ``queue_size``.
+   * - ``SCIPION_STREAM_MAX_IN_FLIGHT``
+     - Overrides ``max_in_flight``.
+   * - ``SCIPION_STREAM_BUFFER_SIZE``
+     - Overrides ``buffer_size``; ``none`` removes the cap.
+   * - ``SCIPION_STREAM_SPILL_THRESHOLD``
+     - Overrides ``spill_threshold``; ``none`` disables spilling.
+   * - ``SCIPION_STREAM_SPILL_DIR``
+     - Spills by pickling into this directory instead of ``spill_store``.
+   * - ``SCIPION_STREAM_PROFILE``
+     - Overrides ``profile``: a path for the trace, ``1`` for a timestamped
+       file in the working directory, ``0`` for no profiling.
+   * - ``SCIPION_STREAM_PROFILE_LOG_LEVEL``
+     - Overrides ``profile_log_level``, e.g. ``debug`` to log every item.
    * - ``SCIPION_BRIDGE_CPUS``
      - *Set by the backend* inside stages that reserved CPU cores, for example
        to size thread pools.
+   * - ``SCIPION_BRIDGE_GPU_FRACTION``
+     - *Set by the backend* inside stages that claimed a fraction of a GPU,
+       together with ``XLA_PYTHON_CLIENT_MEM_FRACTION`` and
+       ``TF_FORCE_GPU_ALLOW_GROWTH`` (see :doc:`protocols`).
+   * - ``NUMPY_MADVISE_HUGEPAGE``
+     - *Set by the backend* to ``0`` in every Ray worker, unless set in the
+       driver's environment, whose value is passed on (see :doc:`sharp_bits`).
 
 Command line applications
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -170,6 +255,77 @@ protocol's docstring becomes the program description.
 
     python embed.py --help
     python embed.py --particles particles.star --chunk-size 512 --model-type CRYO_IEF_SMALL
+
+Every application also accepts ``--profile [PATH]``, see `Profiling`_.
+
+Profiling
+^^^^^^^^^
+
+A profiled pipeline records what every process does: the stage actors, the
+Ray tasks running maps, the executors of long-running compute groups, the
+``group_by`` children and the driver. Enable it with ``profile=<path>`` (or
+``True`` for a generated file name) on ``RayPipelineRunner`` or
+``RayBackend``, with ``SCIPION_STREAM_PROFILE``, or with ``--profile``:
+
+.. code-block:: bash
+
+    python embed.py --particles particles.star --profile embed_trace.json
+    SCIPION_STREAM_PROFILE=1 SCIPION_STREAM_PROFILE_LOG_LEVEL=debug python embed.py ...
+
+The events go to two places:
+
+* **The log.** Every process logs its events on the logger
+  ``scipion_bridge.profile``, and Ray forwards the output of the workers to
+  the driver, prefixed with the actor class and process id::
+
+      (RayAccumulatorActor pid=81234) [2:chunk] compute/process 12.3ms seq=4 port=0
+
+  Lifecycle events (stage start, FLUSH, executor start and kill, start of a
+  ``group_by`` child, errors) are logged at INFO, the events of every item at
+  DEBUG. Ray merges matching lines from different processes. Map tasks running
+  in different worker processes log matching lines, so set
+  ``RAY_DEDUP_LOGS=0`` in the shell that starts the driver to see all of them.
+* **The trace file**, in the Trace Event Format of Chrome. Open it in
+  https://ui.perfetto.dev or ``chrome://tracing``. It is written **while the
+  pipeline runs**, so you can open it at any time and reload it to see newer
+  events. Workers send their events at least once per second, and every
+  event before a FLUSH is in the file when ``flush`` returns. ``close``
+  completes the file.
+
+In the trace, each process is one row, named after its stage label and
+process id. Each part of a stage's work has its own lane:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Lane
+     - Events
+   * - ``mailbox``
+     - ``backpressure``: a ``push`` waiting for room in a full buffer.
+   * - ``fetch``
+     - ``fetch``: reading the next item, with its ``source`` (``inline``,
+       ``object_store`` or ``spill``).
+   * - ``spill``
+     - ``spill``: writing an item to the spill store.
+   * - ``compute``
+     - ``process`` per item (``seq``, ``port``), ``on_flush``, and ``blocked``
+       while the outbox is full.
+   * - ``forward``
+     - ``forward`` per item, including its maps; ``flush``.
+   * - ``map:<label>``
+     - On the stage, a ``call`` of a map from submission until its result is
+       ready, including the wait for resources. On the task worker or
+       executor, its ``execute`` (with the GPU ids) and, on an executor, the
+       ``lock_wait``.
+   * - ``group_by``
+     - ``start_child``: starting the child pipeline of a key.
+   * - ``driver``
+     - ``send``: the driver waiting for a source to accept an item; ``flush``.
+
+Profiling costs one extra Ray call per map call, because a task worker sends
+its events before the task returns. Timestamps are wall-clock times, so on a
+cluster they are only as accurate as the clocks of the nodes are in sync.
 
 Running on a cluster
 ^^^^^^^^^^^^^^^^^^^^

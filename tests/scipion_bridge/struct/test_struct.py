@@ -64,6 +64,12 @@ class MockStorage(_BaseStorage):
             data = np.asarray(data, dtype=entry.dtype)
         self.data[str(key)] = data
 
+    def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
+        return None
+
+    def clear(self, key: Optional[KeyPath] = None) -> None:
+        pass
+
     def concat(
         self,
         others: Sequence["_BaseStorage"],

@@ -365,6 +365,28 @@ def test_ragged_set_columns_keep_their_type(serializer):
     assert np.array_equal(restored[1].pixels, np.full((4, 4), 1.0, np.float32))
 
 
+def test_regular_dynamic_column_through_ray_is_zero_copy_numpy():
+    particles = B.Set[Particle](capacity=3)
+    particles["pixels"] = np.arange(36, dtype=np.float32).reshape(3, 3, 4)
+
+    restored = ray.get(ray.put(particles))
+
+    pixels = restored["pixels"]
+    assert isinstance(pixels, np.ndarray)
+    assert pixels.dtype == np.float32
+    assert np.array_equal(pixels, np.asarray(particles["pixels"]))
+    assert not pixels.flags.writeable
+
+    # The read-only column is copied on the first row write.
+    restored[1].pixels = np.zeros((3, 4), dtype=np.float32)
+    assert isinstance(restored["pixels"], np.ndarray)
+    assert np.all(np.asarray(restored["pixels"])[1] == 0.0)
+    assert np.array_equal(
+        np.asarray(restored["pixels"])[2],
+        np.asarray(particles["pixels"])[2],
+    )
+
+
 def test_uninitialized_rows_stay_missing():
     particles = B.Set[Particle](capacity=3)
     particles[0] = Particle(pixels=np.ones((4, 4), np.float32))

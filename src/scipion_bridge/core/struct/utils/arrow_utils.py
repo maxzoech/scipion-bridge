@@ -347,8 +347,9 @@ def leaf_to_arrow(
     per row, so each becomes a list level instead of a tensor dimension.
 
     Static columns become FixedShapeTensorArrays (or primitive arrays for 1-D
-    buffers) and ragged columns become (nested) list arrays. Contiguous NumPy
-    buffers are wrapped without copying.
+    buffers). NumPy columns of dynamic fields become nested FixedSizeListArrays,
+    which keep the row shape, and Awkward columns become (nested) list arrays.
+    Contiguous NumPy buffers are wrapped without copying.
     """
     match (entry.is_static, data):
         case (_, np.ndarray()) if data.ndim > len(entry.shape) + 1:
@@ -360,7 +361,7 @@ def leaf_to_arrow(
             # zero rows, e.g. an empty nested Set.
             return build_tensor_array(data, data.shape[1:], data.dtype)
         case (False, np.ndarray()):
-            return ak.to_arrow(ak.Array(data), extensionarray=False)
+            return regular_numpy_to_arrow(data)
         case (False, ak.Array()):
             return ak.to_arrow(data, extensionarray=False)
         case _:
@@ -376,16 +377,68 @@ def leaf_from_arrow(
 ) -> Union[np.ndarray, ak.Array]:
     """Convert an Arrow array produced by :func:`leaf_to_arrow` back into a buffer.
 
-    Nested Sets of equal length in every row are restored as a NumPy array,
-    otherwise as a ragged Awkward array.
+    Static columns are always restored as NumPy arrays. For dynamic fields, the
+    Arrow type and null count decide: null-free nested fixed-size lists (regular
+    rows) are restored as NumPy arrays without copying where Arrow allows it,
+    null-free nested Sets level by level, and anything else (ragged or
+    nullable columns) as an Awkward Array. Nested Sets of equal length in every
+    row are restored as a NumPy array, otherwise as a ragged Awkward array.
     """
     match (entry.is_static, column):
         case (True, pa.ListArray()):
             return _nested_set_from_arrow(column, entry)
         case (True, _):
             return arrow_to_numpy(column, entry.shape)
+        case (False, _) if is_regular_arrow(column):
+            return regular_arrow_to_numpy(column)
+        case (False, pa.ListArray()) if column.null_count == 0:
+            return _nested_set_from_arrow(column, entry)
         case (False, _):
             return ak.from_arrow(column)
+
+
+def regular_numpy_to_arrow(data: np.ndarray) -> pa.Array:
+    """Wrap a NumPy column as nested FixedSizeListArrays, one level per row axis.
+
+    The type matches what ``ak.to_arrow`` produces for a regular Awkward
+    Array, so columns exported either way concatenate. A contiguous buffer is
+    wrapped without copying.
+    """
+    values: pa.Array = pa.array(np.ascontiguousarray(data).reshape(-1))
+    for size in reversed(data.shape[1:]):
+        values = pa.FixedSizeListArray.from_arrays(
+            values,
+            type=pa.list_(pa.field("item", values.type, nullable=False), size),
+        )
+    return values
+
+
+def is_regular_arrow(column: pa.Array) -> bool:
+    """True if ``column`` is null-free nested fixed-size lists of numbers."""
+    match column:
+        case pa.FixedSizeListArray() if column.null_count == 0:
+            return is_regular_arrow(column.flatten())
+        case pa.FixedSizeListArray():
+            return False
+        case _:
+            return column.null_count == 0 and (
+                pa.types.is_integer(column.type)
+                or pa.types.is_floating(column.type)
+                or pa.types.is_boolean(column.type)
+            )
+
+
+def regular_arrow_to_numpy(column: pa.Array) -> np.ndarray:
+    """Restore a column of :func:`is_regular_arrow` as an N-D NumPy array.
+
+    ``flatten`` respects the offset of sliced arrays. Numeric values are
+    adopted without copying; such arrays are read-only.
+    """
+    shape = [len(column)]
+    while isinstance(column, pa.FixedSizeListArray):
+        shape.append(column.type.list_size)
+        column = column.flatten()
+    return column.to_numpy(zero_copy_only=False).reshape(shape)
 
 
 def _nested_set_to_arrow(data: np.ndarray, entry: ArrayEntryBase) -> pa.ListArray:

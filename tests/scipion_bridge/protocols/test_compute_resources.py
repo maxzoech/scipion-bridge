@@ -1,9 +1,20 @@
 """Declaring compute resources on protocols and assigning them to stages."""
 
+from numpy._core.multiarray import (
+    _set_madvise_hugepage,  # pyright: ignore[reportAttributeAccessIssue]
+)
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.core.environment.compute import ComputeAssignment, gpu_claim
+from scipion_bridge.backend.ray.backend import _ray_options
+from scipion_bridge.core.environment.compute import (
+    NUMPY_HUGEPAGE_ENV_VAR,
+    ComputeAssignment,
+    configure_numpy_hugepages,
+    gpu_claim,
+    gpu_memory_env,
+    numpy_hugepage_env,
+)
 from scipion_bridge.core.streaming.ir import IRMap
 from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import MapElementOp, MapOp, Source, lineage
@@ -244,3 +255,65 @@ def test_decorator_passes_min_vram():
             return Source("x")
 
     assert Small.compute_resources == B.ComputeResources(min_vram=6)
+
+
+def test_a_share_of_a_gpu_limits_preallocation():
+    assert gpu_memory_env(0.5) == {
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.450",
+        "TF_FORCE_GPU_ALLOW_GROWTH": "true",
+        "SCIPION_BRIDGE_GPU_FRACTION": "0.5",
+    }
+
+
+@pytest.mark.parametrize("num_gpus", [0, 1, 2])
+def test_no_or_whole_gpus_leave_preallocation_alone(num_gpus):
+    assert gpu_memory_env(num_gpus) == {}
+
+
+def test_numpy_hugepages_are_off_by_default(monkeypatch):
+    monkeypatch.delenv(NUMPY_HUGEPAGE_ENV_VAR, raising=False)
+
+    assert numpy_hugepage_env() == {"NUMPY_MADVISE_HUGEPAGE": "0"}
+
+
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_numpy_hugepages_set_by_the_user_are_passed_through(monkeypatch, value):
+    monkeypatch.setenv(NUMPY_HUGEPAGE_ENV_VAR, value)
+
+    assert numpy_hugepage_env() == {"NUMPY_MADVISE_HUGEPAGE": value}
+
+
+@pytest.mark.parametrize(("value", "hint"), [(None, False), ("0", False), ("1", True)])
+def test_configure_numpy_hugepages_switches_numpy_at_runtime(
+    monkeypatch,
+    numpy_hugepage_hint,
+    value,
+    hint,
+):
+    match value:
+        case None:
+            monkeypatch.delenv(NUMPY_HUGEPAGE_ENV_VAR, raising=False)
+        case _:
+            monkeypatch.setenv(NUMPY_HUGEPAGE_ENV_VAR, value)
+    _set_madvise_hugepage(not hint)
+
+    configure_numpy_hugepages()
+
+    # _set_madvise_hugepage returns the previous state of the hint.
+    assert _set_madvise_hugepage(hint) is hint
+
+
+def test_ray_options_turn_numpy_hugepages_off_next_to_the_other_variables(
+    monkeypatch,
+):
+    monkeypatch.delenv(NUMPY_HUGEPAGE_ENV_VAR, raising=False)
+
+    options = _ray_options(B.ComputeResources(gpus=0.5, cpus=2), 0.5)
+
+    assert options["runtime_env"]["env_vars"] == {
+        "NUMPY_MADVISE_HUGEPAGE": "0",
+        "SCIPION_BRIDGE_CPUS": "2",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.450",
+        "TF_FORCE_GPU_ALLOW_GROWTH": "true",
+        "SCIPION_BRIDGE_GPU_FRACTION": "0.5",
+    }
