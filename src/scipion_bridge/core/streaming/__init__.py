@@ -22,8 +22,11 @@ from .ir import (
     IRDemux,
     Keyed,
     Tagged,
+    WorkersFrom,
+    DEFAULT_GROUP_BY_WORKERS,
     clone_ir,
 )
+from .keyed import share_keys
 from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
 from .spill import PickleSpillStore, SpillStore, SpillStoreFactory, pickle_spill_store
 from .pipeline import Pipeline
@@ -53,6 +56,9 @@ __all__ = [
     "IRDemux",
     "Keyed",
     "Tagged",
+    "WorkersFrom",
+    "DEFAULT_GROUP_BY_WORKERS",
+    "share_keys",
     "clone_ir",
     "lower",
     "replace_node",

@@ -246,20 +246,34 @@ group_by
 
 .. code-block:: python
 
-    stream.group_by(key, pipeline, *, max_keys=None)
+    stream.group_by(key, pipeline, *, max_keys=None, workers=WorkersFrom.BACKEND)
 
-Routes every item by its key into a **sub-pipeline of its own**. Stateful
-operations inside the sub-pipeline (``chunk``, ``collect``,
-``combine_latest``) only see the items of one key. The sub-pipeline of a key
-is created when the first item with that key arrives.
+Routes every item by its key into the sub-pipeline. Stateful operations inside
+the sub-pipeline (``chunk``, ``collect``, ``combine_latest``) only see the
+items of one key.
+
+The keys share a few copies of the sub-pipeline, the **workers** (4 by
+default). A key is assigned to the next worker when its first item arrives.
+Within a worker, every stateful operation keeps a separate state per key, and
+the stateless ``map`` and ``map_element`` carry the key along. Each worker
+starts the stages (processes) of the sub-pipeline once, so a fan-out to many
+keys doesn't start processes for each key. A long-running protocol inside the
+sub-pipeline loads its process-scope resources (such as a model) once per
+worker, and the keys of the worker share them. Each map call still runs as a
+task of its own, so external programs and temporary files stay separate for
+each call. Keys of one worker share its queues, so a slow key delays the
+other keys of its worker.
 
 * ``key``: an index or field name (``item[key]``), or a function that computes
   the key. Keys must be hashable.
 * ``pipeline``: a function that receives the input stream of one key and
   returns the output stream. It may only consume that input, and every branch
   must lead to the stream it returns.
-* ``max_keys``: an upper bound on the number of keys. Every key allocates its
-  own stages, so a further key fails the pipeline.
+* ``max_keys``: an upper bound on the number of keys; a further key fails the
+  pipeline.
+* ``workers``: the number of workers the keys share. ``None`` gives every key a
+  sub-pipeline of its own. By default, the backend decides
+  (``RayBackend(group_by_workers=...)``, 4 unless set).
 
 The output carries ``Keyed(key, value)`` tuples. ``unkey()`` marks the end of
 the keyed region:

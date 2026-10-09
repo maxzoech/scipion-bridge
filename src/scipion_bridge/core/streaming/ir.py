@@ -6,8 +6,20 @@ The IR is a backend-agnostic DAG representation of the streaming pipeline.
 from __future__ import annotations
 
 import dataclasses
+import enum
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from ..environment.compute import ComputeAssignment
 from .sink_writer import SinkWriter
@@ -30,6 +42,20 @@ class Keyed(NamedTuple):
 
     key: Any
     value: Any
+
+
+class WorkersFrom(enum.Enum):
+    """Number of workers of a ``group_by`` that its backend decides."""
+
+    BACKEND = enum.auto()
+
+
+# Pipelines a group_by shares between its keys, unless set otherwise.
+DEFAULT_GROUP_BY_WORKERS = 4
+
+# Workers of a group_by: shared pipelines, None for one pipeline per key, or
+# the backend's setting.
+GroupByWorkers = Union[int, None, WorkersFrom]
 
 
 @dataclass(eq=False)
@@ -77,6 +103,10 @@ class IRAccumulate(IROp):
 
     Maintains internal state across incoming items and flushes,
     emitting zero or more output items downstream.
+
+    A pipeline shared by the keys of a ``group_by`` creates the state of a key
+    with its first item, and flushes only the keys it has seen. ``flush_fn``
+    must therefore emit nothing on the initial state.
     """
 
     accumulate_fn: Callable[[Any, Any], Tuple[Any, List[Any]]] = field(
@@ -103,24 +133,41 @@ class IRDemux(IROp):
 
     ``template`` is the exit node of the child pipeline, lowered on its own; it
     is not wired into the enclosing DAG. Its only source is ``source_name``.
-    The backend compiles a clone of it for every new key and emits the
-    results of each child as ``Keyed(key, result)``.
+    The backend runs clones of it, one per key or shared by several keys
+    (``workers``), and emits the results of every key as ``Keyed(key, result)``.
+
+    In a pipeline shared by several keys (see ``share_keys``), the items arrive
+    as ``Keyed(outer, item)`` (``outer_keyed``); the results are emitted as
+    ``Keyed(outer, Keyed(key, result))``.
     """
 
     key_fn: Callable[[Any], Any] = field(default=lambda item: item)
     template: Optional[IROp] = field(default=None, repr=False)
     source_name: str = ""
     max_keys: Optional[int] = None
+    workers: GroupByWorkers = WorkersFrom.BACKEND
+    outer_keyed: bool = False
     name: str = "group_by"
 
 
-def clone_ir(sinks: Sequence[IROp]) -> List[IROp]:
+def _no_changes(node: IROp) -> Mapping[str, Any]:
+    return {}
+
+
+def clone_ir(
+    sinks: Sequence[IROp],
+    changes: Callable[[IROp], Mapping[str, Any]] = _no_changes,
+) -> List[IROp]:
     """Copy the IR DAG reachable upstream from ``sinks``.
 
     Every node is copied with fresh edges, so the copy can be wired (e.g. to
     a new sink) and compiled without touching the original. Upstream edges
     keep their order, which preserves the input ports of multi-input stages.
     Functions, writers and other attributes are shared, not copied.
+
+    Args:
+        sinks: Exit nodes of the DAG to copy.
+        changes: Fields to replace in the copy of a node.
 
     Returns:
         The copies of ``sinks``, in the same order.
@@ -131,7 +178,12 @@ def clone_ir(sinks: Sequence[IROp]) -> List[IROp]:
         if node in copies:
             return copies[node]
 
-        node_copy = dataclasses.replace(node, upstream=[], downstream=[])
+        node_copy = dataclasses.replace(
+            node,
+            upstream=[],
+            downstream=[],
+            **changes(node),
+        )
         copies[node] = node_copy
         for up in node.upstream:
             copy(up).add_downstream(node_copy)

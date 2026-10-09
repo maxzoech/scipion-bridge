@@ -47,6 +47,8 @@ from scipion_bridge.core.streaming.backend import (
     StreamingBackendProvider,
 )
 from scipion_bridge.core.streaming.ir import (
+    DEFAULT_GROUP_BY_WORKERS,
+    GroupByWorkers,
     IROp,
     IRSource,
     IRMap,
@@ -55,8 +57,10 @@ from scipion_bridge.core.streaming.ir import (
     IRDemux,
     Keyed,
     Tagged,
+    WorkersFrom,
     clone_ir,
 )
+from scipion_bridge.core.streaming.keyed import share_keys
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
 from scipion_bridge.core.streaming.spill import SpillStoreFactory, pickle_spill_store
@@ -1109,7 +1113,7 @@ class RaySinkActor(_PipelinedStage):
 
 
 class _DemuxResultWriter:
-    """Sink of a ``group_by`` child, handing its results back to the router."""
+    """Sink of the ``group_by`` child of a key, handing its results back to the router."""
 
     def __init__(self, router: Any, key: Any) -> None:
         self.router = router
@@ -1117,6 +1121,23 @@ class _DemuxResultWriter:
 
     async def write(self, item: Any) -> None:
         await self.router.emit.remote(self.key, item)
+
+    async def finalize(self) -> None:
+        pass
+
+
+class _SharedResultWriter:
+    """Sink of a ``group_by`` child shared by several keys (see ``share_keys``).
+
+    Its results arrive as ``Keyed(key, result)``.
+    """
+
+    def __init__(self, router: Any) -> None:
+        self.router = router
+
+    async def write(self, item: Any) -> None:
+        assert isinstance(item, Keyed), "A shared group_by child lost the key."
+        await self.router.emit.remote(item.key, item.value)
 
     async def finalize(self) -> None:
         pass
@@ -1188,11 +1209,21 @@ class _Child:
 
 @ray.remote
 class RayDemuxActor(_PipelinedStage):
-    """Router of a ``group_by`` (IRDemux) into a child pipeline per key.
+    """Router of a ``group_by`` (IRDemux) into child pipelines.
 
-    The child pipeline of a key is compiled from a clone of the template when
-    the first item of the key arrives. Its sink hands every result back to
-    ``emit``, which forwards it as ``Keyed(key, result)``:
+    With ``workers=None``, every key has a child pipeline of its own, compiled
+    from a clone of the template when the first item of the key arrives. With
+    ``workers=n``, the keys share up to ``n`` children compiled from
+    ``share_keys(template)``: every new key is assigned to the next child in
+    turn, a child is started with its first key, and the items carry their
+    key through it as ``Keyed(key, item)``.
+
+    Nested in a shared child (``outer_keyed``), the items arrive as
+    ``Keyed(outer, item)``; the router keys its children by ``(outer, key)``
+    and emits ``Keyed(outer, Keyed(key, result))``.
+
+    The sink of a child hands every result back to ``emit``, which forwards it
+    as ``Keyed(key, result)``:
 
     - The router does not wait for a child to start: the items of the key
       wait in the queue of the child meanwhile, and the items of other keys
@@ -1218,6 +1249,9 @@ class RayDemuxActor(_PipelinedStage):
         template: IROp,
         source_name: str,
         max_keys: Optional[int],
+        workers: Optional[int],
+        outer_keyed: bool,
+        group_by_workers: Optional[int],
         prefix: str,
         config: _StageConfig,
         spill: Optional[SpillPolicy],
@@ -1225,6 +1259,13 @@ class RayDemuxActor(_PipelinedStage):
         parameters: Mapping[str, Any],
         gpu_memory: Optional[Tuple[float, ...]] = None,
     ):
+        """
+        Args:
+            workers: Children shared by the keys; ``None`` starts a child per
+                key.
+            outer_keyed: Whether the items arrive as ``Keyed(outer, item)``.
+            group_by_workers: Setting of the backend, passed to the children.
+        """
         from .container import configure_ray_env
 
         configure_ray_env(parameters=parameters)
@@ -1234,17 +1275,34 @@ class RayDemuxActor(_PipelinedStage):
         self.template = template
         self.source_name = source_name
         self.max_keys = max_keys
+        self.workers = workers
+        self.outer_keyed = outer_keyed
+        self.group_by_workers = group_by_workers
         self.prefix = prefix
         self.config = config
         self.parameters = parameters
+        # Children by key, or by index of a shared child.
         self._children: Dict[Any, _Child] = {}
+        # Child of every key.
+        self._keys: Dict[Any, _Child] = {}
 
     async def process(self, item: Any, port: int) -> List[Any]:
-        key = await asyncio.to_thread(self.key_fn, item)
-        if key not in self._children:
-            self._children[key] = self._start(key)
+        match self.outer_keyed:
+            case True:
+                outer, value = item
+                key = (outer, await asyncio.to_thread(self.key_fn, value))
+            case False:
+                value = item
+                key = await asyncio.to_thread(self.key_fn, value)
 
-        await self._children[key].send(item)
+        if key not in self._keys:
+            self._keys[key] = self._assign(key)
+
+        match self.workers:
+            case None:
+                await self._keys[key].send(value)
+            case _:
+                await self._keys[key].send(Keyed(key=key, value=value))
         return []
 
     async def on_flush(self) -> List[Any]:
@@ -1253,7 +1311,13 @@ class RayDemuxActor(_PipelinedStage):
 
     async def emit(self, key: Any, item: Any) -> None:
         """Forward a result of the child pipeline of ``key``."""
-        await self._outbox.put((Keyed(key=key, value=item), []))
+        match self.outer_keyed:
+            case True:
+                outer, inner = key
+                keyed = Keyed(key=outer, value=Keyed(key=inner, value=item))
+            case False:
+                keyed = Keyed(key=key, value=item)
+        await self._outbox.put((keyed, []))
 
     async def children_stats(self) -> Dict[str, StageStats]:
         """Return the execution metrics of every stage of the started children."""
@@ -1279,30 +1343,50 @@ class RayDemuxActor(_PipelinedStage):
 
     async def _record_start(
         self,
-        key: Any,
+        child: str,
         start: Coroutine[Any, Any, RayCompiledPipeline],
     ) -> RayCompiledPipeline:
-        """Start the child of ``key``, recording how long it takes."""
+        """Start a child, recording how long it takes."""
         with self._recorder.span(
             "start_child",
             "group_by",
             level=logging.INFO,
             overlapping=True,
-            key=key,
+            child=child,
         ):
             return await start
 
-    def _start(self, key: Any) -> _Child:
-        if self.max_keys is not None and len(self._children) >= self.max_keys:
+    def _assign(self, key: Any) -> _Child:
+        """The child of a new key, started if necessary."""
+        if self.max_keys is not None and len(self._keys) >= self.max_keys:
             raise ValueError(
                 f"group_by received key {key!r} after max_keys={self.max_keys} "
-                f"keys: {list(self._children)}.",
+                f"keys: {list(self._keys)}.",
             )
 
-        (exit_,) = clone_ir([self.template])
-        sink = IRSink(
-            writer=_DemuxResultWriter(ray.get_runtime_context().current_actor, key),
-        )
+        router = ray.get_runtime_context().current_actor
+        match self.workers:
+            case None:
+                (exit_,) = clone_ir([self.template])
+                self._children[key] = self._start(
+                    exit_,
+                    _DemuxResultWriter(router, key),
+                    f"{key}",
+                )
+                return self._children[key]
+            case workers:
+                worker = len(self._keys) % workers
+                if worker not in self._children:
+                    self._children[worker] = self._start(
+                        share_keys(self.template),
+                        _SharedResultWriter(router),
+                        f"worker {worker}",
+                    )
+                return self._children[worker]
+
+    def _start(self, exit_: IROp, writer: SinkWriter, child: str) -> _Child:
+        """Start the child pipeline ending in ``exit_``, labelled ``child``."""
+        sink = IRSink(writer=writer)
         exit_.add_downstream(sink)
         spill = self.config.spill
         backend = RayBackend(
@@ -1315,14 +1399,15 @@ class RayDemuxActor(_PipelinedStage):
             parameters=self.parameters,
             gpu_memory=self.gpu_memory,
             profile=self.config.profile,
+            group_by_workers=self.group_by_workers,
         )
         start = backend.compile_async(
             [sink],
-            name=f"{self.prefix}group_by[{key}]:",
+            name=f"{self.prefix}group_by[{child}]:",
             abort_targets=self._abort_targets,
         )
         return _Child(
-            self._record_start(key, start),
+            self._record_start(child, start),
             self.source_name,
             self._set_error,
             self.config.buffer_size,
@@ -1490,6 +1575,7 @@ class RayBackend(StreamingBackendProvider):
         spill_store: Optional[SpillStoreFactory] = None,
         profile: Union[None, bool, str, Path, ProfileConfig] = None,
         profile_log_level: int = logging.INFO,
+        group_by_workers: Optional[int] = DEFAULT_GROUP_BY_WORKERS,
     ):
         """
         Args:
@@ -1526,6 +1612,10 @@ class RayBackend(StreamingBackendProvider):
                 (``group_by`` children receive the one of their parent).
             profile_log_level: Level of the profiling log; the events of
                 every item are logged at DEBUG, the others at INFO.
+            group_by_workers: Child pipelines a ``group_by`` shares between
+                its keys, unless the ``group_by`` sets ``workers`` itself.
+                Every child starts the stages (processes) of the pipeline;
+                ``None`` starts a child per key.
         """
         if queue_size <= 0:
             raise ValueError(f"Queue size must be positive, got {queue_size}.")
@@ -1533,6 +1623,7 @@ class RayBackend(StreamingBackendProvider):
             "max_in_flight": max_in_flight,
             "buffer_size": buffer_size,
             "spill_threshold": spill_threshold,
+            "group_by_workers": group_by_workers,
         }.items():
             if value is not None and value <= 0:
                 raise ValueError(f"{option} must be positive, got {value}.")
@@ -1550,6 +1641,7 @@ class RayBackend(StreamingBackendProvider):
         self._gpu_memory = None if gpu_memory is None else tuple(gpu_memory)
         self.profile = Path(profile) if isinstance(profile, str) else profile
         self.profile_log_level = profile_log_level
+        self.group_by_workers = group_by_workers
         # The driver imported NumPy before; the workers get the environment.
         configure_numpy_hugepages()
 
@@ -1820,6 +1912,8 @@ class RayBackend(StreamingBackendProvider):
                 template=template,
                 source_name=template_source,
                 max_keys=max_keys,
+                workers=workers,
+                outer_keyed=outer_keyed,
             ):
                 assert template is not None, "IRDemux has no template."
                 return RayDemuxActor, {
@@ -1827,6 +1921,9 @@ class RayBackend(StreamingBackendProvider):
                     "template": template,
                     "source_name": template_source,
                     "max_keys": max_keys,
+                    "workers": self._group_by_workers(workers),
+                    "outer_keyed": outer_keyed,
+                    "group_by_workers": self.group_by_workers,
                     "prefix": name,
                     "config": config,
                     "spill": spill,
@@ -1842,6 +1939,14 @@ class RayBackend(StreamingBackendProvider):
                 raise NotImplementedError(
                     f"Unsupported IR op type for Ray backend: {type(node).__name__}",
                 )
+
+    def _group_by_workers(self, workers: GroupByWorkers) -> Optional[int]:
+        """Children of a ``group_by`` setting ``workers``."""
+        match workers:
+            case WorkersFrom.BACKEND:
+                return self.group_by_workers
+            case _:
+                return workers
 
     def _claim(self, compute: Optional[ComputeAssignment]) -> Dict[str, Any]:
         """Ray options of the calls of a map, with the GPU claim resolved.

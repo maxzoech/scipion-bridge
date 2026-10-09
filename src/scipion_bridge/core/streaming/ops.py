@@ -23,7 +23,16 @@ from ..struct import Set, concat
 from .node import Node, LoweringContext
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
-from .ir import IROp, IRSource, IRMap, IRAccumulate, IRDemux, Tagged
+from .ir import (
+    GroupByWorkers,
+    IROp,
+    IRSource,
+    IRMap,
+    IRAccumulate,
+    IRDemux,
+    Tagged,
+    WorkersFrom,
+)
 from .element_mapper import (
     ElementMapConfig,
     ElementMapper,
@@ -198,6 +207,7 @@ class Op(Node):
         pipeline: Callable[[Op], Op],
         *,
         max_keys: Optional[int] = None,
+        workers: GroupByWorkers = WorkersFrom.BACKEND,
     ) -> KeyedOp[Any]: ...
 
     @overload
@@ -207,6 +217,7 @@ class Op(Node):
         pipeline: Callable[[Op], Op],
         *,
         max_keys: Optional[int] = None,
+        workers: GroupByWorkers = WorkersFrom.BACKEND,
     ) -> KeyedOp[K]: ...
 
     def group_by(
@@ -215,14 +226,18 @@ class Op(Node):
         pipeline: Callable[[Op], Op],
         *,
         max_keys: Optional[int] = None,
+        workers: GroupByWorkers = WorkersFrom.BACKEND,
     ) -> KeyedOp[Any]:
         """Run ``pipeline`` separately on the items of every key (demux).
 
-        Every item is routed by its key into a pipeline of its own, so that
-        stateful operations (``chunk``, ``collect``, ``combine_latest``) only
-        see the items of one key. The pipeline of a key is created when its
-        first item arrives. Results are emitted as ``Keyed(key, result)``;
-        call ``unkey()`` to continue with the merged stream::
+        Every item is routed by its key into the pipeline, so that stateful
+        operations (``chunk``, ``collect``, ``combine_latest``) only see the
+        items of one key. The keys share a few copies of the pipeline
+        (``workers``): every key is assigned to one when its first item
+        arrives, in turn, and the stages of a copy keep a state per key. A
+        slow key delays the other keys of its copy. Results are emitted as
+        ``Keyed(key, result)``; call ``unkey()`` to continue with the merged
+        stream::
 
             classes.flatten()
                 .group_by(lambda cls: cls.class_id, pipeline=refine)
@@ -237,10 +252,18 @@ class Op(Node):
                 It may only consume that input, and every branch must lead to
                 the stream it returns.
             max_keys: Maximum number of keys; a further key fails the
-                pipeline. Every key allocates the stages of its own pipeline.
+                pipeline.
+            workers: Number of copies of the pipeline the keys share, each
+                with stages (processes) of its own. ``None`` gives every key
+                a copy of its own. Defaults to the backend's setting.
         """
         if max_keys is not None and max_keys <= 0:
             raise ValueError(f"max_keys must be positive, got {max_keys}.")
+        match workers:
+            case int() if workers <= 0:
+                raise ValueError(f"workers must be positive, got {workers}.")
+            case _:
+                pass
 
         entry = Source(_GROUP_INPUT)
         exit_ = pipeline(entry)
@@ -258,7 +281,9 @@ class Op(Node):
                 f"{[type(node).__name__ for node in dangling]}.",
             )
 
-        return self.op(KeyedOp(_make_key_extractor(key), entry, exit_, max_keys))
+        return self.op(
+            KeyedOp(_make_key_extractor(key), entry, exit_, max_keys, workers),
+        )
 
     def write_to(self, writer: SinkWriter) -> Sink:
         """Attach a terminal SinkWriter."""
@@ -639,12 +664,14 @@ class KeyedOp(Op, Generic[K]):
         entry: Source,
         exit_: Op,
         max_keys: Optional[int],
+        workers: GroupByWorkers,
     ) -> None:
         super().__init__(upstream=None)
         self.key_fn = key_fn
         self.entry = entry
         self.exit_ = exit_
         self.max_keys = max_keys
+        self.workers = workers
 
     def unkey(self) -> Op:
         """End the keyed region; the stream carries ``Keyed(key, result)`` items."""
@@ -664,6 +691,7 @@ class KeyedOp(Op, Generic[K]):
             template=template,
             source_name=self.entry.name,
             max_keys=self.max_keys,
+            workers=self.workers,
             name="group_by",
         )
 

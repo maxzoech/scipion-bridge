@@ -13,6 +13,7 @@ Submodules
    /autoapi/scipion_bridge/core/streaming/backend/index
    /autoapi/scipion_bridge/core/streaming/element_mapper/index
    /autoapi/scipion_bridge/core/streaming/ir/index
+   /autoapi/scipion_bridge/core/streaming/keyed/index
    /autoapi/scipion_bridge/core/streaming/node/index
    /autoapi/scipion_bridge/core/streaming/ops/index
    /autoapi/scipion_bridge/core/streaming/pipeline/index
@@ -27,6 +28,7 @@ Attributes
 .. autoapisummary::
 
    scipion_bridge.core.streaming.FLUSH
+   scipion_bridge.core.streaming.DEFAULT_GROUP_BY_WORKERS
    scipion_bridge.core.streaming.SpillStoreFactory
 
 
@@ -59,6 +61,7 @@ Classes
    scipion_bridge.core.streaming.IRDemux
    scipion_bridge.core.streaming.Keyed
    scipion_bridge.core.streaming.Tagged
+   scipion_bridge.core.streaming.WorkersFrom
    scipion_bridge.core.streaming.CompiledPipeline
    scipion_bridge.core.streaming.StageStats
    scipion_bridge.core.streaming.StreamingBackendProvider
@@ -75,6 +78,7 @@ Functions
    scipion_bridge.core.streaming.lower
    scipion_bridge.core.streaming.replace_node
    scipion_bridge.core.streaming.clone_ir
+   scipion_bridge.core.streaming.share_keys
    scipion_bridge.core.streaming.pickle_spill_store
 
 
@@ -279,16 +283,19 @@ Package Contents
 
 
 
-   .. py:method:: group_by(key: int | str, pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None) -> KeyedOp[Any]
-                  group_by(key: Callable[[Any], K], pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None) -> KeyedOp[K]
+   .. py:method:: group_by(key: int | str, pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None, workers: scipion_bridge.core.streaming.ir.GroupByWorkers = WorkersFrom.BACKEND) -> KeyedOp[Any]
+                  group_by(key: Callable[[Any], K], pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None, workers: scipion_bridge.core.streaming.ir.GroupByWorkers = WorkersFrom.BACKEND) -> KeyedOp[K]
 
       Run ``pipeline`` separately on the items of every key (demux).
 
-      Every item is routed by its key into a pipeline of its own, so that
-      stateful operations (``chunk``, ``collect``, ``combine_latest``) only
-      see the items of one key. The pipeline of a key is created when its
-      first item arrives. Results are emitted as ``Keyed(key, result)``;
-      call ``unkey()`` to continue with the merged stream::
+      Every item is routed by its key into the pipeline, so that stateful
+      operations (``chunk``, ``collect``, ``combine_latest``) only see the
+      items of one key. The keys share a few copies of the pipeline
+      (``workers``): every key is assigned to one when its first item
+      arrives, in turn, and the stages of a copy keep a state per key. A
+      slow key delays the other keys of its copy. Results are emitted as
+      ``Keyed(key, result)``; call ``unkey()`` to continue with the merged
+      stream::
 
           classes.flatten()
               .group_by(lambda cls: cls.class_id, pipeline=refine)
@@ -302,7 +309,10 @@ Package Contents
                        It may only consume that input, and every branch must lead to
                        the stream it returns.
       :param max_keys: Maximum number of keys; a further key fails the
-                       pipeline. Every key allocates the stages of its own pipeline.
+                       pipeline.
+      :param workers: Number of copies of the pipeline the keys share, each
+                      with stages (processes) of its own. ``None`` gives every key
+                      a copy of its own. Defaults to the backend's setting.
 
 
 
@@ -467,7 +477,7 @@ Package Contents
 
 
 
-.. py:class:: KeyedOp(key_fn: Callable[[Any], K], entry: Source, exit_: Op, max_keys: Optional[int])
+.. py:class:: KeyedOp(key_fn: Callable[[Any], K], entry: Source, exit_: Op, max_keys: Optional[int], workers: scipion_bridge.core.streaming.ir.GroupByWorkers)
 
    Bases: :py:obj:`Op`, :py:obj:`Generic`\ [\ :py:obj:`K`\ ]
 
@@ -488,6 +498,9 @@ Package Contents
 
 
    .. py:attribute:: max_keys
+
+
+   .. py:attribute:: workers
 
 
    .. py:method:: unkey() -> Op
@@ -687,6 +700,10 @@ Package Contents
    Maintains internal state across incoming items and flushes,
    emitting zero or more output items downstream.
 
+   A pipeline shared by the keys of a ``group_by`` creates the state of a key
+   with its first item, and flushes only the keys it has seen. ``flush_fn``
+   must therefore emit nothing on the initial state.
+
 
    .. py:attribute:: accumulate_fn
       :type:  Callable[[Any, Any], Tuple[Any, List[Any]]]
@@ -737,8 +754,12 @@ Package Contents
 
    ``template`` is the exit node of the child pipeline, lowered on its own; it
    is not wired into the enclosing DAG. Its only source is ``source_name``.
-   The backend compiles a clone of it for every new key and emits the
-   results of each child as ``Keyed(key, result)``.
+   The backend runs clones of it, one per key or shared by several keys
+   (``workers``), and emits the results of every key as ``Keyed(key, result)``.
+
+   In a pipeline shared by several keys (see ``share_keys``), the items arrive
+   as ``Keyed(outer, item)`` (``outer_keyed``); the results are emitted as
+   ``Keyed(outer, Keyed(key, result))``.
 
 
    .. py:attribute:: key_fn
@@ -760,6 +781,16 @@ Package Contents
    .. py:attribute:: max_keys
       :type:  Optional[int]
       :value: None
+
+
+
+   .. py:attribute:: workers
+      :type:  GroupByWorkers
+
+
+   .. py:attribute:: outer_keyed
+      :type:  bool
+      :value: False
 
 
 
@@ -801,7 +832,22 @@ Package Contents
       :type:  Any
 
 
-.. py:function:: clone_ir(sinks: Sequence[IROp]) -> List[IROp]
+.. py:class:: WorkersFrom(*args, **kwds)
+
+   Bases: :py:obj:`enum.Enum`
+
+
+   Number of workers of a ``group_by`` that its backend decides.
+
+
+   .. py:attribute:: BACKEND
+
+
+.. py:data:: DEFAULT_GROUP_BY_WORKERS
+   :value: 4
+
+
+.. py:function:: clone_ir(sinks: Sequence[IROp], changes: Callable[[IROp], Mapping[str, Any]] = _no_changes) -> List[IROp]
 
    Copy the IR DAG reachable upstream from ``sinks``.
 
@@ -810,7 +856,19 @@ Package Contents
    keep their order, which preserves the input ports of multi-input stages.
    Functions, writers and other attributes are shared, not copied.
 
+   :param sinks: Exit nodes of the DAG to copy.
+   :param changes: Fields to replace in the copy of a node.
+
    :returns: The copies of ``sinks``, in the same order.
+
+
+.. py:function:: share_keys(exit_: scipion_bridge.core.streaming.ir.IROp) -> scipion_bridge.core.streaming.ir.IROp
+
+   Copy of a ``group_by`` pipeline carrying ``Keyed`` items of many keys.
+
+   :param exit_: Exit node of the pipeline (the template of an ``IRDemux``).
+
+   :returns: The exit node of the copy.
 
 
 .. py:class:: CompiledPipeline

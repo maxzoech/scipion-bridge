@@ -210,16 +210,26 @@ Module Contents
 
 
 
-.. py:class:: RayDemuxActor(key_fn: Callable[[Any], Any], template: scipion_bridge.core.streaming.ir.IROp, source_name: str, max_keys: Optional[int], prefix: str, config: _StageConfig, spill: Optional[scipion_bridge.backend.ray.mailbox.SpillPolicy], label: str, parameters: Mapping[str, Any], gpu_memory: Optional[Tuple[float, Ellipsis]] = None)
+.. py:class:: RayDemuxActor(key_fn: Callable[[Any], Any], template: scipion_bridge.core.streaming.ir.IROp, source_name: str, max_keys: Optional[int], workers: Optional[int], outer_keyed: bool, group_by_workers: Optional[int], prefix: str, config: _StageConfig, spill: Optional[scipion_bridge.backend.ray.mailbox.SpillPolicy], label: str, parameters: Mapping[str, Any], gpu_memory: Optional[Tuple[float, Ellipsis]] = None)
 
    Bases: :py:obj:`_PipelinedStage`
 
 
-   Router of a ``group_by`` (IRDemux) into a child pipeline per key.
+   Router of a ``group_by`` (IRDemux) into child pipelines.
 
-   The child pipeline of a key is compiled from a clone of the template when
-   the first item of the key arrives. Its sink hands every result back to
-   ``emit``, which forwards it as ``Keyed(key, result)``:
+   With ``workers=None``, every key has a child pipeline of its own, compiled
+   from a clone of the template when the first item of the key arrives. With
+   ``workers=n``, the keys share up to ``n`` children compiled from
+   ``share_keys(template)``: every new key is assigned to the next child in
+   turn, a child is started with its first key, and the items carry their
+   key through it as ``Keyed(key, item)``.
+
+   Nested in a shared child (``outer_keyed``), the items arrive as
+   ``Keyed(outer, item)``; the router keys its children by ``(outer, key)``
+   and emits ``Keyed(outer, Keyed(key, result))``.
+
+   The sink of a child hands every result back to ``emit``, which forwards it
+   as ``Keyed(key, result)``:
 
    - The router does not wait for a child to start: the items of the key
      wait in the queue of the child meanwhile, and the items of other keys
@@ -254,6 +264,15 @@ Module Contents
 
 
    .. py:attribute:: max_keys
+
+
+   .. py:attribute:: workers
+
+
+   .. py:attribute:: outer_keyed
+
+
+   .. py:attribute:: group_by_workers
 
 
    .. py:attribute:: prefix
@@ -365,7 +384,7 @@ Module Contents
 
 
 
-.. py:class:: RayBackend(init_ray: bool = True, queue_size: int = 2, parameters: Optional[Mapping[str, Any]] = None, gpu_memory: Optional[Sequence[float]] = None, max_in_flight: Optional[int] = None, buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE, spill_threshold: Optional[int] = DEFAULT_SPILL_THRESHOLD, spill_store: Optional[scipion_bridge.core.streaming.spill.SpillStoreFactory] = None, profile: Union[None, bool, str, pathlib.Path, scipion_bridge.backend.ray.profiling.ProfileConfig] = None, profile_log_level: int = logging.INFO)
+.. py:class:: RayBackend(init_ray: bool = True, queue_size: int = 2, parameters: Optional[Mapping[str, Any]] = None, gpu_memory: Optional[Sequence[float]] = None, max_in_flight: Optional[int] = None, buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE, spill_threshold: Optional[int] = DEFAULT_SPILL_THRESHOLD, spill_store: Optional[scipion_bridge.core.streaming.spill.SpillStoreFactory] = None, profile: Union[None, bool, str, pathlib.Path, scipion_bridge.backend.ray.profiling.ProfileConfig] = None, profile_log_level: int = logging.INFO, group_by_workers: Optional[int] = DEFAULT_GROUP_BY_WORKERS)
 
    Bases: :py:obj:`scipion_bridge.core.streaming.backend.StreamingBackendProvider`
 
@@ -406,6 +425,11 @@ Module Contents
 
    .. py:attribute:: profile_log_level
       :value: 20
+
+
+
+   .. py:attribute:: group_by_workers
+      :value: 4
 
 
 

@@ -11,11 +11,13 @@ import ray
 import scipion_bridge as B
 from scipion_bridge.backend.ray.backend import RayBackend
 from scipion_bridge.core.streaming.ir import (
+    DEFAULT_GROUP_BY_WORKERS,
     IRAccumulate,
     IRDemux,
     IRMap,
     IRSource,
     Keyed,
+    WorkersFrom,
 )
 from scipion_bridge.core.streaming.node import lower
 from scipion_bridge.core.streaming.ops import KeyedOp, Source, _make_key_extractor
@@ -153,6 +155,35 @@ def test_non_positive_max_keys_raises():
         Source("x").group_by(0, _chunk_ids, max_keys=0)
 
 
+def test_non_positive_workers_raises():
+    with pytest.raises(ValueError, match="workers must be positive"):
+        Source("x").group_by(0, _chunk_ids, workers=0)
+
+
+def test_non_positive_group_by_workers_raises():
+    with pytest.raises(ValueError, match="group_by_workers must be positive"):
+        RayBackend(init_ray=False, group_by_workers=0)
+
+
+@pytest.mark.parametrize("workers", [None, 3])
+def test_workers_are_lowered_to_the_demux(workers):
+    sink_node = Source("x").group_by(0, _chunk_ids, workers=workers).unkey()
+
+    (sink,) = lower([sink_node.sink(print)])
+
+    (demux,) = sink.upstream
+    assert isinstance(demux, IRDemux)
+    assert demux.workers == workers
+
+
+def test_workers_default_to_the_backend():
+    (sink,) = lower([Source("x").group_by(0, _chunk_ids).unkey().sink(print)])
+
+    (demux,) = sink.upstream
+    assert isinstance(demux, IRDemux)
+    assert demux.workers is WorkersFrom.BACKEND
+
+
 # -- Key extractor -----------------------------------------------------------
 
 
@@ -199,7 +230,9 @@ def test_chunks_items_per_key():
 
 
 def test_children_are_created_lazily_per_key():
-    pipeline = _compile(Source("x").group_by(0, _chunk_ids).unkey().sink(print))
+    pipeline = _compile(
+        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(print),
+    )
 
     try:
         assert _child_labels(pipeline) == []
@@ -223,7 +256,9 @@ def test_children_are_created_lazily_per_key():
 
 
 def test_stats_count_items_of_children():
-    pipeline = _compile(Source("x").group_by(0, _chunk_ids).unkey().sink(print))
+    pipeline = _compile(
+        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(print),
+    )
 
     try:
         for key in ["a", "a", "b"]:
@@ -375,7 +410,9 @@ def _named_child_actors(key):
 
 
 def test_close_terminates_children():
-    pipeline = _compile(Source("x").group_by(0, _chunk_ids).unkey().sink(print))
+    pipeline = _compile(
+        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(print),
+    )
     pipeline.send("x", ("close-test", _make_set([1])))
     pipeline.flush()
     # Source, chunk and sink; the maps run as tasks of their upstream stage.
@@ -389,7 +426,16 @@ def test_close_terminates_children():
     assert _named_child_actors("close-test") == []
 
 
-def test_tuple_keys_and_nested_group_by():
+@pytest.mark.parametrize(
+    ("group_by_workers", "chunk_label"),
+    [
+        (None, "group_by[a]:group_by[0]:2:chunk(2)"),
+        # The outer key "a" shares the first worker; its inner keys 0 and 1
+        # are assigned to the workers of the nested group_by in turn.
+        (2, "group_by[worker 0]:group_by[worker 1]:2:chunk(2)"),
+    ],
+)
+def test_tuple_keys_and_nested_group_by(group_by_workers, chunk_label):
     collector = Collector.remote()
 
     def by_parity(stream):
@@ -400,6 +446,7 @@ def test_tuple_keys_and_nested_group_by():
         .group_by(lambda item: item[0][0], by_parity)
         .unkey()
         .write_to(_collecting_writer(collector)),
+        group_by_workers=group_by_workers,
     )
 
     try:
@@ -412,7 +459,48 @@ def test_tuple_keys_and_nested_group_by():
             Keyed("a", Keyed(0, [0, 2])),
             Keyed("a", Keyed(1, [1, 3])),
         ]
-        assert "group_by[a]:group_by[0]:2:chunk(2)" in pipeline.stats()
+        assert chunk_label in pipeline.stats()
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize(
+    ("op_workers", "backend_workers", "children"),
+    [
+        # 6 keys share the default of 4 workers.
+        (WorkersFrom.BACKEND, DEFAULT_GROUP_BY_WORKERS, 4),
+        (WorkersFrom.BACKEND, 2, 2),
+        # The group_by overrides the backend.
+        (3, 2, 3),
+        (None, 2, 6),
+    ],
+)
+def test_keys_share_workers(op_workers, backend_workers, children):
+    collector = Collector.remote()
+    existing = set(ray.util.list_named_actors())
+    pipeline = _compile(
+        Source("x")
+        .group_by(0, _chunk_ids, workers=op_workers)
+        .unkey()
+        .write_to(_collecting_writer(collector)),
+        group_by_workers=backend_workers,
+    )
+
+    try:
+        for index in range(18):
+            pipeline.send("x", (f"key-{index % 6}", _make_set([index])))
+        pipeline.flush()
+
+        # The items of every key are chunked on their own.
+        assert _by_key(ray.get(collector.get.remote())) == {
+            f"key-{key}": [[key, key + 6], [key + 12]] for key in range(6)
+        }
+        labels = {label.split(":", 1)[0] for label in _child_labels(pipeline)}
+        assert len(labels) == children
+        created = set(ray.util.list_named_actors()) - existing
+        # Source, group_by and sink of the pipeline, and source, chunk and sink
+        # of every child; the maps run as tasks.
+        assert len(created) == 3 + 3 * children
     finally:
         pipeline.close()
 

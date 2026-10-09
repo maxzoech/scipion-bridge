@@ -11,6 +11,15 @@ scipion_bridge.core.streaming.ir
 
 
 
+Attributes
+----------
+
+.. autoapisummary::
+
+   scipion_bridge.core.streaming.ir.DEFAULT_GROUP_BY_WORKERS
+   scipion_bridge.core.streaming.ir.GroupByWorkers
+
+
 Classes
 -------
 
@@ -18,6 +27,7 @@ Classes
 
    scipion_bridge.core.streaming.ir.Tagged
    scipion_bridge.core.streaming.ir.Keyed
+   scipion_bridge.core.streaming.ir.WorkersFrom
    scipion_bridge.core.streaming.ir.IROp
    scipion_bridge.core.streaming.ir.IRSource
    scipion_bridge.core.streaming.ir.IRMap
@@ -68,6 +78,23 @@ Module Contents
    .. py:attribute:: value
       :type:  Any
 
+
+.. py:class:: WorkersFrom(*args, **kwds)
+
+   Bases: :py:obj:`enum.Enum`
+
+
+   Number of workers of a ``group_by`` that its backend decides.
+
+
+   .. py:attribute:: BACKEND
+
+
+.. py:data:: DEFAULT_GROUP_BY_WORKERS
+   :value: 4
+
+
+.. py:data:: GroupByWorkers
 
 .. py:class:: IROp
 
@@ -140,6 +167,10 @@ Module Contents
    Maintains internal state across incoming items and flushes,
    emitting zero or more output items downstream.
 
+   A pipeline shared by the keys of a ``group_by`` creates the state of a key
+   with its first item, and flushes only the keys it has seen. ``flush_fn``
+   must therefore emit nothing on the initial state.
+
 
    .. py:attribute:: accumulate_fn
       :type:  Callable[[Any, Any], Tuple[Any, List[Any]]]
@@ -190,8 +221,12 @@ Module Contents
 
    ``template`` is the exit node of the child pipeline, lowered on its own; it
    is not wired into the enclosing DAG. Its only source is ``source_name``.
-   The backend compiles a clone of it for every new key and emits the
-   results of each child as ``Keyed(key, result)``.
+   The backend runs clones of it, one per key or shared by several keys
+   (``workers``), and emits the results of every key as ``Keyed(key, result)``.
+
+   In a pipeline shared by several keys (see ``share_keys``), the items arrive
+   as ``Keyed(outer, item)`` (``outer_keyed``); the results are emitted as
+   ``Keyed(outer, Keyed(key, result))``.
 
 
    .. py:attribute:: key_fn
@@ -216,13 +251,23 @@ Module Contents
 
 
 
+   .. py:attribute:: workers
+      :type:  GroupByWorkers
+
+
+   .. py:attribute:: outer_keyed
+      :type:  bool
+      :value: False
+
+
+
    .. py:attribute:: name
       :type:  str
       :value: 'group_by'
 
 
 
-.. py:function:: clone_ir(sinks: Sequence[IROp]) -> List[IROp]
+.. py:function:: clone_ir(sinks: Sequence[IROp], changes: Callable[[IROp], Mapping[str, Any]] = _no_changes) -> List[IROp]
 
    Copy the IR DAG reachable upstream from ``sinks``.
 
@@ -230,6 +275,9 @@ Module Contents
    a new sink) and compiled without touching the original. Upstream edges
    keep their order, which preserves the input ports of multi-input stages.
    Functions, writers and other attributes are shared, not copied.
+
+   :param sinks: Exit nodes of the DAG to copy.
+   :param changes: Fields to replace in the copy of a node.
 
    :returns: The copies of ``sinks``, in the same order.
 

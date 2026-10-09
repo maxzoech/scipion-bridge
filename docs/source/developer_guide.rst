@@ -542,11 +542,19 @@ The IR primitives
    A terminal node. It awaits ``writer.write(item)`` for every item and
    ``writer.finalize()`` on FLUSH.
 
-``IRDemux(key_fn, template, source_name, max_keys)``
+``IRDemux(key_fn, template, source_name, max_keys, workers, outer_keyed)``
    Per-key routing for ``group_by``. ``template`` is the exit node of a
-   separately lowered child graph whose only source is ``source_name``. For
-   every new key, the backend compiles a copy of the template (``clone_ir``) and
-   emits each child's results as ``Keyed(key, result)``.
+   separately lowered child graph whose only source is ``source_name``. With
+   ``workers=None``, the backend compiles a copy of the template
+   (``clone_ir``) for every new key. With ``workers=n``, the keys share up to
+   ``n`` copies made by ``share_keys``. Their items carry the key as
+   ``Keyed(key, item)``, maps apply their function to the item, and
+   accumulators keep a state per key, created with the key's first item. An
+   accumulator's ``flush_fn`` must therefore emit nothing on its initial
+   state. ``WorkersFrom.BACKEND`` (the default) uses the backend's setting.
+   Either way, the results are emitted as ``Keyed(key, result)``. A
+   ``group_by`` nested in a shared copy has ``outer_keyed`` set: it receives
+   ``Keyed(outer, item)`` and emits ``Keyed(outer, Keyed(key, result))``.
 
 Execution contract
 ^^^^^^^^^^^^^^^^^^

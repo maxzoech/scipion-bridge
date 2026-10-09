@@ -1261,16 +1261,19 @@ Package Contents
 
 
 
-   .. py:method:: group_by(key: int | str, pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None) -> KeyedOp[Any]
-                  group_by(key: Callable[[Any], K], pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None) -> KeyedOp[K]
+   .. py:method:: group_by(key: int | str, pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None, workers: scipion_bridge.core.streaming.ir.GroupByWorkers = WorkersFrom.BACKEND) -> KeyedOp[Any]
+                  group_by(key: Callable[[Any], K], pipeline: Callable[[Op], Op], *, max_keys: Optional[int] = None, workers: scipion_bridge.core.streaming.ir.GroupByWorkers = WorkersFrom.BACKEND) -> KeyedOp[K]
 
       Run ``pipeline`` separately on the items of every key (demux).
 
-      Every item is routed by its key into a pipeline of its own, so that
-      stateful operations (``chunk``, ``collect``, ``combine_latest``) only
-      see the items of one key. The pipeline of a key is created when its
-      first item arrives. Results are emitted as ``Keyed(key, result)``;
-      call ``unkey()`` to continue with the merged stream::
+      Every item is routed by its key into the pipeline, so that stateful
+      operations (``chunk``, ``collect``, ``combine_latest``) only see the
+      items of one key. The keys share a few copies of the pipeline
+      (``workers``): every key is assigned to one when its first item
+      arrives, in turn, and the stages of a copy keep a state per key. A
+      slow key delays the other keys of its copy. Results are emitted as
+      ``Keyed(key, result)``; call ``unkey()`` to continue with the merged
+      stream::
 
           classes.flatten()
               .group_by(lambda cls: cls.class_id, pipeline=refine)
@@ -1284,7 +1287,10 @@ Package Contents
                        It may only consume that input, and every branch must lead to
                        the stream it returns.
       :param max_keys: Maximum number of keys; a further key fails the
-                       pipeline. Every key allocates the stages of its own pipeline.
+                       pipeline.
+      :param workers: Number of copies of the pipeline the keys share, each
+                      with stages (processes) of its own. ``None`` gives every key
+                      a copy of its own. Defaults to the backend's setting.
 
 
 

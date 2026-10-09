@@ -351,7 +351,7 @@ def test_profiled_pipeline_writes_the_events_of_every_process(tmp_path):
     assert any(label.startswith("task worker") for label in labels_of("execute"))
     assert len(labels_of("start_child")) == 1
     # The stages of the child of key "a" record their items as well.
-    assert any(label.startswith("group_by[a]") for label in labels_of("process"))
+    assert any(label.startswith("group_by[worker 0]") for label in labels_of("process"))
     sends = [r for r in events if r["name"] == "send"]
     assert len(sends) == 3
     executes = [r for r in events if r["name"] == "execute"]
