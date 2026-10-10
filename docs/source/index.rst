@@ -1,15 +1,17 @@
 Scipion Bridge
 ==============
 
-**Scipion Bridge** is a Python library for writing high-performance, streaming
-cryo-EM protocols that run on a laptop, inside `Scipion
-<https://scipion.i2pc.es>`_, or distributed across a `Ray <https://www.ray.io>`_
-cluster, all from the same code.
+**Scipion Bridge** is a Python library for writing streaming cryo-EM
+protocols. A protocol written with it runs in a notebook, as a command line
+program, distributed across a `Ray <https://www.ray.io>`_ cluster, or as a
+native protocol of `Scipion 3 <https://scipion.i2pc.es>`_, without changes to
+its code.
 
-You describe *what* a protocol computes as a small declarative graph. The library
-decides *how* to run it: how to batch the data, how to move it between workers,
-how to convert it into the files an external program expects, and when to clean
-those files up again.
+A protocol states *what* it computes as a small declarative graph of
+operations. The library decides *how* to run that graph: how to batch the
+data, how to move batches between processes and machines, how to convert data
+into the files that external programs expect, and when to delete those files
+again.
 
 .. code-block:: python
 
@@ -17,58 +19,106 @@ those files up again.
     from scipion_bridge import single_particle as spa
 
 
+    @B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
     class FoundationModelInference(B.Protocol):
+        """Embed particles with a foundation model."""
+
         particles: B.Input[B.Set[spa.Particle]]
-        chunk_size: B.Field[int] = B.Field(default=10_000)
+        chunk_size: B.Field[int] = B.Field(default=256)
+        model: B.Resource[Model] = B.Resource(builder=load_model)
 
         def outputs(self):
-            return {"latents": B.Set[Latent]}
+            return {"particles": B.Set[spa.FlexParticle]}
 
         def steps(self) -> B.Op:
             return (
                 self.particles
                 .chunk(self.chunk_size.value)
                 .map(self._compute_latents)
-                .map(self._to_output)
+                .map(self._to_output, cpu_only=True)
             )
 
-The library has four building blocks. Each one can be used without the others:
+Why the library exists
+----------------------
 
-.. list-table::
-   :widths: 25 75
-   :header-rows: 0
+Cryo-EM datasets have grown to tens of millions of particles, and most of the
+processing applied to them is independent per particle or per batch of
+particles. Distributed data processing frameworks such as Ray, Spark and Dask
+solve exactly this class of problem: they schedule work, move data between
+workers and recover from failures. Existing cryo-EM software, however, is
+largely made of command line programs that exchange files, and protocols in
+workflow systems such as Scipion process data in large, file-based steps.
 
-   * - :doc:`Array types <user_guide/structs>`
-     - ``Struct``, ``Set`` and ``Collection``: typed, columnar containers backed
-       by NumPy, Awkward Array and Apache Arrow. They are cheap to slice, batch
-       and serialize.
-   * - :doc:`Streaming <user_guide/streaming>`
-     - A declarative streaming API (``map``, ``chunk``, ``collect``,
-       ``combine_latest``, ``group_by``, ...). It is lowered to a small
-       intermediate representation that a backend such as Ray executes.
-   * - :doc:`Type resolution <user_guide/type_resolution>` and
-       :doc:`proxies <user_guide/proxies>`
-     - A graph of converter functions that turns data into the type a function
-       asks for. *Proxies* wrap temporary files and delete them automatically
-       through reference counting.
-   * - :doc:`Shell commands <user_guide/shell_commands>`
-     - ``@shell_command`` makes a command line program look like a normal Python
-       function.
+Scipion Bridge connects the two worlds. It provides:
 
-Where to start
---------------
+* a **columnar type system** (``Struct``, ``Set``, ``Collection``) that stores
+  cryo-EM data in NumPy, Awkward Array and Apache Arrow buffers, and that knows
+  how to split and combine that data;
+* a **declarative streaming API** that lowers protocol graphs to a minimal
+  intermediate representation, executed by an interchangeable backend;
+* a **type resolution engine** that converts data between in-memory types,
+  files on disk and Scipion objects by searching a graph of converter
+  functions;
+* **proxies** for files with automatic reference counting, and
+  **shell command** declarations that make command line programs callable as
+  typed Python functions;
+* **backends** for standalone use, for Ray, and for Scipion 3, selected through
+  dependency injection.
 
-* **New to the library?** Read :doc:`getting_started/installation`, then work
-  through :doc:`getting_started/quickstart`.
-* **Want the big picture?** :doc:`user_guide/overview` covers why the library
-  exists and how its layers fit together.
-* **Porting a Scipion protocol?** :doc:`tutorials/2d_classification` builds a
-  streaming 2D classification pipeline from start to finish.
-* **Debugging something odd?** :doc:`user_guide/sharp_bits` lists the behaviors
-  that most often surprise new users.
-* **Extending the library?** The :doc:`developer_guide` explains the
-  intermediate representation, how to write a backend, and the internal
-  services.
+Each of these parts can be used without the others, but they are designed to
+be combined in a protocol.
+
+How this documentation is organized
+-----------------------------------
+
+The documentation follows the order in which most readers need it.
+
+**Getting started**
+   :doc:`/getting_started/installation` sets up an environment,
+   :doc:`/getting_started/quickstart` builds and runs a first protocol in five
+   steps, and :doc:`/user_guide/overview` explains the architecture and
+   follows a single batch of data through it.
+
+**Integrating a protocol**
+   A step-by-step guide for scientists and developers who want to bring a
+   method or an external program into the library: modelling the data,
+   wrapping programs, writing the protocol, testing it, and deploying it on
+   Ray or in Scipion. Start at :doc:`/integration/index`.
+
+**Concepts**
+   One page per building block, from the :doc:`array types
+   </user_guide/structs/index>` to the :doc:`backends </user_guide/backends/index>`. The
+   integration guide links to these pages where it needs them. The
+   :doc:`/user_guide/sharp_bits` page collects behaviors that commonly
+   surprise new users.
+
+**Tutorials**
+   :doc:`/tutorials/2d_classification` builds a complete, stateful streaming
+   2D classification workflow. The notebook :doc:`examples </examples>` work
+   with real data.
+
+**Developer guide**
+   For contributors to the library itself: the internal architecture, the
+   storage engine of the array types, the streaming intermediate
+   representation, the Ray and Scipion backends, and the testing setup. Start
+   at :doc:`/developer/index`.
+
+**Reference**
+   The :doc:`/api` lists the public API by topic, and the generated
+   :doc:`module reference </autoapi/index>` documents every module.
+
+Which path to take
+------------------
+
+* **You want to run an existing protocol.** Read the installation page and
+  the section on :doc:`running protocols on Ray </user_guide/backends/index>`.
+* **You want to make a method or program available as a protocol.** Read the
+  quickstart and the overview, then follow the :doc:`integration guide
+  </integration/index>` from start to end. The tutorial shows the result for a
+  larger example.
+* **You want to change or extend the library.** Read the overview and the
+  concept pages for the parts you will touch, then the :doc:`developer guide
+  </developer/index>`.
 
 .. toctree::
    :maxdepth: 1
@@ -77,20 +127,32 @@ Where to start
 
    getting_started/installation
    getting_started/quickstart
+   user_guide/overview
 
 .. toctree::
    :maxdepth: 2
-   :caption: User Guide
+   :caption: Integrating a Protocol
    :hidden:
 
-   user_guide/overview
-   user_guide/structs
-   user_guide/streaming
-   user_guide/protocols
-   user_guide/shell_commands
-   user_guide/type_resolution
+   integration/index
+   integration/data_model
+   integration/external_programs
+   integration/writing_protocols
+   integration/testing
+   integration/deployment
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Concepts
+   :hidden:
+
+   user_guide/structs/index
+   user_guide/streaming/index
+   user_guide/protocols/index
+   user_guide/type_resolution/index
    user_guide/proxies
-   user_guide/backends
+   user_guide/shell_commands
+   user_guide/backends/index
    user_guide/sharp_bits
 
 .. toctree::
@@ -102,10 +164,24 @@ Where to start
    examples
 
 .. toctree::
+   :maxdepth: 2
+   :caption: Developer Guide
+   :hidden:
+
+   developer/index
+   developer/dependency_injection
+   developer/struct_storage
+   developer/streaming_internals
+   developer/ray_backend
+   developer/typed_internals
+   developer/pyworkflow_backend
+   developer/testing
+   developer/contributing
+
+.. toctree::
    :maxdepth: 1
    :caption: Reference
    :hidden:
 
    api
-   developer_guide
    autoapi/index

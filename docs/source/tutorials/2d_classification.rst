@@ -19,6 +19,13 @@ The goal is to classify tens of millions of particles in a streaming
 workflow: particles are processed as they arrive, and the classes are refined
 continuously.
 
+The tutorial applies the steps of the :doc:`integration guide
+</integration/index>` to a larger example. Where the guide introduces one
+concept at a time, this tutorial shows how they combine: a long-running GPU
+protocol feeds a second protocol that trains a classifier on a sample of the
+stream, applies it to the rest, and refines each class in a sub-pipeline of
+its own.
+
 .. note::
 
    Function bodies that are specific to the model or the clustering method are
@@ -164,7 +171,7 @@ classify anything. This is a **stateful** stream operation:
 
         num_classes: B.Field[int] = B.Field(default=50)
         cluster_sample_size: B.Field[int] = B.Field(default=50_000)
-        chunk_size: B.Field[int] = B.Field(default=10_000)
+        classify_chunk_size: B.Field[int] = B.Field(default=10_000)
 
         def outputs(self):
             return {"classes": B.Set[spa.Class2D]}
@@ -178,7 +185,7 @@ classify anything. This is a **stateful** stream operation:
 
             return (
                 self.particles
-                .chunk(self.chunk_size.value)
+                .chunk(self.classify_chunk_size.value)
                 .combine_latest(classifier_training)
                 .map(self._classify_chunk)
                 .flatten()
@@ -193,6 +200,12 @@ classify anything. This is a **stateful** stream operation:
 
 ``self.particles`` is used twice. Both uses refer to the same input, which
 **fans out** to the training branch and the classification branch.
+
+The batch size field is called ``classify_chunk_size`` rather than
+``chunk_size``. When protocols are chained, their parameters are merged by
+name, and two fields with the same name but different defaults cannot be
+merged (see :doc:`/user_guide/protocols/composition`). Protocol-specific names
+keep protocols composable.
 
 Step 3: Splitting the stream by class
 -------------------------------------
@@ -247,21 +260,26 @@ first is wired to the ``particles`` input of the second by name:
 
     classification = FoundationModelInference() | ClusterLatents()
 
-Run it on Ray, persisting the classes to Zarr. Set columns are appended as
-classes are refined, following the type system's reduction semantics:
+Run it on Ray, persisting the classes to Zarr. The sink receives the output
+dictionaries of the chain; ``OutputsToZarr`` is the small writer from
+:ref:`ray-persisting-outputs`, which hands each output to a
+``TensorStoreSinkWriter``. Set columns are appended as classes are refined,
+following the type system's reduction semantics:
 
 .. code-block:: python
 
     from pathlib import Path
     from scipion_bridge.backend.ray import RayPipelineRunner
-    from scipion_bridge.backend.ray.sinks import TensorStoreSinkWriter
 
     with RayPipelineRunner(
         classification,
         parameters={"num_classes": 100, "cluster_sample_size": 100_000},
-        sink=TensorStoreSinkWriter("classes.zarr"),
+        sink=OutputsToZarr("classes.zarr"),
     ) as runner:
         runner.run(particles=Path("particles.star"))
+
+The parameters of both protocols are set together, because the chain merges
+them.
 
 At the end, the runner prints per-stage statistics. If the embedding stage
 shows a high ``process_s`` while the stages after it are mostly ``idle_s``, the
@@ -277,3 +295,19 @@ The prototype of this workflow produced the 2D classes of a synthetic dataset
 with protocols of no more than about 200 lines of code each. With the Ray
 backend, the embedding step ran at 76 particles/s in FP32 and 300 particles/s
 in FP16.
+
+Summary
+-------
+
+The workflow combined the main building blocks of the library:
+
+* a long-running GPU protocol with a model ``Resource``, which loads the model
+  once and overlaps GPU and CPU work in separate maps;
+* the *sample, then apply* pattern (``collect`` and ``combine_latest``) to
+  train a classifier on the stream itself;
+* ``flatten`` and ``group_by`` to refine every class with state of its own;
+* chaining, to run two independent protocols as one pipeline;
+* the Ray runner, with a sink persisting the results.
+
+The same classes can be registered in Scipion without changes, as described
+in :doc:`/integration/deployment`.

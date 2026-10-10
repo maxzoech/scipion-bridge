@@ -143,7 +143,7 @@ Single particle analysis
 
 ``scipion_bridge.single_particle`` provides ``Particle``, ``FlexParticle``,
 ``CTF``, ``Coordinate``, ``Acquisition`` and ``Class2D``, the single particle
-proxies, and the resolvers between them. See :doc:`user_guide/structs`.
+proxies, and the resolvers between them. See :doc:`/user_guide/structs/index`.
 
 Backends
 --------

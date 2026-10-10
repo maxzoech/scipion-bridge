@@ -1,9 +1,14 @@
 Quickstart
 ==========
 
-This page takes you from describing your data to running a streaming protocol
-on Ray, in five steps. Each step introduces one part of the library and links to
-the guide that covers it in depth.
+This page goes from describing data to running a streaming protocol on Ray,
+in five steps. Each step introduces one part of the library and links to the
+page that covers it in depth. The steps build on each other in the same order
+in which a protocol is usually developed: first the data, then the
+processing, then the packaging, and finally the execution.
+
+The examples assume the :doc:`installation <installation>` with the ``ray``
+extra.
 
 .. code-block:: python
 
@@ -83,7 +88,7 @@ array:
     first_hundred = particles[:100]      # a view, no copy
 
 Because the data is columnar, slicing, concatenation, and handing columns to
-NumPy, PyTorch or JAX are cheap. See :doc:`../user_guide/structs`.
+NumPy, PyTorch or JAX are cheap. See :doc:`/user_guide/structs/index`.
 
 3. Build a stream
 -----------------
@@ -124,7 +129,7 @@ in-flight work, and finalizes the sinks:
 Each ``map`` is a separate stage, and consecutive stages work on different
 batches at the same time. Splitting work into several maps therefore overlaps
 it, for example CPU preprocessing of one batch with the GPU forward pass of the
-next. See :doc:`../user_guide/streaming`.
+next. See :doc:`/user_guide/streaming/index`.
 
 4. Wrap it in a ``Protocol``
 ----------------------------
@@ -190,7 +195,7 @@ the declared fields:
 
     python normalize.py --particles particles.star --chunk-size 512
 
-See :doc:`../user_guide/protocols` and :doc:`../user_guide/backends`.
+See :doc:`/user_guide/protocols/index` and :doc:`/user_guide/backends/index`.
 
 Bonus: call an external program
 -------------------------------
@@ -222,10 +227,24 @@ program, and ``@proxify`` creates and cleans up the temporary files:
 
 See :doc:`../user_guide/shell_commands` and :doc:`../user_guide/proxies`.
 
+What happened
+-------------
+
+The five steps touched every layer of the library. The ``Struct`` and
+``Set`` describe the data, the stream describes the processing as a graph, the
+``Protocol`` adds declarations that let backends build user interfaces and
+validate results, and the runner compiles the graph into Ray processes and
+feeds it with data resolved from a file. The external program in the last
+section used type resolution and proxies to turn an in-memory batch into the
+files the program expects.
+
 Next steps
 ----------
 
-* :doc:`../user_guide/overview`: the motivation and architecture.
-* :doc:`../tutorials/2d_classification`: a complete, stateful streaming
+* :doc:`/user_guide/overview` explains the architecture and follows one batch
+  through all layers.
+* :doc:`/integration/index` is the step-by-step guide for turning your own
+  method or program into a protocol.
+* :doc:`/tutorials/2d_classification` builds a complete, stateful streaming
   protocol.
-* :doc:`../user_guide/sharp_bits`: common pitfalls.
+* :doc:`/user_guide/sharp_bits` lists common pitfalls.
