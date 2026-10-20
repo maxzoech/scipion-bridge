@@ -173,6 +173,37 @@ class Op(Node):
         """
         return self.op(FlattenOp())
 
+    def scan(
+        self,
+        func: Callable[[Any, Any], Any],
+        *,
+        initial: Optional[Callable[[], Any]] = None,
+    ) -> ScanOp:
+        """Fold the stream with ``func`` and emit every intermediate result.
+
+        Keeps a running state and emits ``state = func(state, item)`` for
+        every item, like ``itertools.accumulate``. Without ``initial``, the
+        first item becomes the state and is emitted unchanged. The stream end
+        (FlushSignal) emits nothing, as every state was already emitted.
+
+        Use it to keep a running representative per class, merging the
+        average of every chunk into it::
+
+            class_stream.chunk(2_000).map(align).scan(merge_averages)
+
+        ``func`` runs in a single stage without the GPUs of the protocol's
+        compute resources (``@resources``). Do the heavy work in the
+        preceding ``map`` and only merge in ``func``.
+
+        Args:
+            func: Function computing the next state from the state and an
+                item.
+            initial: Function creating the initial state. It is called once
+                per key of a ``group_by``, so that keys never share a mutable
+                state.
+        """
+        return self.op(ScanOp(func, initial=initial))
+
     def combine_latest(self, other: Op) -> CombineLatestOp:
         """Pair every item of this stream with the latest item of `other`.
 
@@ -554,6 +585,74 @@ class FlattenOp(Op):
             accumulate_fn=_flatten,
             initial_state_fn=_no_state,
             name="flatten",
+        )
+
+
+class _ScanState(NamedTuple):
+    acc: Any
+    # Without an initial function, the state is empty until the first item.
+    has_acc: bool
+
+
+def _make_scan_accumulator(
+    func: Callable[[Any, Any], Any],
+    initial: Optional[Callable[[], Any]],
+) -> Tuple[
+    Callable[[_ScanState, Any], Tuple[_ScanState, List[Any]]],
+    Callable[[], _ScanState],
+]:
+    def initial_state() -> _ScanState:
+        match initial:
+            case None:
+                return _ScanState(acc=None, has_acc=False)
+
+            case _:
+                return _ScanState(acc=initial(), has_acc=True)
+
+    def accumulate(state: _ScanState, item: Any) -> Tuple[_ScanState, List[Any]]:
+        match state:
+            case _ScanState(has_acc=False):
+                return (_ScanState(acc=item, has_acc=True), [item])
+
+            case _ScanState(acc=acc):
+                new_acc = func(acc, item)
+                return (_ScanState(acc=new_acc, has_acc=True), [new_acc])
+
+    return (accumulate, initial_state)
+
+
+class ScanOp(Op):
+    """Operation node folding the stream and emitting every intermediate state."""
+
+    def __init__(
+        self,
+        func: Callable[[Any, Any], Any],
+        *,
+        initial: Optional[Callable[[], Any]] = None,
+    ):
+        super().__init__(upstream=None)
+        if not callable(func):
+            raise TypeError(
+                f"scan() expects a function, got '{type(func).__name__}'.",
+            )
+        if initial is not None and not callable(initial):
+            raise TypeError(
+                "scan() expects initial to be a function creating the state, got "
+                f"'{type(initial).__name__}'.",
+            )
+        self.func = func
+        self.initial = initial
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        accumulate_fn, initial_state_fn = _make_scan_accumulator(
+            self.func,
+            self.initial,
+        )
+        func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
+        return IRAccumulate(
+            accumulate_fn=accumulate_fn,
+            initial_state_fn=initial_state_fn,
+            name=f"scan({func_name})",
         )
 
 

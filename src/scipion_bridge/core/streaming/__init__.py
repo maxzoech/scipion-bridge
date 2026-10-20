@@ -7,6 +7,7 @@ from .ops import (
     ChunkOp,
     CollectOp,
     FlattenOp,
+    ScanOp,
     CombineLatestOp,
     KeyedOp,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "ChunkOp",
     "CollectOp",
     "FlattenOp",
+    "ScanOp",
     "CombineLatestOp",
     "KeyedOp",
     "Sink",
