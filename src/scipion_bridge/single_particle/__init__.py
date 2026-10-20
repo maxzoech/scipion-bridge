@@ -1,5 +1,13 @@
 from .particle import Particle, FlexParticle, CTF, Coordinate, Class2D, Acquisition
-from .proxies import ParticleStackProxy, StarfileProxy, MRCStackProxy
+from .proxies import (
+    ParticleStackProxy,
+    StarfileProxy,
+    MRCStackProxy,
+    SpiderStackProxy,
+    XmdProxy,
+    XmippParticleStackProxy,
+    XmippSpiderParticleStackProxy,
+)
 
 from ..core.typed.resolve import lift_resolvers
 
@@ -17,4 +25,8 @@ __all__ = [
     "ParticleStackProxy",
     "StarfileProxy",
     "MRCStackProxy",
+    "XmdProxy",
+    "XmippParticleStackProxy",
+    "SpiderStackProxy",
+    "XmippSpiderParticleStackProxy",
 ]

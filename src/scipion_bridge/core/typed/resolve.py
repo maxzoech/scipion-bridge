@@ -486,7 +486,15 @@ class Registry:
         namespace: Optional[str] = None,
         requires_metadata: Optional[bool] = None,
         requires_slice: Optional[bool] = None,
+        weight: int = 0,
     ):
+        """Register ``resolver`` for ``origin`` -> ``target``.
+
+        ``weight`` is added to the cost of every route through the resolver;
+        the route of lowest cost is chosen, so a positive weight keeps a
+        resolver out of default routes unless it is requested as
+        ``intermediate``.
+        """
 
         if namespace is None:
             frame = _find_calling_frame()
@@ -532,7 +540,7 @@ class Registry:
             origin,
             target,
             resolver=resolver_cls,
-            weight=0,
+            weight=weight,
             module=namespace,
             requires_metadata=requires_metadata,
             requires_slice=requires_slice,
@@ -684,9 +692,7 @@ class Registry:
             assert context is not None
 
             intermediate_desc = (
-                f" (via '{intermediate.__name__}')"
-                if intermediate is not None
-                else ""
+                f" (via '{intermediate.__name__}')" if intermediate is not None else ""
             )
 
             namespaces_ctx = [f"'{n}'" for n in context.namespaces]
@@ -733,9 +739,7 @@ class Registry:
             assert context is not None
 
             intermediate_desc = (
-                f" (via '{intermediate.__name__}')"
-                if intermediate is not None
-                else ""
+                f" (via '{intermediate.__name__}')" if intermediate is not None else ""
             )
 
             namespaces_ctx = [f"'{n}'" for n in context.namespaces]
@@ -849,7 +853,19 @@ def current_registry() -> Registry:
     return ctx.registry if ctx is not None else DEFAULT_REGISTRY
 
 
-def resolver(target: Any) -> Any:
+def resolver(target: Any = None, *, weight: int = 0) -> Any:
+    """Register a resolver function or class, used as ``@resolver`` or ``@resolver(weight=1)``.
+
+    See ``Registry.add_resolver`` for ``weight``.
+    """
+    match target:
+        case None:
+            return partial(resolver, weight=weight)
+        case _:
+            return _register_resolver(target, weight)
+
+
+def _register_resolver(target: Any, weight: int) -> Any:
     resolver_cls, method, requires_metadata, requires_slice = _normalize_resolver(
         target
     )
@@ -878,6 +894,7 @@ def resolver(target: Any) -> Any:
         namespace=namespace,
         requires_metadata=requires_metadata,
         requires_slice=requires_slice,
+        weight=weight,
     )
 
     return target if inspect.isclass(target) else resolver_cls()

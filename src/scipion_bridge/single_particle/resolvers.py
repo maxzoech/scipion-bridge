@@ -1,14 +1,77 @@
+import builtins
+from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Mapping, Optional, Union, cast
 import numpy as np
 import pandas as pd
 import starfile
 
-from .mrc import read_stack, write_stack
-from .proxies import ParticleStackProxy, MRCStackProxy, StarfileProxy
+from .mrc import write_stack
+from .proxies import (
+    ParticleStackProxy,
+    MRCStackProxy,
+    SpiderStackProxy,
+    StarfileProxy,
+    XmdProxy,
+    XmippParticleStackProxy,
+    XmippSpiderParticleStackProxy,
+)
 from .particle import Particle
 from ..core.typed.resolve import resolver
 from ..core import struct
+
+# STAR columns and the Particle fields they fill. When several columns fill
+# the same field, the last one present wins.
+RELION_LABELS: Mapping[str, tuple[str, ...]] = {
+    "rlnCoordinateX": ("coordinate", "x"),
+    "rlnCoordinateY": ("coordinate", "y"),
+    "rlnDefocusU": ("ctf", "defocus_u"),
+    "rlnDefocusV": ("ctf", "defocus_v"),
+    "rlnDefocusAngle": ("ctf", "defocus_angle"),
+    "rlnPhaseShift": ("ctf", "phase_shift"),
+    "rlnCtfMaxResolution": ("ctf", "resolution"),
+    "rlnCtfResolution": ("ctf", "resolution"),
+    "rlnCtfFigureOfMerit": ("ctf", "fit_quality"),
+    "rlnCtfFitQuality": ("ctf", "fit_quality"),
+    "rlnMagnification": ("acquisition", "magnification"),
+    "rlnVoltage": ("acquisition", "voltage"),
+    "rlnSphericalAberration": ("acquisition", "spherical_aberration"),
+    "rlnAmplitudeContrast": ("acquisition", "amplitude_contrast"),
+    "rlnDoseInitial": ("acquisition", "dose_initial"),
+    "rlnDosePerFrame": ("acquisition", "dose_per_frame"),
+}
+
+# Xmipp labels as read by starfile, which strips the leading underscore.
+XMIPP_LABELS: Mapping[str, tuple[str, ...]] = {
+    "xcoor": ("coordinate", "x"),
+    "ycoor": ("coordinate", "y"),
+    "ctfDefocusU": ("ctf", "defocus_u"),
+    "ctfDefocusV": ("ctf", "defocus_v"),
+    "ctfDefocusAngle": ("ctf", "defocus_angle"),
+    "ctfPhaseShift": ("ctf", "phase_shift"),
+    "ctfCritMaxFreq": ("ctf", "resolution"),
+    "ctfCritFitting": ("ctf", "fit_quality"),
+    "magnification": ("acquisition", "magnification"),
+    "ctfVoltage": ("acquisition", "voltage"),
+    "ctfSphericalAberration": ("acquisition", "spherical_aberration"),
+    "ctfQ0": ("acquisition", "amplitude_contrast"),
+    "samplingRate": ("sampling_rate",),
+    "ctfSamplingRate": ("sampling_rate",),
+}
+
+
+def _apply_labels(
+    particle_set: struct.Set[Particle],
+    df: pd.DataFrame,
+    labels: Mapping[str, tuple[str, ...]],
+) -> None:
+    """Fill the fields of ``particle_set`` from the columns of ``df`` in ``labels``."""
+    for column, (*parents, field) in labels.items():
+        if column not in df.columns:
+            continue
+
+        target = reduce(lambda s, key: s[key], parents, particle_set)
+        target[field] = np.asarray(df[column], dtype=np.float64)
 
 
 @resolver
@@ -159,7 +222,7 @@ class resolve_particle_stack_to_particles:
         *,
         slice: Optional[slice] = None,
     ) -> struct.Set[Particle]:
-        data = read_stack(value.particle_stack.path, slice)
+        data = value.particle_stack.read_images(slice)
 
         particle_set = struct.Set[Particle](capacity=len(data))
         particle_set["pixels"] = data
@@ -178,59 +241,18 @@ class resolve_particle_stack_to_particles:
 
         if df_particles is not None:
             df_sliced = (
-                df_particles.iloc[slice] if slice is not None else df_particles.iloc[:n]
-            )
+                df_particles.iloc[slice] if slice is not None else df_particles
+            ).iloc[:n]
 
             for col in ("rlnDetectorPixelSize", "rlnImagePixelSize", "rlnPixelSize"):
                 if col in df_sliced.columns:
                     particle_set["sampling_rate"] = np.asarray(
-                        df_sliced[col][:n],
+                        df_sliced[col],
                         dtype=np.float64,
                     )
                     break
 
-            if "rlnCoordinateX" in df_sliced.columns:
-                particle_set["coordinate"]["x"] = np.asarray(
-                    df_sliced["rlnCoordinateX"][:n],
-                    dtype=np.float64,
-                )
-            if "rlnCoordinateY" in df_sliced.columns:
-                particle_set["coordinate"]["y"] = np.asarray(
-                    df_sliced["rlnCoordinateY"][:n],
-                    dtype=np.float64,
-                )
-
-            ctf_mappings = {
-                "rlnDefocusU": "defocus_u",
-                "rlnDefocusV": "defocus_v",
-                "rlnDefocusAngle": "defocus_angle",
-                "rlnPhaseShift": "phase_shift",
-                "rlnCtfMaxResolution": "resolution",
-                "rlnCtfResolution": "resolution",
-                "rlnCtfFigureOfMerit": "fit_quality",
-                "rlnCtfFitQuality": "fit_quality",
-            }
-            for star_col, ctf_field in ctf_mappings.items():
-                if star_col in df_sliced.columns:
-                    particle_set["ctf"][ctf_field] = np.asarray(
-                        df_sliced[star_col][:n],
-                        dtype=np.float64,
-                    )
-
-            acq_mappings = {
-                "rlnMagnification": "magnification",
-                "rlnVoltage": "voltage",
-                "rlnSphericalAberration": "spherical_aberration",
-                "rlnAmplitudeContrast": "amplitude_contrast",
-                "rlnDoseInitial": "dose_initial",
-                "rlnDosePerFrame": "dose_per_frame",
-            }
-            for star_col, acq_field in acq_mappings.items():
-                if star_col in df_sliced.columns:
-                    particle_set["acquisition"][acq_field] = np.asarray(
-                        df_sliced[star_col][:n],
-                        dtype=np.float64,
-                    )
+            _apply_labels(particle_set, df_sliced, RELION_LABELS)
 
         if df_optics is not None and len(df_optics) > 0:
             optics_row = df_optics.iloc[0]
@@ -266,3 +288,85 @@ class resolve_particle_stack_to_particles:
                     )
 
         return particle_set
+
+
+@resolver
+def resolve_xmd_to_xmipp_particle_stack(value: XmdProxy) -> XmippParticleStackProxy:
+    """Resolve an XmippParticleStackProxy from its Xmipp metadata file."""
+    return XmippParticleStackProxy(
+        XmippParticleStackProxy.extract_base_path(value.path),
+        managed=value.managed,
+        metadata=value,
+    )
+
+
+def _xmipp_particles(
+    metadata: XmdProxy,
+    stack: Union[MRCStackProxy, SpiderStackProxy],
+    slice: Optional[slice],
+) -> struct.Set[Particle]:
+    """The particles ``slice`` of an Xmipp stack, without the disabled ones.
+
+    Fields without a label in the metadata, for example the sampling rate of
+    stacks extracted in Scipion, are left unset.
+    """
+    df = metadata.read()
+    assert isinstance(df, pd.DataFrame)
+
+    rows = slice if slice is not None else builtins.slice(None)
+    df_sliced = df.iloc[rows]
+
+    expected = np.arange(1, len(df) + 1)[rows]
+    indices = df_sliced["image"].str.split("@").str[0].astype(int).to_numpy()
+    if not np.array_equal(indices, expected):
+        raise ValueError(
+            f"The images of '{metadata.path}' are not in stack order: "
+            f"expected indices {expected.tolist()}, got {indices.tolist()}.",
+        )
+
+    enabled = (
+        df_sliced["enabled"].to_numpy() == 1
+        if "enabled" in df_sliced.columns
+        else np.ones(len(df_sliced), dtype=bool)
+    )
+    data = stack.read_images(slice)[enabled]
+
+    particle_set = struct.Set[Particle](capacity=len(data))
+    particle_set["pixels"] = data
+    _apply_labels(particle_set, df_sliced[enabled], XMIPP_LABELS)
+
+    return particle_set
+
+
+# Xmipp stacks are read only when requested as ``intermediate``: the weight
+# keeps ``Path -> Set[Particle]`` on the RELION route by default.
+@resolver(weight=1)
+def resolve_xmipp_stack_to_particles(
+    value: XmippParticleStackProxy,
+    *,
+    slice: Optional[slice] = None,
+) -> struct.Set[Particle]:
+    """Resolve a Set[Particle] from an Xmipp stack of MRC images."""
+    return _xmipp_particles(value.metadata, value.particle_stack, slice)
+
+
+@resolver
+def resolve_xmd_to_xmipp_spider_particle_stack(
+    value: XmdProxy,
+) -> XmippSpiderParticleStackProxy:
+    """Resolve an XmippSpiderParticleStackProxy from its Xmipp metadata file."""
+    return XmippSpiderParticleStackProxy(
+        XmippSpiderParticleStackProxy.extract_base_path(value.path),
+        managed=value.managed,
+        metadata=value,
+    )
+
+
+@resolver(weight=1)
+def resolve_xmipp_spider_stack_to_particles(
+    value: XmippSpiderParticleStackProxy,
+    *,
+    slice: Optional[slice] = None,
+) -> struct.Set[Particle]:
+    """Resolve a Set[Particle] from an Xmipp stack of SPIDER images."""
+    return _xmipp_particles(value.metadata, value.particle_stack, slice)

@@ -478,3 +478,72 @@ def test_find_resolver_precomputation(tmp_path):
     assert len(chunks) == 3
     assert all(len(c) == 2 for c in chunks)
     assert np.allclose(np.asarray(chunks[0]["pixels"]), data[0:2])
+
+
+def test_resolver_weight_keeps_route_opt_in():
+    """Verify that a weighted route is skipped by default and taken as intermediate."""
+    registry = resolve.Registry()
+
+    class WeightedIntermediate:
+        def __init__(self, data: list[int]) -> None:
+            self.data = data
+
+    def to_intermediate(value: SourceType) -> IntermediateType:
+        return IntermediateType(value.data)
+
+    def to_weighted(value: SourceType) -> WeightedIntermediate:
+        return WeightedIntermediate(value.data)
+
+    def from_intermediate(value: IntermediateType) -> TargetType:
+        return TargetType(value.data)
+
+    def from_weighted(value: WeightedIntermediate) -> TargetType:
+        return TargetType([-x for x in value.data])
+
+    registry.add_resolver(SourceType, WeightedIntermediate, to_weighted, namespace="m")
+    registry.add_resolver(
+        WeightedIntermediate,
+        TargetType,
+        from_weighted,
+        namespace="m",
+        weight=1,
+    )
+    registry.add_resolver(SourceType, IntermediateType, to_intermediate, namespace="m")
+    registry.add_resolver(
+        IntermediateType, TargetType, from_intermediate, namespace="m"
+    )
+
+    default = registry.find_resolve_func(
+        {"m"},
+        SourceType,
+        TargetType,
+        local_scope_name="m",
+    )
+    requested = registry.find_resolve_func(
+        {"m"},
+        SourceType,
+        TargetType,
+        intermediate=WeightedIntermediate,
+        local_scope_name="m",
+    )
+
+    assert default(SourceType([1, 2])).data == [1, 2]
+    assert requested(SourceType([1, 2])).data == [-1, -2]
+
+
+def test_resolver_decorator_accepts_weight():
+    """Verify that @resolver(weight=...) registers the weight on the edge."""
+
+    class WeightedSource:
+        pass
+
+    class WeightedTarget:
+        pass
+
+    @sb.resolver(weight=3)
+    def convert(value: WeightedSource) -> WeightedTarget:
+        return WeightedTarget()
+
+    graph = resolve.current_registry().graph
+    assert graph.edges[(WeightedSource, WeightedTarget)]["weight"] == 3
+    assert isinstance(convert.forward(WeightedSource()), WeightedTarget)

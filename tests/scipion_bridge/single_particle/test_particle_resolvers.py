@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 import mrcfile
 import numpy as np
 import pandas as pd
@@ -11,7 +12,10 @@ from scipion_bridge.single_particle import (
     Particle,
     MRCStackProxy,
     ParticleStackProxy,
+    SpiderStackProxy,
     StarfileProxy,
+    XmippParticleStackProxy,
+    XmippSpiderParticleStackProxy,
 )
 
 
@@ -517,3 +521,236 @@ def test_resolve_particle_stack_with_volume_raises(tmp_path: Path):
 
     with pytest.raises(ValueError, match="volume"):
         B.resolve(psp, astype=B.Set[Particle], slice=slice(0, 4))
+
+
+XMIPP_COLUMNS = [
+    "ctfVoltage",
+    "ctfDefocusU",
+    "ctfDefocusV",
+    "ctfDefocusAngle",
+    "ctfSphericalAberration",
+    "ctfQ0",
+    "ctfCritMaxFreq",
+    "ctfCritFitting",
+    "enabled",
+    "image",
+    "micrograph",
+    "xcoor",
+    "ycoor",
+]
+
+
+def _write_spider_stack(path: Path, images: np.ndarray) -> None:
+    """Write ``images`` (n, nrow, nsam) as a little-endian SPIDER stack, as Xmipp does."""
+    count, nrow, nsam = images.shape
+    record_nbytes = nsam * 4
+    labrec = -(-1024 // record_nbytes)
+    labbyt = labrec * record_nbytes
+
+    def header(istack: int, maxim: int, imgnum: int) -> np.ndarray:
+        words = np.zeros(labbyt // 4, dtype="<f4")
+        # 1-based: 1 nslice, 2 nrow, 5 iform, 12 nsam, 13 labrec, 22 labbyt,
+        # 23 lenbyt, 24 istack, 26 maxim, 27 imgnum
+        for word, value in [
+            (1, 1),
+            (2, nrow),
+            (5, 1),
+            (12, nsam),
+            (13, labrec),
+            (22, labbyt),
+            (23, record_nbytes),
+            (24, istack),
+            (26, maxim),
+            (27, imgnum),
+        ]:
+            words[word - 1] = value
+        return words
+
+    records = [
+        part
+        for i, image in enumerate(images)
+        for part in (header(0, 0, i + 1), image.astype("<f4").ravel())
+    ]
+    np.concatenate([header(2, count, 0), *records]).tofile(path)
+
+
+def _create_xmipp_stack(
+    tmp_path: Path,
+    n_particles: int = 6,
+    stem: str = "micrograph_fractions",
+    enabled: Optional[list[int]] = None,
+    indices: Optional[list[int]] = None,
+    stack_ext: str = ".mrcs",
+) -> tuple[Path, np.ndarray]:
+    """Write ``<stem><stack_ext>`` and an Xmipp ``<stem>.xmd`` as written by Scipion."""
+    data = np.arange(n_particles * 8 * 8, dtype=np.float32).reshape(n_particles, 8, 8)
+    match stack_ext:
+        case ".mrcs":
+            with mrcfile.new(tmp_path / f"{stem}.mrcs") as mrc:
+                mrc.set_data(data)
+                mrc.set_image_stack()
+        case ".stk":
+            _write_spider_stack(tmp_path / f"{stem}.stk", data)
+
+    enabled = enabled or [1] * n_particles
+    indices = indices or list(range(1, n_particles + 1))
+    rows = [
+        f"  300.0 {10000.0 + i * 100} {9900.0 + i * 100} 45.0 2.7 0.1 3.5 -0.08 "
+        f"{enabled[i]} {indices[i]:06d}@Runs/000001_Extract/extra/{stem}{stack_ext} "
+        f"Runs/000001_Extract/tmp/{stem}_noDust.xmp {i * 10} {i * 20}"
+        for i in range(n_particles)
+    ]
+    xmd_path = tmp_path / f"{stem}.xmd"
+    xmd_path.write_text(
+        "# XMIPP_STAR_1 * \n# \ndata_noname\nloop_\n"
+        + "".join(f" _{column}\n" for column in XMIPP_COLUMNS)
+        + "\n".join(rows)
+        + "\n",
+    )
+    return xmd_path, data
+
+
+def test_default_path_route_uses_relion_stacks():
+    resolver = B.find_resolver(Path, B.Set[Particle])
+
+    assert "ParticleStackProxy" in resolver.steps[0].description
+    assert "Xmipp" not in resolver.steps[0].description
+
+
+def test_resolve_xmd_path_to_xmipp_stack(tmp_path: Path):
+    xmd_path, _ = _create_xmipp_stack(tmp_path)
+
+    proxy = B.resolve(xmd_path, astype=XmippParticleStackProxy)
+
+    assert isinstance(proxy, XmippParticleStackProxy)
+    assert proxy.metadata.path == xmd_path
+    assert proxy.particle_stack.path == tmp_path / "micrograph_fractions.mrcs"
+    assert len(proxy) == 6
+
+
+def test_resolve_xmipp_stack_to_particles(tmp_path: Path):
+    xmd_path, data = _create_xmipp_stack(tmp_path)
+    resolver = B.find_resolver(
+        Path,
+        B.Set[Particle],
+        intermediate=XmippParticleStackProxy,
+    )
+
+    particles = resolver(xmd_path)
+
+    assert len(particles) == 6
+    assert np.allclose(np.asarray(particles["pixels"]), data)
+    assert np.allclose(
+        np.asarray(particles["ctf"]["defocus_u"]).flatten(),
+        [10000.0 + i * 100 for i in range(6)],
+    )
+    assert np.allclose(np.asarray(particles["ctf"]["resolution"]).flatten(), 3.5)
+    assert np.allclose(np.asarray(particles["ctf"]["fit_quality"]).flatten(), -0.08)
+    assert np.allclose(
+        np.asarray(particles["coordinate"]["y"]).flatten(),
+        [i * 20 for i in range(6)],
+    )
+    assert np.allclose(np.asarray(particles["acquisition"]["voltage"]).flatten(), 300)
+    assert np.allclose(
+        np.asarray(particles["acquisition"]["amplitude_contrast"]).flatten(),
+        0.1,
+    )
+
+    chunks = list(resolver.iter(xmd_path, chunk_size=4))
+    assert [len(c) for c in chunks] == [4, 2]
+    assert np.allclose(np.asarray(B.concat(chunks)["pixels"]), data)
+    assert np.allclose(
+        np.asarray(chunks[1]["coordinate"]["x"]).flatten(),
+        [40.0, 50.0],
+    )
+
+
+def test_resolve_xmipp_stack_drops_disabled_particles(tmp_path: Path):
+    _create_xmipp_stack(tmp_path, n_particles=4, enabled=[1, -1, 1, 1])
+    proxy = XmippParticleStackProxy(tmp_path / "micrograph_fractions")
+
+    particles = B.resolve(proxy, astype=B.Set[Particle], slice=slice(1, 4))
+
+    assert len(particles) == 2
+    assert np.asarray(particles["pixels"])[:, 0, 0].tolist() == [128.0, 192.0]
+    assert np.asarray(particles["coordinate"]["x"]).flatten().tolist() == [20, 30]
+
+
+def test_resolve_xmipp_stack_out_of_order_raises(tmp_path: Path):
+    _create_xmipp_stack(tmp_path, n_particles=3, indices=[1, 3, 2])
+    proxy = XmippParticleStackProxy(tmp_path / "micrograph_fractions")
+
+    with pytest.raises(ValueError, match="not in stack order"):
+        B.resolve(proxy, astype=B.Set[Particle])
+
+
+def test_spider_stack_proxy_reads_images(tmp_path: Path):
+    path = tmp_path / "stack.stk"
+    images = np.arange(5 * 6 * 8, dtype=np.float32).reshape(5, 6, 8)
+    _write_spider_stack(path, images)
+
+    proxy = B.resolve(path, astype=SpiderStackProxy)
+
+    assert len(proxy) == 5
+    assert proxy.estimated_item_nbytes == 6 * 8 * 4
+    assert np.array_equal(proxy.read_images(), images)
+    assert np.array_equal(proxy.read_images(slice(2, 5)), images[2:5])
+    assert proxy.read_images(slice(3, 3)).shape == (0, 6, 8)
+    assert proxy.read_images(slice(1, 3)).flags.c_contiguous
+
+
+def test_spider_stack_proxy_truncated_raises(tmp_path: Path):
+    path = tmp_path / "stack.stk"
+    _write_spider_stack(path, np.ones((3, 8, 8), dtype=np.float32))
+    path.write_bytes(path.read_bytes()[:-4])
+
+    with pytest.raises(ValueError, match="not a little-endian SPIDER stack"):
+        len(SpiderStackProxy(path))
+
+
+def test_resolve_xmipp_spider_stack_to_particles(tmp_path: Path):
+    xmd_path, data = _create_xmipp_stack(
+        tmp_path,
+        n_particles=6,
+        enabled=[1, 1, -1, 1, 1, 1],
+        stack_ext=".stk",
+    )
+    resolver = B.find_resolver(
+        Path,
+        B.Set[Particle],
+        intermediate=XmippSpiderParticleStackProxy,
+    )
+
+    particles = resolver(xmd_path)
+
+    kept = [0, 1, 3, 4, 5]
+    assert np.array_equal(np.asarray(particles["pixels"]), data[kept])
+    assert np.allclose(
+        np.asarray(particles["ctf"]["defocus_u"]).flatten(),
+        [10000.0 + i * 100 for i in kept],
+    )
+    assert np.allclose(
+        np.asarray(particles["coordinate"]["x"]).flatten(),
+        [i * 10 for i in kept],
+    )
+
+    chunks = list(resolver.iter(xmd_path, chunk_size=4))
+    assert [len(c) for c in chunks] == [3, 2]
+    assert np.array_equal(np.asarray(B.concat(chunks)["pixels"]), data[kept])
+
+
+def test_mrc_stack_proxy_reads_images(tmp_path: Path):
+    stack = np.arange(4 * 6 * 8, dtype=np.int16).reshape(4, 6, 8)
+    with mrcfile.new(tmp_path / "stack.mrcs") as mrc:
+        mrc.set_data(stack)
+        mrc.set_image_stack()
+    image = np.arange(6 * 8, dtype=np.float32).reshape(6, 8)
+    with mrcfile.new(tmp_path / "image.mrc") as mrc:
+        mrc.set_data(image)
+
+    images = MRCStackProxy(tmp_path / "stack.mrcs").read_images(slice(1, 3))
+    single = MRCStackProxy(tmp_path / "image.mrc").read_images()
+
+    assert images.dtype == np.float32
+    assert np.array_equal(images, stack[1:3].astype(np.float32))
+    assert np.array_equal(single, image[np.newaxis])
