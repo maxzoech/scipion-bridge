@@ -110,6 +110,7 @@ if HAS_PWEM:
     from ...core import struct
     from ...core.struct.exceptions import UninitializedFieldError
     from ... import single_particle as spa
+    from ...single_particle.mrc import write_stack
 
     # ---------------------------------------------------------------------------
     # Internal helpers
@@ -610,7 +611,7 @@ if HAS_PWEM:
         Path(stack_path).parent.mkdir(parents=True, exist_ok=True)
 
         pixels_arr = np.array(value["pixels"], dtype=np.float32)
-        mrcfile.write(stack_path, pixels_arr, overwrite=False)
+        write_stack(stack_path, pixels_arr, overwrite=False)
 
         if pixels_arr.ndim >= 3:
             out_set.setDim((int(pixels_arr.shape[-1]), int(pixels_arr.shape[-2]), 1))
@@ -739,7 +740,7 @@ if HAS_PWEM:
         Path(stack_path).parent.mkdir(parents=True, exist_ok=True)
 
         pixels_arr = np.array(value["pixels"], dtype=np.float32)
-        mrcfile.write(
+        write_stack(
             stack_path,
             pixels_arr,
             overwrite=False,
@@ -931,7 +932,7 @@ if HAS_PWEM:
                     )
                     Path(stack_path).parent.mkdir(parents=True, exist_ok=True)
                     pixels_arr = np.array(particles_bridge["pixels"], dtype=np.float32)
-                    mrcfile.write(stack_path, pixels_arr, overwrite=False)
+                    write_stack(stack_path, pixels_arr, overwrite=False)
                     if scipion_cls.getDim() is None and pixels_arr.ndim >= 3:
                         scipion_cls.setDim(
                             (int(pixels_arr.shape[-1]), int(pixels_arr.shape[-2]), 1),

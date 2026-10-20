@@ -41,6 +41,7 @@ def _create_sample_particles(
     )
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {

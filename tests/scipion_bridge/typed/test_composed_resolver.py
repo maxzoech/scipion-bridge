@@ -457,6 +457,7 @@ def test_find_resolver_precomputation(tmp_path):
     data = np.arange(n_particles * 8 * 8, dtype=np.float32).reshape(n_particles, 8, 8)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {"rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(n_particles)]},

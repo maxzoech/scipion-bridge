@@ -33,6 +33,7 @@ def test_mrcs_path_cannot_resolve_to_particles(tmp_path: Path):
     data = np.random.randn(8, 24, 24).astype(np.float32)
     with mrcfile.new(file_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     with pytest.raises(TypeError):
         B.resolve(file_path, astype=B.Set[Particle])
@@ -43,6 +44,7 @@ def test_mrc_path_cannot_resolve_to_particles(tmp_path: Path):
     data = np.random.randn(4, 32, 32).astype(np.float32)
     with mrcfile.new(file_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     with pytest.raises(TypeError):
         B.resolve(file_path, astype=B.Set[Particle])
@@ -53,6 +55,7 @@ def test_mrc_stack_proxy_cannot_resolve_to_particles(tmp_path: Path):
     data = np.random.randn(4, 16, 16).astype(np.float32)
     with mrcfile.new(file_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     proxy = MRCStackProxy(file_path)
     with pytest.raises(
@@ -67,6 +70,7 @@ def test_resolve_path_mrcs_to_mrc_stack_proxy(tmp_path: Path):
     data = np.random.randn(4, 16, 16).astype(np.float32)
     with mrcfile.new(file_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     proxy = B.resolve(file_path, astype=MRCStackProxy)
     assert isinstance(proxy, MRCStackProxy)
@@ -80,6 +84,7 @@ def test_resolve_star_path_to_mrc_stack_proxy(tmp_path: Path):
     data = np.random.randn(5, 20, 20).astype(np.float32)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {"rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(5)]},
@@ -98,6 +103,7 @@ def test_resolve_star_proxy_to_mrc_stack_proxy(tmp_path: Path):
     data = np.random.randn(3, 12, 12).astype(np.float32)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {"rlnImageName": [f"{i + 1:06d}@data_stack.mrcs" for i in range(3)]},
@@ -117,6 +123,7 @@ def test_resolve_star_path_without_image_name_fails(tmp_path: Path):
     data = np.random.randn(2, 10, 10).astype(np.float32)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     # Star file without rlnImageName
     df = pd.DataFrame({"rlnDefocusU": [10000.0, 10500.0]})
@@ -132,6 +139,7 @@ def test_resolve_star_path_to_particle_stack_proxy(tmp_path: Path):
     data = np.random.randn(4, 16, 16).astype(np.float32)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {"rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(4)]},
@@ -150,6 +158,7 @@ def test_resolve_star_path_to_particles_set(tmp_path: Path):
     data = np.random.randn(3, 14, 14).astype(np.float32)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {
@@ -238,6 +247,7 @@ def test_mrc_stack_proxy_zero_io_len_and_estimated_nbytes(tmp_path: Path):
     data = np.random.randn(6, 20, 20).astype(np.float32)
     with mrcfile.new(file_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     proxy = MRCStackProxy(file_path)
     assert len(proxy) == 6
@@ -251,6 +261,7 @@ def test_particle_stack_proxy_zero_io_len_and_estimated_nbytes(tmp_path: Path):
     data = np.random.randn(8, 24, 24).astype(np.float32)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {"rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(8)]},
@@ -271,6 +282,7 @@ def test_particle_stack_proxy_mismatched_lengths_raises(tmp_path: Path):
     data = np.random.randn(6, 24, 24).astype(np.float32)
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {"rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(8)]},
@@ -293,6 +305,7 @@ def test_resolve_particle_stack_to_particles_sliced(tmp_path: Path):
     )
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {
@@ -343,6 +356,7 @@ def test_resolve_star_path_to_particles_sliced_end_to_end(tmp_path: Path):
     )
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {
@@ -372,6 +386,7 @@ def test_resolve_iter_particle_stack_end_to_end(tmp_path: Path):
     )
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {
@@ -445,6 +460,7 @@ def test_resolve_particle_stack_to_particles_caches_star_data(tmp_path: Path):
     )
     with mrcfile.new(mrc_path) as mrc:
         mrc.set_data(data)
+        mrc.set_image_stack()
 
     df = pd.DataFrame(
         {
@@ -462,3 +478,42 @@ def test_resolve_particle_stack_to_particles_caches_star_data(tmp_path: Path):
         assert len(chunks) == 5
         # Across 5 chunks, starfile.read must only be called once!
         assert mock_read.call_count == 1
+
+
+def _write_particle_stack(tmp_path: Path, data: np.ndarray, *, image_stack: bool):
+    mrc_path = tmp_path / "particles.mrcs"
+    star_path = tmp_path / "particles.star"
+    with mrcfile.new(mrc_path) as mrc:
+        mrc.set_data(data)
+        if image_stack:
+            mrc.set_image_stack()
+
+    df = pd.DataFrame(
+        {
+            "rlnImageName": [f"{i + 1:06d}@particles.mrcs" for i in range(len(data))],
+            "rlnCoordinateX": [float(i * 10) for i in range(len(data))],
+        },
+    )
+    starfile.write(df, star_path)
+    return B.resolve(star_path, astype=ParticleStackProxy)
+
+
+def test_resolve_particle_stack_to_particles_strided_slice(tmp_path: Path):
+    data = np.arange(10 * 16 * 16, dtype=np.float32).reshape(10, 16, 16)
+    psp = _write_particle_stack(tmp_path, data, image_stack=True)
+
+    particles = B.resolve(psp, astype=B.Set[Particle], slice=slice(1, 9, 3))
+
+    assert np.array_equal(np.asarray(particles["pixels"]), data[1:9:3])
+    assert np.allclose(
+        np.asarray(particles["coordinate"]["x"]).flatten(),
+        [10.0, 40.0, 70.0],
+    )
+
+
+def test_resolve_particle_stack_with_volume_raises(tmp_path: Path):
+    data = np.zeros((10, 16, 16), dtype=np.float32)
+    psp = _write_particle_stack(tmp_path, data, image_stack=False)
+
+    with pytest.raises(ValueError, match="volume"):
+        B.resolve(psp, astype=B.Set[Particle], slice=slice(0, 4))
