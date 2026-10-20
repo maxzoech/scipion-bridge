@@ -62,8 +62,8 @@ appends to a list in the driver's memory appends to a copy in the actor
 instead. Collect results through a Ray actor, write them to storage, or use
 ``print`` while debugging (Ray forwards the output of actors to the driver).
 
-TensorStoreSinkWriter
----------------------
+``TensorStoreSinkWriter``
+-------------------------
 
 The Ray backend ships a writer that persists ``Struct``, ``Set`` and
 ``Collection`` items to Zarr through TensorStore:

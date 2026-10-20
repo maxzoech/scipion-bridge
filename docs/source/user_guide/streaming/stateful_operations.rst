@@ -8,15 +8,15 @@ earlier items, such as re-batching, sampling or pairing two streams, is
 expressed with the stateful operations. The backend runs each of them in a
 single process that keeps its state, processes items strictly in arrival
 order, and calls its flush logic when the stream ends. This article describes
-``chunk``, ``collect``, ``flatten`` and ``combine_latest``; ``group_by`` has
+``chunk``, ``collect``, ``flatten``, ``scan`` and ``combine_latest``; ``group_by`` has
 an article of its own (:doc:`group_by`).
 
 .. contents:: On this page
    :local:
    :depth: 2
 
-chunk
------
+``chunk()``
+-----------
 
 .. code-block:: python
 
@@ -43,8 +43,8 @@ example because a model compiled for a fixed batch size would recompile for
 it. The dropped elements are then not processed at all; padding the final
 batch in the map is the alternative.
 
-collect
--------
+``collect()``
+-------------
 
 .. code-block:: python
 
@@ -70,8 +70,8 @@ model before applying it to all of the data:
 ``collect`` keeps the collected sets in its state until it emits, outside of
 the pipeline's buffer limits; choose ``n`` with memory in mind.
 
-flatten
--------
+``flatten()``
+-------------
 
 .. code-block:: python
 
@@ -100,8 +100,50 @@ It rejects:
 ``flatten`` is the usual step before a ``group_by``: a map produces one item
 per group, ``flatten`` emits them separately, and ``group_by`` routes them.
 
-combine_latest
---------------
+``scan()``
+----------
+
+.. code-block:: python
+
+    stream.scan(func, initial=None)
+
+``scan`` keeps a running state and emits ``state = func(state, item)`` for
+every item, like ``itertools.accumulate``. Without ``initial``, the first item
+becomes the state and is emitted unchanged:
+
+.. code-block:: text
+
+    in:   c1   c2    c3              scan(merge)
+    out:  c1   r12   r123            (r12 = merge(c1, c2), …)
+
+``initial`` is a *function* that creates the initial state, not the state
+itself. Inside a ``group_by``, it is called once for every key, so that the
+keys never share a mutable state such as a NumPy array that ``func`` updates
+in place.
+
+Use it to keep a running representative per 2D class. A ``map`` computes the
+average of every chunk, and ``scan`` merges the averages, weighted by their
+particle counts:
+
+.. code-block:: python
+
+    def merge_averages(running: ClassAverage, chunk: ClassAverage) -> ClassAverage:
+        count = running.count + chunk.count
+        image = (running.image * running.count + chunk.image * chunk.count) / count
+        return ClassAverage(image=image, count=count)
+
+    class_stream.chunk(2_000).map(align_and_average).scan(merge_averages)
+
+.. warning::
+
+   ``func`` runs in the single process of the stage, without the GPUs of the
+   protocol (``@resources``), and the stage processes one item at a time. Do
+   the expensive work in the ``map`` before it and keep ``func`` a cheap
+   merge. The state is held by the stage, so a state that grows with every
+   item, such as all particles seen so far, grows without limit.
+
+``combine_latest()``
+--------------------
 
 .. code-block:: python
 
@@ -157,6 +199,8 @@ The flush behavior is part of each operation's contract:
      - Emits the elements collected so far, if it has not emitted yet.
    * - ``flatten``
      - Nothing; it holds no state.
+   * - ``scan``
+     - Nothing; every state was already emitted.
    * - ``combine_latest``
      - Drops items still waiting for the other stream.
    * - ``group_by``

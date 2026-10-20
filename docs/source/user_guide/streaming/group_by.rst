@@ -1,5 +1,5 @@
-group_by
-========
+``group_by()``
+==============
 
 .. currentmodule:: scipion_bridge.core.streaming
 
@@ -22,7 +22,7 @@ Semantics
     stream.group_by(key, pipeline, *, max_keys=None, workers=WorkersFrom.BACKEND)
 
 Every item is routed by its key into ``pipeline``. Stateful operations inside
-the sub-pipeline (``chunk``, ``collect``, ``combine_latest``) see only the
+the sub-pipeline (``chunk``, ``collect``, ``scan``, ``combine_latest``) see only the
 items of one key, exactly as if each key had a pipeline of its own:
 
 .. code-block:: python

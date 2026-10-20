@@ -76,8 +76,8 @@ resolvers as its caller.
 registered under ``module`` to ``target`` (the calling module by default).
 The target must be a prefix of the module name.
 
-ComposedResolver
-----------------
+``ComposedResolver``
+--------------------
 
 A ``ComposedResolver`` runs its steps in order, instantiating each resolver
 class per call and passing ``metadata`` and ``slice`` to the steps that
@@ -111,8 +111,8 @@ increments the count to 1. A proxy group allocates a base path and creates one
 managed child per declared field; the group itself is not counted, only its
 children.
 
-proxify
-^^^^^^^
+``@proxify``
+^^^^^^^^^^^^
 
 ``@proxify`` wraps a function so that each argument is resolved to a
 ``FuncParam``: a string for the command line, plus the proxy type and whether

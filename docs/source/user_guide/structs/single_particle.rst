@@ -59,6 +59,18 @@ The proxies describe the RELION-style file formats for particle stacks:
    An MRC image stack (``.mrcs``, also accepts ``.mrc``). ``len()`` and
    ``estimated_item_nbytes`` read only the header. Constructed from a ``.star``
    path, it finds the stack through the ``rlnImageName`` column.
+   ``read_images(selection)`` returns a contiguous range of images as
+   ``float32``.
+
+``SpiderStackProxy``
+   A little-endian SPIDER stack of 2D images (``.stk``), as written by Xmipp.
+   ``len()``, ``estimated_item_nbytes`` and ``read_images(selection)`` work
+   as for ``MRCStackProxy``. A file whose size does not match its header,
+   e.g. a big-endian one, raises ``ValueError``.
+
+Both stack proxies read a range of images with one sequential read of the
+file. Copying from a memory map instead faults the pages in one by one,
+which reads large stacks on spinning disks at a fraction of their speed.
 
 ``ParticleStackProxy``
    A ``ProxyGroup`` of a ``StarfileProxy`` (``metadata``, the primary proxy)
@@ -67,6 +79,24 @@ The proxies describe the RELION-style file formats for particle stacks:
 
 These three are also exported from the top-level namespace as
 ``B.StarfileProxy``, ``B.MRCStackProxy`` and ``B.ParticleStackProxy``.
+
+Particles extracted by Xmipp, for example by ``XmippProtExtractParticles`` in
+Scipion, come as one ``<stem>.mrcs`` stack and one ``<stem>.xmd`` metadata
+file per micrograph:
+
+``XmdProxy``
+   An ``.xmd`` file: a STAR file with Xmipp labels (``_ctfDefocusU``,
+   ``_xcoor``, ...). It reads like a ``StarfileProxy``.
+
+``XmippParticleStackProxy``
+   A ``ProxyGroup`` of an ``XmdProxy`` (``metadata``, the primary proxy) and
+   an ``MRCStackProxy`` (``particle_stack``) sharing a base path. The
+   ``_image`` column names the stack relative to the Scipion project, so the
+   stack is found by its stem instead.
+
+``XmippSpiderParticleStackProxy``
+   The same for Xmipp stacks stored as SPIDER: ``<stem>.xmd`` next to
+   ``<stem>.stk``.
 
 Resolvers
 ---------
@@ -91,10 +121,43 @@ The module registers these conversions:
        its optics block. Caches the parsed STAR file across chunks.
    * - ``StarfileProxy`` → ``ParticleStackProxy``, ``MRCStackProxy``
      - Locates the stack referenced by the STAR file.
+   * - ``XmippParticleStackProxy``, ``XmippSpiderParticleStackProxy`` →
+       ``Set[Particle]``
+     - Slice-aware. Reads the requested range of images and fills the CTF
+       (``_ctfDefocusU/V/Angle``, ``_ctfPhaseShift``, ``_ctfCritMaxFreq`` as
+       resolution, ``_ctfCritFitting`` as fit quality), the coordinates
+       (``_xcoor``, ``_ycoor``), the acquisition (``_ctfVoltage``,
+       ``_ctfSphericalAberration``, ``_ctfQ0`` as amplitude contrast,
+       ``_magnification``) and the pixel size (``_samplingRate``,
+       ``_ctfSamplingRate``) from the labels present. Drops the particles
+       with ``_enabled`` other than 1, and raises ``ValueError`` if the
+       ``_image`` indices are not in stack order.
+   * - ``XmdProxy`` → ``XmippParticleStackProxy``,
+       ``XmippSpiderParticleStackProxy``
+     - Pairs the metadata with the stack of the same stem.
 
 Together with the resolver that every proxy type gets from ``Path``, these
 give a slice-aware path from a STAR file on disk to ``Set[Particle]``, which
 is what lets the Ray runner stream particle inputs in chunks.
+
+``ParticleStackProxy`` and both Xmipp proxies lead from ``Path`` to
+``Set[Particle]``. The Xmipp resolvers are registered with ``weight=1``
+(see ``@resolver``), so without further information a path is read as a
+RELION STAR file. Read ``.xmd`` files by resolving through the Xmipp proxy
+that matches the stack format:
+
+.. code-block:: python
+
+    resolver = B.find_resolver(
+        Path,
+        B.Set[spa.Particle],
+        intermediate=spa.XmippParticleStackProxy,
+    )
+    particles = resolver(Path("extra/micrograph_fractions.xmd"))
+
+Scipion keeps the pixel size, magnification and dose of extracted particles
+in the set (``particles.sqlite``), not in the ``.xmd`` files, so these fields
+stay unset.
 
 With the ``pyworkflow`` extra, further resolvers convert between these types
 and Scipion objects: ``SetOfParticles`` and ``Set[Particle]``,

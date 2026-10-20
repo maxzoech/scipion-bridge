@@ -176,8 +176,8 @@ failed stage may never receive another item (for example, after a
 ``collect``). Errors are wrapped in ``_Failure`` when passed to other actors,
 because Ray treats a ``RayTaskError`` argument as a failed input.
 
-group_by
---------
+``group_by()``
+--------------
 
 ``RayDemuxActor`` routes items into child pipelines, compiled with a nested
 ``RayBackend`` that inherits the buffering, profiling and parameter settings:

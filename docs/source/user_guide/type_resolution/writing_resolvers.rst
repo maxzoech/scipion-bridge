@@ -85,6 +85,28 @@ resolvers that declare them:
         protocol = metadata.protocol
         ...
 
+Opt-in routes
+-------------
+
+Resolution takes the route of lowest cost through the graph. Every resolver
+costs 0 by default, so when two routes of the same cost lead to the target,
+which one is taken is not defined. Give the resolver of the alternative
+route a positive ``weight`` to keep it out of default resolutions:
+
+.. code-block:: python
+
+    @B.resolver(weight=1)
+    def resolve_xmipp_spider_stack_to_particles(
+        value: XmippSpiderParticleStackProxy,
+        *,
+        slice=None,
+    ) -> B.Set[Particle]:
+        ...
+
+The route is then taken only when it is requested, e.g.
+``B.find_resolver(Path, B.Set[Particle], intermediate=XmippSpiderParticleStackProxy)``,
+or for a value that can only take that route.
+
 Resolvers for subclasses
 ------------------------
 

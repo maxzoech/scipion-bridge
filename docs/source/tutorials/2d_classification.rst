@@ -226,7 +226,23 @@ to a class and returns one ``Class2D`` per class present in the chunk.
 
 ``group_by`` routes each ``Class2D`` into a sub-pipeline **for its class**, so
 stateful operations inside the sub-pipeline only see the particles of one class.
-The sub-pipeline for a class is created when its first particles arrive:
+The sub-pipeline for a class is created when its first particles arrive.
+
+The representative of a class must improve as particles arrive, so it
+cannot be computed from one chunk alone. ``_align_pca`` averages the aligned
+particles of a chunk, and ``scan`` merges these averages into a running
+average of the class. ``scan`` emits the running average after every chunk:
+
+.. code-block:: python
+
+    from typing import NamedTuple
+
+
+    class ClassAverage(NamedTuple):
+        class_id: int
+        image: np.ndarray                         # average of the aligned particles
+        count: int                                # particles in the average
+        particles: B.Set[spa.FlexParticle]        # particles of the latest chunk
 
 .. code-block:: python
 
@@ -235,12 +251,37 @@ The sub-pipeline for a class is created when its first particles arrive:
                 class_stream
                 .map(lambda cls: cls.particles)
                 .chunk(2_000)
-                .map(self._align_pca)
+                .map(self._align_pca)                    # average of one chunk
+                .scan(self._merge_averages)              # running average of the class
+                .map(self._to_class2d, cpu_only=True)
             )
 
-        def _align_pca(self, particles: B.Set[spa.FlexParticle]) -> spa.Class2D:
-            ...   # align the particles, compute the representative image
-            return spa.Class2D(particles=particles, class_id=..., representative=...)
+        def _align_pca(self, particles: B.Set[spa.FlexParticle]) -> ClassAverage:
+            ...   # align the particles, average the aligned images
+            return ClassAverage(class_id=..., image=..., count=len(particles), particles=particles)
+
+        def _merge_averages(self, running: ClassAverage, chunk: ClassAverage) -> ClassAverage:
+            count = running.count + chunk.count
+            image = (running.image * running.count + chunk.image * chunk.count) / count
+            return chunk._replace(image=image, count=count)
+
+        def _to_class2d(self, average: ClassAverage) -> spa.Class2D:
+            representative = ...   # a Particle with average.image as its pixels
+            return spa.Class2D(
+                particles=average.particles,
+                class_id=average.class_id,
+                representative=representative,
+            )
+
+The running average holds only the image and the particle count, not the
+particles seen so far. Every emitted ``Class2D`` carries the particles of the
+latest chunk and the current representative. In Scipion, the output
+``SetOfClasses2D`` matches classes by id: the particles are appended to the
+class and its representative is replaced (see
+:doc:`/developer/pyworkflow_backend`). The output thus holds all the
+particles of a class and its latest representative. The alignment stays in ``_align_pca``, a map that can
+use the GPUs of the protocol. ``_merge_averages`` runs in the single
+accumulator stage, so it must stay cheap.
 
 The groups are processed in parallel. ``unkey()`` merges them back into one
 stream of ``Keyed(class_id, Class2D)`` items:
@@ -305,7 +346,8 @@ The workflow combined the main building blocks of the library:
   once and overlaps GPU and CPU work in separate maps;
 * the *sample, then apply* pattern (``collect`` and ``combine_latest``) to
   train a classifier on the stream itself;
-* ``flatten`` and ``group_by`` to refine every class with state of its own;
+* ``flatten`` and ``group_by`` to refine every class with state of its own,
+  and ``scan`` to keep a running representative per class;
 * chaining, to run two independent protocols as one pipeline;
 * the Ray runner, with a sink persisting the results.
 

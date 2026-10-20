@@ -42,8 +42,8 @@ every branch receives every item.
 ``send`` rejects plain Python lists. Wrap elements in a ``B.Set``, which
 serializes as a few contiguous buffers instead of object by object.
 
-map
----
+``map()``
+---------
 
 .. code-block:: python
 
@@ -82,8 +82,8 @@ capture, including ``self`` for bound methods, are pickled with
 * read parameters through ``Field.value`` and expensive objects through
   ``B.Resource``, which work inside workers.
 
-map_element
------------
+``map_element()``
+-----------------
 
 .. code-block:: python
 

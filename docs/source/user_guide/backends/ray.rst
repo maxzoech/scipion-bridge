@@ -58,9 +58,10 @@ from files.
 Constructor arguments
 ^^^^^^^^^^^^^^^^^^^^^
 
-``RayPipelineRunner(protocol, *, parameters=None, origin_types=None, sink=None,
-queue_size=2, max_in_flight=None, buffer_size=4, spill_threshold=4,
-spill_store=None, profile=None, profile_log_level=logging.INFO)``
+``RayPipelineRunner(protocol, *, parameters=None, origin_types=None,
+intermediate_types=None, sink=None, queue_size=2, max_in_flight=None,
+buffer_size=4, spill_threshold=4, spill_store=None, profile=None,
+profile_log_level=logging.INFO, num_loaders=4, loader_cpus=0)``
 
 ``parameters``
    Values of the protocol's fields. Unknown names raise ``ValueError``, and so
@@ -74,6 +75,12 @@ spill_store=None, profile=None, profile_log_level=logging.INFO)``
    precomputed when the runner is created. It must contain a slice-aware step
    so that the input can be streamed in chunks (see
    :doc:`/user_guide/type_resolution/chunked_resolution`).
+
+``intermediate_types``
+   The type each input is resolved through, by input name, when several
+   routes lead from the origin type to the input type. For example,
+   ``{"particles": spa.XmippParticleStackProxy}`` reads ``.xmd`` files
+   instead of STAR files (see :doc:`/user_guide/structs/single_particle`).
 
 ``sink``
    Where the protocol's output dictionaries go: a ``Sink``, a ``SinkWriter``,
@@ -89,6 +96,10 @@ spill_store=None, profile=None, profile_log_level=logging.INFO)``
 ``profile``, ``profile_log_level``
    Profile the pipeline into a trace file; see `Profiling`_.
 
+``num_loaders``, ``loader_cpus``
+   The number of loader actors for an input given as a list, and the CPUs
+   each one reserves; see `Loading many files`_.
+
 Running
 ^^^^^^^
 
@@ -99,6 +110,45 @@ its origin type. When all inputs are exhausted, ``run`` flushes the pipeline
 and prints the throughput and a table of per-stage statistics (see
 :doc:`/user_guide/streaming/pipelines`). Use the runner as a context manager,
 or call ``close()``, to release the Ray actors.
+
+Loading many files
+^^^^^^^^^^^^^^^^^^
+
+Large datasets come as thousands of small files, for example one particle
+stack per micrograph. Resolving them one after another on the driver makes
+reading the bottleneck, and the few particles of each file make tiny chunks
+whose per-item overhead dominates the pipeline. Give such an input as a
+**list** of values instead:
+
+.. code-block:: python
+
+    from scipion_bridge.backend.ray.loader import expand_pattern
+
+    with RayPipelineRunner(
+        FoundationModelInference(),
+        intermediate_types={"particles": spa.XmippParticleStackProxy},
+        num_loaders=8,
+    ) as runner:
+        runner.run(particles=expand_pattern("Runs/000042_Extract/extra/*.xmd"))
+
+The runner splits the list round-robin among ``num_loaders`` loader actors.
+Each one resolves its files, regroups their chunks into chunks of the input
+chunk size (``SCIPION_CHUNK_SIZE``, or as many items as fit into
+``SCIPION_TARGET_BYTE_SIZE``), and pushes them directly into the source of the
+pipeline, waiting while the source is full. ``run`` flushes the pipeline once
+every loader is done, and prints a table of the loaders after the stage
+statistics:
+
+``read_s``
+   Time spent reading files and regrouping their chunks.
+``push_s``
+   Time spent pushing chunks, most of it waiting for room in the source. When
+   ``push_s`` is low and the first stage is often idle, more loaders help.
+
+Loaders run concurrently, so the order of items across files is not
+deterministic. Inputs given as single values are still resolved on the
+driver while the loaders run. With profiling, the loaders record their
+``read`` and ``push`` spans into the trace.
 
 .. _ray-persisting-outputs:
 
@@ -143,7 +193,10 @@ Command line applications
 
 ``launch_as_terminal_application()`` builds an ``argparse`` parser from the
 protocol's declarations and runs the protocol with the parsed arguments.
-Inputs become path arguments. Field names are converted to kebab case, so
+Inputs become path arguments. An input takes one or more paths or quoted
+glob patterns (``**`` matches directories). A single path is resolved on the
+driver; anything else gives the list of all matching files, which the
+runner loads in parallel. Field names are converted to kebab case, so
 ``chunk_size`` becomes ``--chunk-size``. The protocol's docstring becomes the
 program description.
 
@@ -157,10 +210,13 @@ program description.
 
     python embed.py --help
     python embed.py --particles particles.star --chunk-size 512 --model-type CRYO_IEF_SMALL
+    python embed.py --particles 'Runs/000042_Extract/extra/*.xmd' --num-loaders 8
+    python embed.py --particles 'Runs/000042_Extract/extra/*.xmd' 'Runs/000057_Extract/extra/*.xmd'
 
 ``bool`` fields become ``--name`` / ``--no-name``, and ``Enum`` fields accept
 the member names. A field that is not optional is a required option, even
-when it has a default. Every application also accepts ``--profile [PATH]``.
+when it has a default. Every application also accepts ``--profile [PATH]``
+and ``--num-loaders N``.
 
 Buffering and spilling
 ----------------------
@@ -260,6 +316,10 @@ variable, which is convenient for tuning a protocol without changing code:
        file in the working directory, ``0`` for no profiling.
    * - ``SCIPION_STREAM_PROFILE_LOG_LEVEL``
      - Overrides ``profile_log_level``, e.g. ``debug`` to log every item.
+   * - ``SCIPION_STREAM_NUM_LOADERS``
+     - Overrides ``num_loaders``.
+   * - ``SCIPION_STREAM_LOADER_CPUS``
+     - Overrides ``loader_cpus``.
    * - ``SCIPION_BRIDGE_CPUS``
      - *Set by the backend* inside calls that reserved CPU cores.
    * - ``SCIPION_BRIDGE_GPU_FRACTION``

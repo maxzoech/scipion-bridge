@@ -79,6 +79,9 @@ Operations at a glance
    * - ``flatten()``
      - 1 → N
      - Emit every element of an incoming iterable as its own item.
+   * - ``scan(func, initial=None)``
+     - 1 → 1
+     - Fold the stream with ``func`` and emit every running state.
    * - ``combine_latest(other)``
      - (N, M) → N
      - Pair every item with the latest item of another stream.
@@ -106,8 +109,8 @@ Articles in this section
 
 * :doc:`sources_and_maps` covers the entry points of a graph and the
   stateless operations ``map`` and ``map_element``.
-* :doc:`stateful_operations` covers ``chunk``, ``collect``, ``flatten`` and
-  ``combine_latest``, with their exact behavior at the end of a stream.
+* :doc:`stateful_operations` covers ``chunk``, ``collect``, ``flatten``,
+  ``scan`` and ``combine_latest``, with their exact behavior at the end of a stream.
 * :doc:`group_by` explains per-key sub-pipelines and how keys share worker
   processes.
 * :doc:`sinks` covers terminal nodes, the ``SinkWriter`` protocol and writing
