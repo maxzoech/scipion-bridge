@@ -1,10 +1,10 @@
 from pathlib import Path
 from typing import Any, Optional, cast
-import mrcfile
 import numpy as np
 import pandas as pd
 import starfile
 
+from .mrc import read_stack, write_stack
 from .proxies import ParticleStackProxy, MRCStackProxy, StarfileProxy
 from .particle import Particle
 from ..core.typed.resolve import resolver
@@ -20,7 +20,7 @@ def resolve_mrc_stack_proxy(value: struct.Set[Particle]) -> MRCStackProxy:
     assert isinstance(new_proxy, MRCStackProxy)
 
     pixel_data = np.asarray(value["pixels"])
-    mrcfile.write(new_proxy.path, pixel_data, overwrite=True)
+    write_stack(new_proxy.path, pixel_data, overwrite=True)
 
     return new_proxy
 
@@ -61,7 +61,7 @@ def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackPr
     num_el = len(value)
     pixel_data = np.asarray(value["pixels"])
 
-    mrcfile.write(new_proxy.particle_stack.path, pixel_data, overwrite=True)
+    write_stack(new_proxy.particle_stack.path, pixel_data, overwrite=True)
 
     mrc_name = new_proxy.particle_stack.path.name
     df_data: dict[str, Any] = {
@@ -159,18 +159,7 @@ class resolve_particle_stack_to_particles:
         *,
         slice: Optional[slice] = None,
     ) -> struct.Set[Particle]:
-        with mrcfile.mmap(value.particle_stack.path, mode="r") as mrc:
-            assert mrc.data is not None
-            raw = mrc.data
-            if raw.ndim == 2:
-                raw = raw[np.newaxis, ...]
-            elif raw.ndim != 3:
-                raise ValueError(
-                    f"Expected 2D or 3D image data in MRC stack '{value.particle_stack.path}', got shape {raw.shape}",
-                )
-
-            sliced_raw = raw[slice] if slice is not None else raw
-            data = np.asarray(sliced_raw, dtype=np.float32)
+        data = read_stack(value.particle_stack.path, slice)
 
         particle_set = struct.Set[Particle](capacity=len(data))
         particle_set["pixels"] = data
