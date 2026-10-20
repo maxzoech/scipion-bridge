@@ -1,13 +1,28 @@
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections.abc import Sized
 from enum import Enum
+import glob
 import logging
 import os
 from pathlib import Path
 import re
 import time
-from typing import Any, Callable, Dict, Mapping, Optional, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+)
 
+import ray
+
+from ...core.environment.compute import numpy_hugepage_env
 from ...core.typed.resolve import ComposedResolver, find_resolver
 from ...core.protocol.protocol_base import Protocol
 from ...core.streaming.backend import StageStats
@@ -15,8 +30,14 @@ from ...core.streaming.pipeline import Pipeline
 from ...core.streaming.sink import Sink
 from ...core.streaming.sink_writer import SinkWriter
 from ...core.streaming.spill import SpillStoreFactory, pickle_spill_store
-from .backend import DEFAULT_BUFFER_SIZE, DEFAULT_SPILL_THRESHOLD, RayBackend
+from .backend import (
+    DEFAULT_BUFFER_SIZE,
+    DEFAULT_SPILL_THRESHOLD,
+    RayBackend,
+    RayCompiledPipeline,
+)
 from .container import configure_ray_env
+from .loader import LoaderStats, RayInputLoader, expand_pattern, shard
 
 
 def _convert_to_argname(name: str) -> str:
@@ -40,6 +61,41 @@ def _format_stats(stats: Dict[str, StageStats]) -> str:
         for label, s in stats.items()
     ]
     return "\n".join([header, *rows])
+
+
+def _format_loader_stats(stats: Sequence[LoaderStats]) -> str:
+    """Format the metrics of the input loaders as a table."""
+    header = (
+        f"{'loader':<40} {'files':>6} {'chunks':>6} {'items':>8} "
+        f"{'read_s':>8} {'push_s':>8}"
+    )
+    rows = [
+        f"{f'loader {i}':<40} {s.files:>6} {s.chunks:>6} {s.items:>8} "
+        f"{s.read_s:>8.2f} {s.push_s:>8.2f}"
+        for i, s in enumerate(stats)
+    ]
+    return "\n".join([header, *rows])
+
+
+def _expand_input(value: str) -> List[Path]:
+    """The files matching a glob pattern, or the path itself."""
+    match glob.has_magic(value):
+        case True:
+            return expand_pattern(value)
+        case False:
+            return [Path(value)]
+
+
+def _parse_inputs(values: List[str]) -> Union[Path, List[Path]]:
+    """A command line input: one path, or the files of several paths and patterns.
+
+    A single path is resolved on the driver; a list is resolved by the loaders.
+    """
+    match values:
+        case [value] if not glob.has_magic(value):
+            return Path(value)
+        case _:
+            return [path for value in values for path in _expand_input(value)]
 
 
 def _env_int(name: str, value: Optional[int]) -> Optional[int]:
@@ -165,6 +221,7 @@ class RayPipelineRunner:
         *,
         parameters: Optional[Mapping[str, Any]] = None,
         origin_types: Optional[Dict[str, Type]] = None,
+        intermediate_types: Optional[Dict[str, Type]] = None,
         sink: Optional[Union[Sink, SinkWriter, Callable[[Any], Any]]] = None,
         queue_size: int = 2,
         max_in_flight: Optional[int] = None,
@@ -173,6 +230,8 @@ class RayPipelineRunner:
         spill_store: Optional[SpillStoreFactory] = None,
         profile: Union[None, bool, str, Path] = None,
         profile_log_level: int = logging.INFO,
+        num_loaders: int = 4,
+        loader_cpus: float = 0,
     ) -> None:
         """
         Every buffering option is overridden by an environment variable, see
@@ -182,6 +241,11 @@ class RayPipelineRunner:
             parameters: Values of the protocol parameters, served to
                 ``Field.value`` on the driver and inside every pipeline stage.
                 Parameters without a value resolve to their declared default.
+            origin_types: Type each input is given as, by input name; ``Path``
+                by default.
+            intermediate_types: Type each input is resolved through, by input
+                name, when several routes lead to its declared type; e.g.
+                ``XmippParticleStackProxy`` for ``.xmd`` files.
             queue_size: Number of items each pipeline stage reads ahead
                 (``SCIPION_STREAM_QUEUE_SIZE``).
             max_in_flight: Number of items on the routes out of a stage at
@@ -201,10 +265,22 @@ class RayPipelineRunner:
             profile_log_level: Level of the profiling log of the workers;
                 ``DEBUG`` logs every item
                 (``SCIPION_STREAM_PROFILE_LOG_LEVEL``, e.g. ``debug``).
+            num_loaders: Number of loader actors that resolve an input given
+                as a list of values in parallel
+                (``SCIPION_STREAM_NUM_LOADERS``).
+            loader_cpus: CPUs reserved for each loader actor
+                (``SCIPION_STREAM_LOADER_CPUS``).
         """
         self.protocol = protocol
         self.parameters = _validate_parameters(protocol, parameters or {})
         self.origin_types = origin_types or {}
+        self.intermediate_types = intermediate_types or {}
+        self.num_loaders = int(
+            os.environ.get("SCIPION_STREAM_NUM_LOADERS", num_loaders)
+        )
+        self.loader_cpus = float(
+            os.environ.get("SCIPION_STREAM_LOADER_CPUS", loader_cpus)
+        )
         self.queue_size = int(os.environ.get("SCIPION_STREAM_QUEUE_SIZE", queue_size))
         self.max_in_flight = _env_int("SCIPION_STREAM_MAX_IN_FLIGHT", max_in_flight)
         self.buffer_size = _env_limit("SCIPION_STREAM_BUFFER_SIZE", buffer_size)
@@ -238,6 +314,7 @@ class RayPipelineRunner:
             resolver = find_resolver(
                 origin_type,
                 target_type,
+                intermediate=self.intermediate_types.get(name),
             )
             self._input_resolvers[name] = resolver
 
@@ -304,6 +381,50 @@ class RayPipelineRunner:
         """Return the precomputed input resolvers."""
         return dict(self._input_resolvers)
 
+    def _start_loaders(
+        self,
+        batched: Mapping[str, Sequence[Any]],
+        *,
+        chunk_size: Optional[int],
+        target_bytes: Optional[int],
+    ) -> List[Tuple[Any, ray.ObjectRef]]:
+        """Start the loader actors of the inputs given as lists.
+
+        Returns every loader with the reference to the result of its run.
+        """
+        compiled = self.pipeline.compiled
+        assert isinstance(compiled, RayCompiledPipeline)
+
+        loaders: List[Tuple[str, Sequence[Any], Any]] = [
+            (
+                name,
+                values,
+                RayInputLoader.options(
+                    num_cpus=self.loader_cpus,
+                    runtime_env={"env_vars": numpy_hugepage_env()},
+                ).remote(
+                    self._input_resolvers[name],
+                    self.parameters,
+                    compiled.profile,
+                    f"loader:{name}:{i}",
+                ),
+            )
+            for name, all_values in batched.items()
+            for i, values in enumerate(shard(all_values, self.num_loaders))
+        ]
+        return [
+            (
+                actor,
+                actor.run.remote(
+                    values,
+                    compiled.source_handle(name),
+                    chunk_size,
+                    target_bytes,
+                ),
+            )
+            for name, values, actor in loaders
+        ]
+
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         return self.run(*args, **kwds)
 
@@ -312,7 +433,14 @@ class RayPipelineRunner:
         inputs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
-        """Iterate over resolved inputs in lockstep interleaving and execute the compiled streaming pipeline."""
+        """Resolve the inputs in chunks and stream them through the compiled pipeline.
+
+        Inputs given as a single value are resolved on the driver and
+        interleaved one chunk at a time. An input given as a list or tuple of
+        values, e.g. the files matching a pattern, is resolved by
+        ``num_loaders`` loader actors in parallel, which regroup the chunks of
+        all values into chunks of the target size.
+        """
         all_inputs = dict(inputs or {})
         all_inputs.update(kwargs)
 
@@ -329,14 +457,24 @@ class RayPipelineRunner:
 
         _DONE = object()
 
+        streamed = {
+            name: value
+            for name, value in all_inputs.items()
+            if name in self._input_resolvers
+        }
+        batched = {
+            name: value
+            for name, value in streamed.items()
+            if isinstance(value, (list, tuple))
+        }
         active_iterators = {
             name: self._input_resolvers[name].iter(
                 raw_value,
                 chunk_size=env_chunk_size,
                 target_bytes=env_target_bytes,
             )
-            for name, raw_value in all_inputs.items()
-            if name in self._input_resolvers
+            for name, raw_value in streamed.items()
+            if name not in batched
         }
 
         t_start = time.perf_counter()
@@ -344,25 +482,41 @@ class RayPipelineRunner:
         total_items = 0
 
         pipeline = self.pipeline
-        with pipeline:
-            while active_iterators:
-                for name in list(active_iterators.keys()):
-                    chunk = next(
-                        active_iterators[name],
-                        _DONE,
-                    )
-                    if chunk is _DONE:
-                        del active_iterators[name]
-                        continue
+        loaders = self._start_loaders(
+            batched,
+            chunk_size=env_chunk_size,
+            target_bytes=env_target_bytes,
+        )
+        try:
+            with pipeline:
+                while active_iterators:
+                    for name in list(active_iterators.keys()):
+                        chunk = next(
+                            active_iterators[name],
+                            _DONE,
+                        )
+                        if chunk is _DONE:
+                            del active_iterators[name]
+                            continue
 
-                    assert isinstance(chunk, Sized)
+                        assert isinstance(chunk, Sized)
 
-                    total_chunks += 1
-                    total_items += len(chunk)
+                        total_chunks += 1
+                        total_items += len(chunk)
 
-                    pipeline.send(
-                        **{name: chunk},
-                    )
+                        pipeline.send(
+                            **{name: chunk},
+                        )
+
+                loader_stats: List[LoaderStats] = ray.get(
+                    [run for _, run in loaders],
+                )
+        finally:
+            for actor, _ in loaders:
+                ray.kill(actor)
+
+        total_chunks += sum(s.chunks for s in loader_stats)
+        total_items += sum(s.items for s in loader_stats)
 
         elapsed = time.perf_counter() - t_start
         throughput = total_items / elapsed if elapsed > 0 else 0.0
@@ -372,6 +526,8 @@ class RayPipelineRunner:
             f"{throughput:.1f} items/s)",
         )
         print(_format_stats(pipeline.stats()))
+        if loader_stats:
+            print(_format_loader_stats(loader_stats))
         match self.profile:
             case None:
                 pass
@@ -398,11 +554,21 @@ class RayPipelineRunner:
             parser.add_argument(
                 _convert_to_argname(name),
                 dest=name,
-                type=Path,
+                nargs="+",
                 required=(not field.optional) or field.default is not None,
                 default=field.default,
                 help=field.help,
             )
+
+        parser.add_argument(
+            "--num-loaders",
+            type=int,
+            help=(
+                "Number of loader actors resolving the files of an input "
+                "given as several paths or quoted glob patterns, e.g. "
+                "'run_a/extra/*.xmd' 'run_b/extra/*.xmd'."
+            ),
+        )
 
         parser.add_argument(
             "--profile",
@@ -449,9 +615,11 @@ class RayPipelineRunner:
         args = parser.parse_args()
         if args.profile is not None:
             self.set_profile(args.profile)
+        if args.num_loaders is not None:
+            self.num_loaders = args.num_loaders
 
         inputs = {
-            name: val
+            name: _parse_inputs(val) if isinstance(val, list) else val
             for name in config.inputs
             if (val := getattr(args, name, None)) is not None
         }

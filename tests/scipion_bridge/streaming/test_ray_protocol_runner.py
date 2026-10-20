@@ -14,6 +14,7 @@ from scipion_bridge import Protocol
 from scipion_bridge.core.streaming.ops import Source, MapOp
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
+from scipion_bridge.single_particle import XmippParticleStackProxy
 from scipion_bridge.single_particle.particle import Particle
 from scipion_bridge.backend.ray.ray_protocol_runner import RayPipelineRunner
 
@@ -575,3 +576,92 @@ def test_ray_pipeline_runner_cli_parameters(tmp_path, monkeypatch):
     runner.launch_as_terminal_application()
 
     assert proto.driver_values == (Precision.FP16, 5)
+
+
+def _create_xmipp_stack(tmp_path: Path, stem: str, first: int, n_particles: int):
+    """Write ``<stem>.mrcs`` with images ``first, first + 1, ...`` and its ``.xmd``."""
+    ids = np.arange(first, first + n_particles, dtype=np.float32)
+    with mrcfile.new(tmp_path / f"{stem}.mrcs") as mrc:
+        mrc.set_data(ids[:, None, None] * np.ones((1, 8, 8), dtype=np.float32))
+        mrc.set_image_stack()
+
+    rows = [
+        f"{10000.0 + particle_id} 1 {i + 1:06d}@Runs/extra/{stem}.mrcs"
+        for i, particle_id in enumerate(ids)
+    ]
+    xmd_path = tmp_path / f"{stem}.xmd"
+    xmd_path.write_text(
+        "# XMIPP_STAR_1 * \n# \ndata_noname\nloop_\n _ctfDefocusU\n _enabled\n _image\n"
+        + "\n".join(rows)
+        + "\n",
+    )
+    return xmd_path
+
+
+def test_ray_pipeline_runner_loads_file_lists_in_parallel(tmp_path, monkeypatch):
+    """Verify that loaders push the regrouped particles of every file into the pipeline."""
+    monkeypatch.setenv("SCIPION_CHUNK_SIZE", "4")
+    sizes = [3, 1, 5, 2, 4]
+    firsts = np.cumsum([0, *sizes[:-1]]).tolist()
+    paths = [
+        _create_xmipp_stack(tmp_path, f"stack_{i}", first, n)
+        for i, (first, n) in enumerate(zip(firsts, sizes))
+    ]
+    collector = OutputCollector.remote()
+    sink = CallbackSinkWriter(
+        lambda out: ray.get(
+            collector.append.remote(
+                (
+                    np.asarray(out["output"]["pixels"])[:, 0, 0].tolist(),
+                    np.asarray(out["output"]["ctf"]["defocus_u"]).flatten().tolist(),
+                ),
+            ),
+        ),
+    )
+    runner = RayPipelineRunner(
+        StreamingParticleProtocol(),
+        intermediate_types={"particles": XmippParticleStackProxy},
+        sink=sink,
+        num_loaders=2,
+    )
+
+    runner.run(particles=paths)
+
+    received = ray.get(collector.get_items.remote())
+    ids = sorted(i for pixels, _ in received for i in pixels)
+    defocus = sorted(d for _, defoci in received for d in defoci)
+    assert ids == list(range(sum(sizes)))
+    assert defocus == [10000.0 + i for i in range(sum(sizes))]
+    # The loaders get stacks 0, 2, 4 (12 particles) and 1, 3 (3 particles),
+    # which they regroup into chunks of 4.
+    assert sorted(len(pixels) for pixels, _ in received) == [3, 4, 4, 4]
+
+
+def test_ray_pipeline_runner_cli_expands_patterns(tmp_path, monkeypatch):
+    """Verify that several paths and quoted glob patterns form one list of files."""
+    for run in ["run_a", "run_b"]:
+        (tmp_path / run).mkdir()
+    run_a = [_create_xmipp_stack(tmp_path / "run_a", f"a_{i}", i, 1) for i in range(2)]
+    run_b = [_create_xmipp_stack(tmp_path / "run_b", f"b_{i}", i, 1) for i in range(3)]
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prog",
+            "--particles",
+            str(tmp_path / "run_b" / "*.xmd"),
+            str(run_a[1]),
+            str(tmp_path / "run_a" / "a_0*.xmd"),
+            "--num-loaders",
+            "3",
+        ],
+    )
+    runner = RayPipelineRunner(
+        StreamingParticleProtocol(),
+        intermediate_types={"particles": XmippParticleStackProxy},
+    )
+
+    with patch.object(runner, "run") as run:
+        runner.launch_as_terminal_application()
+
+    run.assert_called_once_with({"particles": [*run_b, run_a[1], run_a[0]]})
+    assert runner.num_loaders == 3

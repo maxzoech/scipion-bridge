@@ -40,6 +40,11 @@ class Pipeline:
         compiled = backend.compile(ir_sinks)
         return cls(compiled=compiled)
 
+    @property
+    def compiled(self) -> CompiledPipeline:
+        """The backend's compiled pipeline, for backend-specific access."""
+        return self._compiled
+
     def send(self, **kwargs: Any) -> None:
         """
         Submit data into the compiled stream using named keyword arguments.

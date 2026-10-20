@@ -1455,6 +1455,11 @@ class RayCompiledPipeline(CompiledPipeline):
         self._owns_profile = owns_profile
         self._recorder = make_recorder(profile, "driver")
 
+    @property
+    def profile(self) -> Optional[ProfileConfig]:
+        """Profiling of the pipeline, for processes that record into its trace."""
+        return self._profile
+
     def source_handle(self, source_name: str) -> Any:
         """Return the actor handle of a named input source.
 
