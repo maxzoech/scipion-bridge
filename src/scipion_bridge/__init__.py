@@ -25,8 +25,6 @@ from .core.environment.compute import ComputeResources, TaskType
 from .core.utils.shell import shell_command
 
 from .core import protocol
-from .core.protocol import Protocol, Field, Input
-from .core.protocol import Protocol, Field, Input, Resource
 from .core.protocol import Protocol, Field, Input, Resource, ResourceScope
 from .core.protocol import ChainedProtocol, resources
 from .core.environment.resource_provider import (
