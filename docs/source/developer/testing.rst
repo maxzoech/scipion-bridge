@@ -147,3 +147,21 @@ CI (``.github/workflows/python-app.yml``) runs on every push with Python 3.11:
 2. the non-Ray tests with coverage;
 3. the Ray tests in parallel (``-n auto --dist loadgroup``), appending to the
    same coverage data.
+
+Benchmarks
+----------
+
+Benchmarks are scripts in ``benchmarks/``, outside of the test suite, because
+they need real data and a quiet machine. ``bench_mrc_read.py`` compares readers
+for chunks of an MRC particle stack: a memory-mapped copy, the sequential
+reader of ``scipion_bridge.single_particle.mrc`` and, optionally, the
+``vitrio`` package. It reads from blocks of the stack that are cold in every
+cache, so use a stack that is much larger than the memory of the machine:
+
+.. code-block:: bash
+
+    MRC_STACK=/path/to/stack.mrcs python benchmarks/bench_mrc_read.py out.jsonl \
+        --readers mmap,A --conc 1,2,4 --chunks 1000,256
+
+Every measurement is appended to ``out.jsonl`` as one JSON object with
+throughput in MB/s and particles/s.

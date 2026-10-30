@@ -53,7 +53,10 @@ why dangling branches are silently absent from a compiled pipeline.
    * - ``chunk``, ``collect``, ``flatten``
      - ``IRAccumulate`` with the operation's accumulate, initial-state and
        flush functions
-   * - ``combine_latest``
+   * - ``scan``
+     - ``IRAccumulate`` whose state holds the fold; ``on_flush`` becomes the
+       flush function
+   * - ``combine_latest``, ``merge``
      - ``IRAccumulate(tag_inputs=True)``
    * - ``group_by``
      - ``IRDemux(key_fn, template, source_name, max_keys, workers)``
@@ -199,7 +202,7 @@ Points to observe:
 * **Input types are checked**, with an error that names the operation, as the
   built-in operations do.
 * **Several inputs** use ``tag_inputs=True`` and match on ``Tagged(port, item)``
-  (see ``combine_latest``); the method connects the other stream with
+  (see ``combine_latest`` and ``merge``); the method connects the other stream with
   ``other.op(node)``.
 * **Validation of arguments** happens in the constructor, so that errors
   surface when the graph is built.

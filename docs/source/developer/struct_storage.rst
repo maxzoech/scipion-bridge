@@ -222,7 +222,9 @@ as zeros.
 
 ``is_initialized(key)`` (and ``key in storage``) is true if any column lies
 at or below the field key. That way a nested struct counts as initialized when
-one of its fields is.
+one of its fields is. The engine caches the set of field keys that are a
+column or a container of one, and rebuilds it when the set of columns
+changes, so that repeated queries do not scan every column.
 
 Writing
 ^^^^^^^

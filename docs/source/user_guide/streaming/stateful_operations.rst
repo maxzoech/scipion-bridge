@@ -8,8 +8,8 @@ earlier items, such as re-batching, sampling or pairing two streams, is
 expressed with the stateful operations. The backend runs each of them in a
 single process that keeps its state, processes items strictly in arrival
 order, and calls its flush logic when the stream ends. This article describes
-``chunk``, ``collect``, ``flatten``, ``scan`` and ``combine_latest``; ``group_by`` has
-an article of its own (:doc:`group_by`).
+``chunk``, ``collect``, ``flatten``, ``scan``, ``combine_latest`` and ``merge``;
+``group_by`` has an article of its own (:doc:`group_by`).
 
 .. contents:: On this page
    :local:
@@ -105,7 +105,7 @@ per group, ``flatten`` emits them separately, and ``group_by`` routes them.
 
 .. code-block:: python
 
-    stream.scan(func, initial=None)
+    stream.scan(func, initial=None, on_flush=None)
 
 ``scan`` keeps a running state and emits ``state = func(state, item)`` for
 every item, like ``itertools.accumulate``. Without ``initial``, the first item
@@ -120,6 +120,11 @@ becomes the state and is emitted unchanged:
 itself. Inside a ``group_by``, it is called once for every key, so that the
 keys never share a mutable state such as a NumPy array that ``func`` updates
 in place.
+
+With ``on_flush``, the end of the stream emits one more item,
+``on_flush(state)``, computed from the last state. Use it to hand a *final*
+state to stages that must not act on a partial one. It is not called for a
+stream (or a ``group_by`` key) that had no items.
 
 Use it to keep a running representative per 2D class. A ``map`` computes the
 average of every chunk, and ``scan`` merges the averages, weighted by their
@@ -182,6 +187,28 @@ buffered until the end and then dropped. Like ``collect``, the buffer of
 ``combine_latest`` is part of its state and grows with the number of items
 that arrive before ``other`` has produced its first item.
 
+``merge()``
+-----------
+
+.. code-block:: python
+
+    stream.merge(other)
+
+``merge`` joins two branches of a pipeline again (fan-in). It emits the items
+of both streams as they arrive, unchanged. Use it for items that pass through
+untouched next to items that took a detour through a batching stage:
+
+.. code-block:: python
+
+    kept = classes.map(keep)
+    fixed = classes.map(take_rest).chunk(4_096).map(fix)
+    kept.merge(fixed).map(write)
+
+The items of one input keep their order; the items of the two inputs
+interleave in arrival order, so do not rely on a particular interleaving. The
+flush is forwarded once, after **both** inputs ended. ``other`` must be a
+different stream than ``stream``.
+
 Behavior at the end of the stream
 ---------------------------------
 
@@ -200,9 +227,12 @@ The flush behavior is part of each operation's contract:
    * - ``flatten``
      - Nothing; it holds no state.
    * - ``scan``
-     - Nothing; every state was already emitted.
+     - Nothing; every state was already emitted. With ``on_flush``, emits
+       ``on_flush(state)`` first, unless no item arrived.
    * - ``combine_latest``
      - Drops items still waiting for the other stream.
+   * - ``merge``
+     - Nothing; forwards the flush once both inputs ended.
    * - ``group_by``
      - Flushes every key's sub-pipeline, then forwards the flush.
 

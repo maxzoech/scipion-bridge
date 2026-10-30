@@ -36,7 +36,7 @@ class FoundationModelInference(B.Protocol):
   backed by NumPy, Awkward Array and Apache Arrow, with defined rules for
   splitting and combining data.
 - **Streaming**: a declarative API (`map`, `chunk`, `collect`,
-  `combine_latest`, `group_by`, ...) lowered to a small intermediate
+  `scan`, `combine_latest`, `merge`, `group_by`, ...) lowered to a small intermediate
   representation and executed by a backend.
 - **Type resolution**: a graph of converter functions between in-memory
   types, files and Scipion objects.

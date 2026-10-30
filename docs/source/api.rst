@@ -66,7 +66,8 @@ Streaming
 
    * - :py:obj:`B.Op <scipion_bridge.core.streaming.ops.Op>`
      - A stream. Methods: ``map``, ``map_batch``, ``map_element``, ``chunk``,
-       ``collect``, ``flatten``, ``combine_latest``, ``group_by``, ``sink``,
+       ``collect``, ``flatten``, ``scan``, ``combine_latest``, ``merge``,
+       ``group_by``, ``sink``,
        ``write_to``, ``checkpoint``.
    * - :py:obj:`B.FLUSH <scipion_bridge.core.streaming.node.FLUSH>`,
        :py:obj:`B.FlushSignal <scipion_bridge.core.streaming.node.FlushSignal>`
