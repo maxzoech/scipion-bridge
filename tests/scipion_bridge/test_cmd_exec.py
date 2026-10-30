@@ -1,6 +1,4 @@
-import os
 import pytest
-import tempfile
 from scipion_bridge.core.utils.shell import Domain
 from scipion_bridge.core.environment.cmd_exec import StandaloneExecProvider
 from subprocess import PIPE

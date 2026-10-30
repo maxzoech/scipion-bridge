@@ -2,8 +2,6 @@ from abc import ABC, abstractmethod
 from typing import List
 from subprocess import Popen
 
-from .domain import Domain
-
 
 class ShellExecProvider(ABC):
 

@@ -7,25 +7,13 @@ N-dimensional arrays across the outer batch dimension.
 from __future__ import annotations
 
 import dataclasses
-from typing import (
-    Any,
-    Dict,
-    Optional,
-    Sequence,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-    cast,
-    overload,
-)
+from typing import Any, Dict, Optional, Sequence, Type, TypeVar, Union, cast, overload
 from typing_extensions import Self, TypeGuard
 import numpy as np
 from numpy.typing import NDArray
-import awkward as ak
 import pyarrow as pa
 
-from .struct import Struct, Arg, Trait
+from .struct import Struct, Arg
 from .schema import (
     Entry,
     SchemaConvertible,
@@ -33,13 +21,10 @@ from .schema import (
     ArrayEntryBase,
     SchemaEntry,
     SchemaSetEntry,
-    ArraySetEntry,
-    RaggedArraySetEntry,
     SetEntryBase,
 )
 from .exceptions import UninitializedFieldError
-from .key_path import KeyPath
-from .storage import _BaseStorage, RootEngine, StorageView
+from .storage import _BaseStorage, RootEngine
 from .utils.arrow_utils import (
     find_nested_column,
     leaf_from_arrow,

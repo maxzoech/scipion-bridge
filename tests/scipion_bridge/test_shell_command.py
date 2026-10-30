@@ -1,5 +1,4 @@
 import itertools
-from functools import partial
 
 import scipion_bridge as B
 from scipion_bridge.backend import Container

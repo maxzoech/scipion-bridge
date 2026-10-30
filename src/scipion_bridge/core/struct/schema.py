@@ -4,33 +4,16 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from functools import cache
-from typing import (
-    Any,
-    Dict,
-    Iterator,
-    Optional,
-    Sequence,
-    Tuple,
-    Type,
-    Union,
-    TypeAlias,
-    overload,
-)
 from functools import cache, cached_property
 from typing import (
     Any,
     Dict,
     Iterator,
+    List,
     Optional,
-    Sequence,
+    SupportsIndex,
     Tuple,
     Type,
-    Union,
-    TypeAlias,
-    overload,
-    SupportsIndex,
-    List,
 )
 
 import numpy as np

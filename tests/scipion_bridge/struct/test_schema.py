@@ -4,11 +4,8 @@ import pytest
 import scipion_bridge as B
 from scipion_bridge.core.struct.schema import (
     Schema,
-    Entry,
-    ArrayEntryBase,
     ArrayEntry,
     ArraySetEntry,
-    RaggedArraySetEntry,
     SchemaEntry,
     SchemaSetEntry,
 )

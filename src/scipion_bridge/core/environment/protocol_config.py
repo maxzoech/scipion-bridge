@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Mapping, Optional, Type, Dict
-from enum import Enum
+from typing import Any, Mapping
 
 
 class ProtocolConfigurationProvider(ABC):

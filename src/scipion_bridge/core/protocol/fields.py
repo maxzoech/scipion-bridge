@@ -219,7 +219,7 @@ class Resource(Marker[T]):
         assert self.name is not None
 
         if not isinstance(provider, ResourceProvider):
-            raise NotImplementedError(f"Resources are not supported by this backend.")
+            raise NotImplementedError("Resources are not supported by this backend.")
             return self.builder(instance)
 
         return provider.get_resource(

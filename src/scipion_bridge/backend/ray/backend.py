@@ -1662,7 +1662,7 @@ class RayBackend(StreamingBackendProvider):
             )
             python_path = ":".join(all_paths)
 
-            context = ray.init(
+            ray.init(
                 ignore_reinit_error=True,
                 runtime_env={
                     "env_vars": {

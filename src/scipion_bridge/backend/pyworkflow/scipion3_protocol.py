@@ -1,8 +1,4 @@
-import os
-from pathlib import Path
 import importlib
-import pickle
-from functools import partial
 from collections import Counter, defaultdict
 import time
 from pyinstrument import Profiler
@@ -10,23 +6,12 @@ from pyinstrument import Profiler
 from ...core import struct
 from ...core.protocol import Protocol, Field
 from ...core.typed import resolve
-from ...core.streaming import Pipeline, Sink
+from ...core.streaming import Pipeline
 
 
 from .workflow_container import configure_pyworkflow_env
 
-from typing import (
-    Optional,
-    get_args,
-    Dict,
-    List,
-    Any,
-    get_type_hints,
-    Type,
-    Union,
-    Literal,
-    TYPE_CHECKING,
-)
+from typing import Optional, get_args, Dict, List, Any, Literal, TYPE_CHECKING
 
 from enum import Enum
 

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, List, Mapping, Optional, Sequence, TypeVar
 
-import ray # type: ignore
+import ray  # type: ignore
 
 from ...core.struct.set import Set, concat
 from ...core.struct.struct import Struct
@@ -48,7 +48,6 @@ def _item_nbytes(chunk: Set[S]) -> Optional[int]:
         return chunk.to_arrow().nbytes // n
     else:
         return None
-            
 
 
 def _regroup(chunks: Iterable[Set[S]], size: int) -> Iterator[Set[S]]:
@@ -96,7 +95,7 @@ def coalesce(
         _item_nbytes(first),
         target_bytes=target_bytes,
     )
-    
+
     yield from _regroup(itertools.chain([first], it), size)
 
 

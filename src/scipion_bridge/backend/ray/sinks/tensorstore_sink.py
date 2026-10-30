@@ -17,7 +17,6 @@ from scipion_bridge.core.struct.schema import (
     CollectionEntry,
     ArrayEntryBase,
     SetEntryBase,
-    ArrayEntry,
 )
 
 

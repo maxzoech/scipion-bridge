@@ -7,6 +7,7 @@ from .core.typed.resolve import (
     lift_resolvers,
     Resolve,
     ComposedResolver,
+    estimate_optimal_chunk_size,
 )
 
 from .core.typed import proxy
@@ -17,7 +18,6 @@ from .core.typed.proxy import (
     Output,
     ResolveProxy,
     namedproxy,
-    estimate_optimal_chunk_size,
 )
 from .single_particle.proxies import ParticleStackProxy, StarfileProxy, MRCStackProxy
 from .core.environment.domain import Domain

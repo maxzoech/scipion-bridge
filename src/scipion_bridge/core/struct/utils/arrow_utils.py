@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, overload
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
@@ -11,7 +11,6 @@ import pyarrow.compute as _pc
 
 from ..schema import Schema, ArrayEntryBase, RaggedArraySetEntry
 from ..key_path import IndexType, KeyPath
-from ..exceptions import UninitializedFieldError
 
 pc: Any = _pc
 
@@ -160,8 +159,8 @@ def _normalize_offset_dims(offset: Any) -> Tuple[IndexType, ...]:
             return kp.indices
         case tuple() as t:
             return t
-        case list() as l:
-            return tuple(l)
+        case list() as items:
+            return tuple(items)
         case None:
             return ()
         case int() | slice() | np.ndarray():

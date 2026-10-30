@@ -2,7 +2,7 @@ from dependency_injector import containers, providers
 
 from ...core.environment.cmd_exec import StandaloneExecProvider
 from ...core.environment.temp_files import TemporaryFilesProvider
-from ...core.environment.storage import ArrowStorageProvider, NumPyStorageProvider
+from ...core.environment.storage import ArrowStorageProvider
 from ...core.environment.resource_provider import DefaultResourceProvider
 from ...core.environment.protocol_config import ProtocolConfigurationProvider
 from ...core.streaming.backend import StreamingBackendProvider

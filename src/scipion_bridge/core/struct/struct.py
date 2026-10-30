@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-from typing import (
-    Any,
-    Dict,
-    Optional,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-    cast,
-    overload,
-)
+from typing import Any, Dict, Optional, Tuple, Type, TypeVar, Union, overload
 from typing_extensions import Self, TypeAlias
 import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
 import pyarrow as pa
-from functools import cache
 
 from .schema import (
     ArrayEntry,
@@ -32,7 +21,6 @@ from .schema import (
 )
 from ..utils.marker import Marker
 from .storage import _BaseStorage, RootEngine
-from .exceptions import UninitializedFieldError
 from .key_path import KeyPath
 from .utils.arrow_utils import (
     find_nested_column,

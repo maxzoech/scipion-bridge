@@ -1,10 +1,9 @@
 import os
 import inspect
-from pathlib import Path, PurePath
+from pathlib import Path
 import logging
 import warnings
-from enum import Enum
-from functools import partial, wraps
+from functools import wraps
 import shutil
 
 from dependency_injector.wiring import Provide, inject
@@ -13,13 +12,7 @@ from ..environment.temp_files import TemporaryFilesProvider
 from ..utils.arc import manager as arc_manager
 from ..utils.func_params import extract_func_params
 
-from .resolve import (
-    current_registry,
-    resolve_params,
-    resolver,
-    Registry,
-    estimate_optimal_chunk_size,
-)
+from .resolve import current_registry, resolver, Registry
 from abc import ABC, ABCMeta, abstractmethod
 from typing import (
     Dict,
@@ -34,7 +27,6 @@ from typing import (
     cast,
     Callable,
     get_type_hints,
-    Mapping,
     Iterator,
     Sized,
 )
@@ -751,10 +743,10 @@ def proxify(f: Callable[..., Any]) -> Callable[..., Any]:
         try:
             outputs = out_val if isinstance(out_val, tuple) else tuple([out_val])
             outputs_are_proxies = all(isinstance(o, Proxy) for o in outputs)
-        except TypeError as e:
+        except TypeError:
             outputs_are_proxies = False
 
-        if not (out_val == 0 or out_val == None or outputs_are_proxies):
+        if not (out_val == 0 or out_val is None or outputs_are_proxies):
             warnings.warn(
                 f"Wrapped function returns non-zero value; the value '{out_val}' will be discarded",
                 UserWarning,
