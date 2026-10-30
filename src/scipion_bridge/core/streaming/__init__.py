@@ -9,6 +9,7 @@ from .ops import (
     FlattenOp,
     ScanOp,
     CombineLatestOp,
+    MergeOp,
     KeyedOp,
 )
 from .element_mapper import ElementMapConfig
@@ -44,6 +45,7 @@ __all__ = [
     "FlattenOp",
     "ScanOp",
     "CombineLatestOp",
+    "MergeOp",
     "KeyedOp",
     "Sink",
     "FlushSignal",

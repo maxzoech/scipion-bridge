@@ -239,6 +239,32 @@ class Op(Node):
         other.op(node)
         return node
 
+    def merge(self, other: Op) -> MergeOp:
+        """Emit the items of this stream and of `other` as they arrive (fan-in).
+
+        Use it to join two branches of a pipeline again, e.g. items that pass
+        through unchanged and items that took a detour through a batching
+        stage::
+
+            kept = classes.map(keep)
+            fixed = classes.map(take_rest).chunk(4_096).map(fix)
+            kept.merge(fixed).map(write)
+
+        The items of one input keep their order; items of the two inputs
+        interleave in arrival order. The stream end (FlushSignal) is
+        forwarded once both inputs ended.
+
+        Args:
+            other: The second stream. Must be a different stream than this
+                one.
+        """
+        if other is self:
+            raise ValueError("merge() requires two different streams.")
+
+        node = self.op(MergeOp())
+        other.op(node)
+        return node
+
     @overload
     def group_by(
         self,
@@ -741,6 +767,34 @@ class CombineLatestOp(Op):
             initial_state_fn=_combine_latest_initial_state,
             flush_fn=_combine_latest_flush,
             name="combine_latest",
+            tag_inputs=True,
+        )
+
+
+def _merge_initial_state() -> None:
+    return None
+
+
+def _merge(state: None, tagged: Tagged) -> Tuple[None, List[Any]]:
+    match tagged:
+        case Tagged(port=0 | 1, item=item):
+            return (state, [item])
+
+        case _:
+            raise ValueError(f"MergeOp has two inputs, got {tagged!r}.")
+
+
+class MergeOp(Op):
+    """Operation node emitting the items of both of its inputs."""
+
+    def __init__(self) -> None:
+        super().__init__(upstream=None)
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        return IRAccumulate(
+            accumulate_fn=_merge,
+            initial_state_fn=_merge_initial_state,
+            name="merge",
             tag_inputs=True,
         )
 
