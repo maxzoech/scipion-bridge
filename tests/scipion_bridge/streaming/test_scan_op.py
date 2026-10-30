@@ -7,7 +7,11 @@ from scipion_bridge.backend.ray.backend import RayBackend
 from scipion_bridge.core.streaming.ir import IRAccumulate, Keyed
 from scipion_bridge.core.streaming.keyed import KeyedAccumulator
 from scipion_bridge.core.streaming.node import lower
-from scipion_bridge.core.streaming.ops import Source, _make_scan_accumulator
+from scipion_bridge.core.streaming.ops import (
+    Source,
+    _make_scan_accumulator,
+    _make_scan_flush,
+)
 from scipion_bridge.core.streaming.pipeline import Pipeline
 from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
 
@@ -39,12 +43,36 @@ def test_scan_op_validation():
     with pytest.raises(TypeError, match="expects initial to be a function"):
         Source("input").scan(operator.add, initial=[])  # type: ignore[arg-type]
 
+    with pytest.raises(TypeError, match="expects on_flush to be a function"):
+        Source("input").scan(operator.add, on_flush=0)  # type: ignore[arg-type]
+
 
 def test_scan_lowers_to_accumulator_without_flush():
     (ir,) = lower([Source("input").scan(operator.add)])
     assert isinstance(ir, IRAccumulate)
     assert ir.name == "scan(add)"
     assert ir.flush_fn is None
+
+
+def test_scan_with_on_flush_lowers_to_accumulator_with_flush():
+    (ir,) = lower([Source("input").scan(operator.add, on_flush=str)])
+    assert ir.flush_fn is not None
+
+
+def test_scan_on_flush_emits_once_from_the_last_state():
+    accumulate, initial_state = _make_scan_accumulator(operator.add, None)
+    flush = _make_scan_flush(lambda acc: ("final", acc))
+    state, emitted = _run(accumulate, initial_state(), [1, 2])
+    _, flushed = flush(state)
+    assert emitted == [1, 3]
+    assert flushed == [("final", 3)]
+
+
+def test_scan_on_flush_emits_nothing_without_items():
+    accumulate, initial_state = _make_scan_accumulator(operator.add, int)
+    flush = _make_scan_flush(lambda acc: ("final", acc))
+    _, flushed = flush(initial_state())
+    assert flushed == []
 
 
 def test_scan_without_initial_seeds_with_first_item():
@@ -123,3 +151,35 @@ def test_scan_in_ray_group_by_emits_running_state_per_key():
     for keyed in ray.get(collector.get.remote()):
         by_key.setdefault(keyed.key, []).append(keyed.value)
     assert by_key == {"a": [1, 3, 6], "b": [10, 30]}
+
+
+@pytest.mark.usefixtures("ray_cluster")
+def test_scan_on_flush_releases_items_waiting_in_combine_latest():
+    """A gate that opens only on the final state still pairs every buffered item."""
+    collector = Collector.remote()
+    writer = CallbackSinkWriter(lambda x: ray.get(collector.append.remote(x)))
+
+    items = Source("items")
+    # The running sum is withheld (empty list) until the final state is flushed
+    final_total = (
+        items.scan(
+            lambda acc, item: (acc[0] + item, False),
+            initial=lambda: (0, False),
+            on_flush=lambda acc: (acc[0], True),
+        )
+        .map(lambda acc: [acc[0]] if acc[1] else [])
+        .flatten()
+    )
+    sink_node = items.combine_latest(final_total).write_to(writer)
+
+    backend = RayBackend(init_ray=False)
+    with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
+        for item in [1, 2, 3, 4]:
+            pipeline.send(items=item)
+
+    assert sorted(ray.get(collector.get.remote())) == [
+        (1, 10),
+        (2, 10),
+        (3, 10),
+        (4, 10),
+    ]

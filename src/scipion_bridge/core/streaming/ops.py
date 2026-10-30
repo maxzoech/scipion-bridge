@@ -178,6 +178,7 @@ class Op(Node):
         func: Callable[[Any, Any], Any],
         *,
         initial: Optional[Callable[[], Any]] = None,
+        on_flush: Optional[Callable[[Any], Any]] = None,
     ) -> ScanOp:
         """Fold the stream with ``func`` and emit every intermediate result.
 
@@ -195,14 +196,21 @@ class Op(Node):
         compute resources (``@resources``). Do the heavy work in the
         preceding ``map`` and only merge in ``func``.
 
+        With ``on_flush``, the stream end emits one more item,
+        ``on_flush(state)``, before the FlushSignal is forwarded, e.g. a final
+        state that downstream stages waiting for a complete state can use.
+        It is not called for a stream (or key) without items.
+
         Args:
             func: Function computing the next state from the state and an
                 item.
             initial: Function creating the initial state. It is called once
                 per key of a ``group_by``, so that keys never share a mutable
                 state.
+            on_flush: Function computing the item emitted at the stream end
+                from the last state.
         """
-        return self.op(ScanOp(func, initial=initial))
+        return self.op(ScanOp(func, initial=initial, on_flush=on_flush))
 
     def combine_latest(self, other: Op) -> CombineLatestOp:
         """Pair every item of this stream with the latest item of `other`.
@@ -592,6 +600,8 @@ class _ScanState(NamedTuple):
     acc: Any
     # Without an initial function, the state is empty until the first item.
     has_acc: bool
+    # Whether an item arrived, which on_flush needs.
+    seen: bool = False
 
 
 def _make_scan_accumulator(
@@ -612,13 +622,25 @@ def _make_scan_accumulator(
     def accumulate(state: _ScanState, item: Any) -> Tuple[_ScanState, List[Any]]:
         match state:
             case _ScanState(has_acc=False):
-                return (_ScanState(acc=item, has_acc=True), [item])
+                return (_ScanState(acc=item, has_acc=True, seen=True), [item])
 
             case _ScanState(acc=acc):
                 new_acc = func(acc, item)
-                return (_ScanState(acc=new_acc, has_acc=True), [new_acc])
+                return (_ScanState(acc=new_acc, has_acc=True, seen=True), [new_acc])
 
     return (accumulate, initial_state)
+
+
+def _make_scan_flush(
+    on_flush: Callable[[Any], Any],
+) -> Callable[[_ScanState], Tuple[_ScanState, List[Any]]]:
+    def flush(state: _ScanState) -> Tuple[_ScanState, List[Any]]:
+        if state.seen:
+            return (state, [on_flush(state.acc)])
+        else:
+            return (state, [])
+
+    return flush
 
 
 class ScanOp(Op):
@@ -629,6 +651,7 @@ class ScanOp(Op):
         func: Callable[[Any, Any], Any],
         *,
         initial: Optional[Callable[[], Any]] = None,
+        on_flush: Optional[Callable[[Any], Any]] = None,
     ):
         super().__init__(upstream=None)
         if not callable(func):
@@ -640,18 +663,30 @@ class ScanOp(Op):
                 "scan() expects initial to be a function creating the state, got "
                 f"'{type(initial).__name__}'.",
             )
+        if on_flush is not None and not callable(on_flush):
+            raise TypeError(
+                "scan() expects on_flush to be a function of the state, got "
+                f"'{type(on_flush).__name__}'.",
+            )
         self.func = func
         self.initial = initial
+        self.on_flush = on_flush
 
     def lower(self, ctx: LoweringContext) -> IROp:
         accumulate_fn, initial_state_fn = _make_scan_accumulator(
             self.func,
             self.initial,
         )
+        match self.on_flush:
+            case None:
+                flush_fn = None
+            case on_flush:
+                flush_fn = _make_scan_flush(on_flush)
         func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
         return IRAccumulate(
             accumulate_fn=accumulate_fn,
             initial_state_fn=initial_state_fn,
+            flush_fn=flush_fn,
             name=f"scan({func_name})",
         )
 
