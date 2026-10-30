@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import abc
 import threading
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import awkward as ak
 import numpy as np
@@ -285,6 +295,11 @@ class RootEngine(_BaseStorage):
         super().__init__(root=root, parent=parent)
         self._data: Dict[FieldKey, Column] = {}
         self._chunks: Dict[FieldKey, List[Any]] = {}
+        # (column keys, their prefixes), see _initialized_prefixes
+        self._prefix_cache: Tuple[FrozenSet[FieldKey], FrozenSet[FieldKey]] = (
+            frozenset(),
+            frozenset(),
+        )
         self._lock = threading.RLock()
 
     def __getstate__(self) -> Dict[str, Any]:
@@ -381,7 +396,22 @@ class RootEngine(_BaseStorage):
     def is_initialized(self, key: KeyPath) -> bool:
         """Return True if the field identified by key has been initialized in staging."""
         field_key, _ = self._decompose(key)
-        return any(self._is_under(k, field_key) for k, _ in self._columns())
+        return field_key in self._initialized_prefixes()
+
+    def _initialized_prefixes(self) -> FrozenSet[FieldKey]:
+        """Every field key that is a column or a container of one.
+
+        The prefixes are cached for the current set of columns, so repeated
+        queries do not scan every column.
+        """
+        keys = frozenset(self._data) | frozenset(self._chunks)
+        cached_keys, cached_prefixes = self._prefix_cache
+        if cached_keys == keys:
+            return cached_prefixes
+
+        prefixes = frozenset(k[:n] for k in keys for n in range(len(k) + 1))
+        self._prefix_cache = (keys, prefixes)
+        return prefixes
 
     def clear(self, key: Optional[KeyPath] = None) -> None:
         """Clear all stored data under key or root."""

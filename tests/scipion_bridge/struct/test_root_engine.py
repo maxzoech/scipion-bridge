@@ -104,6 +104,36 @@ def test_empty_rows_write_to_dynamic_field():
     assert engine.get_length(KeyPath()) == 0
 
 
+def test_is_initialized_follows_columns_and_their_containers():
+    engine = RootEngine()
+    score = ArraySetEntry(dtype=np.dtype(float), shape=(1,))
+    nested = KeyPath().append("inner").append("score")
+
+    assert not engine.is_initialized(KeyPath())
+    assert not engine.is_initialized(nested)
+
+    engine.write(nested, score, np.ones((2, 1)))
+    # The first query cached the empty state; the write must invalidate it
+    assert engine.is_initialized(KeyPath())
+    assert engine.is_initialized(KeyPath().append("inner"))
+    assert engine.is_initialized(nested)
+    assert not engine.is_initialized(KeyPath().append("other"))
+
+    engine.clear(KeyPath().append("inner"))
+    assert not engine.is_initialized(nested)
+    assert not engine.is_initialized(KeyPath())
+
+
+def test_is_initialized_counts_pending_rows():
+    engine = RootEngine()
+    embedding = RaggedArraySetEntry(dtype=np.dtype(float), shape=(None,))
+    key = KeyPath().narrow_index(1, length=3).append("embedding")
+
+    engine.write(key, embedding, np.zeros(2))
+
+    assert engine.is_initialized(KeyPath().append("embedding"))
+
+
 def test_full_column_length_is_checked_against_pending_sibling():
     engine = RootEngine()
     embedding = RaggedArraySetEntry(dtype=np.dtype(float), shape=(None,))
