@@ -118,6 +118,17 @@ The IR (``core/streaming/ir.py``) consists of dataclasses with edge lists.
 fresh edges, sharing functions and writers, and optionally replacing fields
 per node. It is how backends instantiate the same template several times.
 
+Every IR node has a keyword-only field ``stage_fp``: the fingerprint of the
+computation of the stage. A protocol sets it on the nodes of its pipeline
+(``Node.stage_fp``) when ``get_pipeline()`` seals it, and
+``LoweringContext.lower_node`` copies it onto the lowered node. It is the
+digest of the protocol's fingerprint (code, parameter values, sealed state;
+``core/protocol/fingerprint.py``), the position of the node in the
+``lineage`` of the pipeline and the kind of stage. Nodes of a protocol nested
+in a chain keep the fingerprint of their own protocol; pipelines built
+outside of protocols have ``None``. ``clone_ir`` and ``share_keys`` keep the
+field, so the copies of a template share the identity of its stages.
+
 The execution contract
 ----------------------
 

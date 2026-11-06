@@ -181,8 +181,9 @@ Scipion protocol:
   Commands of an isolated domain run after activating the conda environment
   given as ``conda_env``.
 * **Temporary files** are created in the protocol's ``tmp`` directory.
-* The ``setup()`` and ``validate_protocol_configuration()`` hooks of the
-  protocol run as the first steps.
+* The ``validate_protocol_configuration()`` hook of the protocol runs again
+  as the first step, after it ran with ``setup()`` while the pipeline was
+  built.
 * A profile of the protocol's run is written to ``profiler_trace.html`` in the
   protocol's ``extra`` directory.
 

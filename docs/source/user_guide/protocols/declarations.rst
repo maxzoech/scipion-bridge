@@ -155,11 +155,73 @@ Any other annotated class attribute is plain instance state:
 
     tracker_handle: Any = None
 
-The instance is pickled into the workers together with the bound methods
-used in ``map``, so state must be picklable, and changes made to it inside a
-stage are not visible to other stages or to the driver. State is useful for
-configuration that is not a user-facing parameter, set before the protocol is
-run.
+State is configuration that is not a user-facing parameter. Set it in
+``__init__()``, ``setup()`` or ``steps()``; once ``get_pipeline()`` has built
+the pipeline, the protocol is **sealed** and its attributes cannot change.
+Setting or deleting an attribute of a sealed protocol raises
+``B.SealedProtocolError``.
+
+The functions of the stages run as copies of the protocol, pickled into the
+worker processes together with the bound methods used in ``map``, and with
+executor pools as several copies at once. A change made by one call would not
+be seen by the other calls, so sealing turns it into an error. State must
+therefore be picklable and immutable. When the protocol is sealed:
+
+* a ``list``, ``dict``, ``set`` or ``bytearray`` attribute, also inside a
+  tuple, raises ``B.SealedProtocolError``. Use a ``tuple``, a ``frozenset``, a
+  tuple of ``(key, value)`` pairs or a frozen dataclass instead.
+  ``types.MappingProxyType`` does not work: it cannot be pickled;
+* NumPy arrays are made read-only, also in the copies of the workers;
+* other objects are accepted as they are. The seal cannot see inside them, so
+  do not change them in a stage either.
+
+.. _where-state-belongs:
+
+Where state belongs
+-------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - State
+     - Where it belongs
+   * - Accumulated over items: counts, running means, the best class so far
+     - A ``.scan(func, initial=..., on_flush=...)`` stage, which folds the
+       stream (see :doc:`../streaming/stateful_operations`).
+   * - Expensive to build: models, compiled programs, lookup tables
+     - A ``B.Resource(builder=...)``, built once per process or cluster.
+   * - Configuration
+     - An attribute set in ``__init__()``, ``setup()`` or ``steps()``, or a
+       ``B.Field`` if users should set it.
+
+A count kept in a map is the typical mistake:
+
+.. code-block:: python
+
+    # Wrong: raises SealedProtocolError on the first item. Without the seal,
+    # every copy of the protocol would count only the items it handled.
+    def _count(self, particles):
+        self.seen += len(particles)
+        return particles
+
+Fold the counts into a stage of their own instead. ``scan`` emits the running
+total after every item; ``on_flush=`` would emit one more item at the end of
+the stream:
+
+.. code-block:: python
+
+    def steps(self):
+        return (
+            self.particles.map(len)
+            .scan(lambda total, n: total + n, initial=lambda: 0)
+            .map(lambda total: {"count": total})
+        )
+
+Python cannot stop a deliberate bypass of the seal, through
+``object.__setattr__``, ``__dict__``, class attributes or module globals. Do
+not bypass it: the results would depend on which copy of the protocol handled
+an item.
 
 Outputs and validation
 ----------------------
@@ -189,7 +251,8 @@ Hooks
 -----
 
 ``Protocol`` defines two optional hooks, ``setup()`` and
-``validate_protocol_configuration()``. The Scipion backend runs them as the
-first steps of the generated protocol. The Ray runner does not call them, so
-validation that must apply on every backend belongs in ``steps()``, which
-runs on the driver before any data flows.
+``validate_protocol_configuration()``. ``get_pipeline()`` runs them on every
+backend, in this order and before ``steps()``, all on the driver before any
+data flows. ``setup()`` may set attributes; afterwards ``steps()`` builds the
+pipeline and the protocol is sealed (see `State`_). The pipeline of a
+protocol can be built only once: create a new instance to build another one.

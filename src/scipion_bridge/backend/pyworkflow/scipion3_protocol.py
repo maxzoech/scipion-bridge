@@ -628,9 +628,6 @@ def convert_protocol_to_scipion3_protocol(
         def _validateProtocolSetup(self):
             protocol.validate_protocol_configuration()
 
-        def _runProtocolProlog(self):
-            protocol.setup()
-
         def _createSetOfClasses2D(self, imgSet=None, suffix=""):
             create_fn = getattr(self, "_EMProtocol__createSet", None) or getattr(
                 self, "_createSet", None
@@ -732,7 +729,8 @@ def convert_protocol_to_scipion3_protocol(
                 packages=["scipion_bridge"],
             )
 
-            # Create pipeline here so that the value provider is injected
+            # Create pipeline here so that the value provider is injected. It
+            # runs the setup() hook of the protocol and seals it.
             execSteps = protocol.get_pipeline()
 
             if execSteps is not None:
@@ -748,11 +746,6 @@ def convert_protocol_to_scipion3_protocol(
                 self._validateProtocolSetup,
                 prerequisites=[],
             )
-            prologStep = self._insertFunctionStep(
-                self._runProtocolProlog,
-                prerequisites=[],
-            )
-
             convertStep = self._insertFunctionStep(
                 self._convertInput,
                 prerequisites=[],
@@ -778,9 +771,8 @@ def convert_protocol_to_scipion3_protocol(
 
             previousDataStepDeps = [
                 validateStep,
-                prologStep,
                 convertStep,
-            ]  # The first step has setup as dependency
+            ]  # The first step has validation as dependency
             stepDeps: List[Any] = []
             iteration = 0
 

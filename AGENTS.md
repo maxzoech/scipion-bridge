@@ -259,6 +259,18 @@ accomplish the same thing using builtin methods:
 Replace manual getattr(expected, "__origin__", None) with standard, explicit functions from typing: get_origin(value) and get_args(value)
 ```
 
+### Protocols are sealed: never bypass the seal
+A protocol is sealed once `get_pipeline()` has run `setup()` and `steps()`;
+afterwards its attributes cannot change (`SealedProtocolError`), because the
+functions of its stages run as copies of the protocol in other processes.
+When writing protocols, examples or tests, never write to `self` in a stage
+function and never work around the seal (`object.__setattr__`, `__dict__`,
+class attributes, module globals). Keep state across items in a `.scan`
+stage, expensive objects in a `B.Resource`, and configuration in attributes
+set in `__init__()`, `setup()` or `steps()`, as tuples, frozensets or frozen
+dataclasses. See "Where state belongs" in
+`docs/source/user_guide/protocols/declarations.rst`.
+
 ### Other patterns
 - Annotate the code base with types and implement correct overloads
 - Maximize comprehensions (list, dict, set) in the code.

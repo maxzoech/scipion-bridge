@@ -15,11 +15,14 @@ from typing import (
     Optional,
     OrderedDict,
     Type,
+    Tuple,
     TypeVar,
     cast,
     get_origin,
     get_type_hints,
 )
+
+import numpy as np
 
 from ..environment.compute import ComputeAssignment, ComputeResources, TaskType
 from ..streaming.ops import MapElementOp, MapOp, Op, lineage
@@ -31,6 +34,7 @@ from .chain_utils import (
     resolve_wires,
 )
 from .fields import Field, Input, Resource
+from .fingerprint import class_identity, digest, fingerprint_value, stage_fingerprint
 
 
 @dataclass
@@ -41,7 +45,7 @@ class _ProtocolTypeConfiguration:
     states: OrderedDict[str, Type]
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProtocolConfiguration:
     inputs: OrderedDict[str, Input]
     parameters: OrderedDict[str, Field]
@@ -50,6 +54,75 @@ class ProtocolConfiguration:
 
 class ValidationError(Exception):
     pass
+
+
+class SealedProtocolError(Exception):
+    """A sealed protocol was changed, or its pipeline was built a second time.
+
+    A protocol is sealed once ``get_pipeline()`` has built its pipeline: the
+    functions of its stages run as copies of the protocol in other processes,
+    so a change made by one call would not be seen by the others.
+    """
+
+
+# Attribute of a protocol's __dict__ marking it sealed.
+_SEALED = "_sealed"
+
+# Attributes of a protocol that do not change what it computes.
+_UNFINGERPRINTED = frozenset({"protocol_id", _SEALED})
+
+_STATE_DOCS = (
+    "the section 'Where state belongs' of the user guide "
+    "(docs/source/user_guide/protocols/declarations.rst)"
+)
+
+_WHERE_STATE_BELONGS = f"""\
+Keep state where the pipeline can see it:
+  - State across items (counts, running means, the best class so far): fold
+    the stream with .scan(func, initial=..., on_flush=...), e.g.
+        totals = counts.scan(lambda total, n: total + n, initial=lambda: 0)
+  - Objects that are expensive to build (models, compiled programs): declare
+    a B.Resource(builder=...), built once per process.
+  - Configuration: set it in __init__(), setup() or steps().
+Do not bypass this check (object.__setattr__, __dict__, module globals): the
+results would depend on which copy of the protocol handled an item.
+See {_STATE_DOCS}."""
+
+
+def _sealed_message(owner: str, name: str) -> str:
+    return (
+        f"Cannot change attribute '{name}' of {owner}: the protocol is sealed. "
+        "Its pipeline has been built, and the functions of its stages run as "
+        "copies of the protocol in other processes, so a change made by one "
+        "call is not seen by the others.\n" + _WHERE_STATE_BELONGS
+    )
+
+
+def _container_message(owner: str, path: str, value: Any) -> str:
+    return (
+        f"Attribute '{path}' of {owner} is a {type(value).__name__}, which a "
+        "stage could change in place. A sealed protocol holds immutable values: "
+        "use a tuple, a frozenset, a tuple of (key, value) pairs or a frozen "
+        "dataclass (types.MappingProxyType does not work: it cannot be "
+        "pickled).\n" + _WHERE_STATE_BELONGS
+    )
+
+
+def _freeze(owner: str, path: str, value: Any) -> None:
+    """Make ``value`` read-only, or raise if it is a mutable builtin container.
+
+    Other objects are accepted as they are: the seal cannot see inside them.
+    """
+    match value:
+        case list() | dict() | set() | bytearray():
+            raise SealedProtocolError(_container_message(owner, path, value))
+        case np.ndarray():
+            value.setflags(write=False)
+        case tuple() | frozenset():
+            for index, element in enumerate(value):
+                _freeze(owner, f"{path}[{index}]", element)
+        case _:
+            pass
 
 
 FieldT = TypeVar("FieldT", bound=Field)
@@ -114,25 +187,95 @@ class Protocol(metaclass=abc.ABCMeta):
     def __init__(self, protocol_id: Optional[str] = None) -> None:
         self.protocol_id: str = protocol_id or uuid.uuid4().hex
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if self.sealed:
+            raise SealedProtocolError(_sealed_message(type(self).__qualname__, name))
+        else:
+            super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if self.sealed:
+            raise SealedProtocolError(_sealed_message(type(self).__qualname__, name))
+        else:
+            super().__delattr__(name)
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        # Unpickled NumPy arrays are writeable again.
+        vars(self).update(state)
+        if self.sealed:
+            self._freeze_values()
+
+    @property
+    def sealed(self) -> bool:
+        """Whether the pipeline was built, after which the protocol cannot change."""
+        return self.__dict__.get(_SEALED, False)
+
+    def _freeze_values(self) -> None:
+        owner = type(self).__qualname__
+        for name, value in self.__dict__.items():
+            _freeze(owner, name, value)
+
+    def _seal(self) -> None:
+        self._freeze_values()
+        object.__setattr__(self, _SEALED, True)
+
+    def _check_unbuilt(self) -> None:
+        if self.sealed:
+            raise SealedProtocolError(
+                f"The pipeline of this {type(self).__qualname__} was already "
+                "built, which sealed the protocol. Create a new instance to "
+                "build another pipeline.",
+            )
+
     def setup(self):
-        """Optional setup method for protocol initialization."""
+        """Optional hook preparing the protocol before its pipeline is built.
+
+        Runs on every backend, after ``validate_protocol_configuration()`` and
+        before ``steps()``. It may set attributes of the protocol.
+        """
         pass
 
     def get_pipeline(self) -> Op:
-        """Return the pipeline of operations for this protocol."""
-        return self._tagged_steps().map(self._verify_outputs)
+        """Build the pipeline of this protocol, and seal the protocol.
+
+        Runs ``validate_protocol_configuration()``, ``setup()`` and
+        ``steps()``, in this order. Afterwards the protocol is sealed: its
+        attributes cannot change, since the functions of its stages run as
+        copies of it in other processes.
+
+        Raises:
+            SealedProtocolError: If the pipeline was already built.
+        """
+        self._check_unbuilt()
+        self.validate_protocol_configuration()
+        self.setup()
+        return self._verified_steps()
+
+    def _verified_steps(self) -> Op:
+        """``_tagged_steps()`` followed by the validation of the outputs."""
+        verified = self._tagged_steps().map(self._verify_outputs)
+        self._tag_stages(verified)
+        return verified
 
     def _tagged_steps(self) -> Op:
-        """Return ``steps()``, with its stages assigned this protocol's resources.
+        """Return ``steps()`` and seal the protocol, with its stages tagged.
 
-        Only the user functions (``map``, ``map_element``) are assigned; the
-        stages of built-in ops need no resources. The stages of the protocol
-        form one group, which shares its resources if it is long-running.
+        The user functions (``map``, ``map_element``) are assigned this
+        protocol's resources; the stages of built-in ops need no resources.
+        The stages of the protocol form one group, which shares its resources
+        if it is long-running. Every stage gets its fingerprint.
         """
+        self._check_unbuilt()
         steps = self.steps()
+        self._seal()
+        self._assign_compute(steps)
+        self._tag_stages(steps)
+        return steps
+
+    def _assign_compute(self, steps: Op) -> None:
         match self.compute_resources:
             case None:
-                return steps
+                pass
             case resources:
                 assignment = ComputeAssignment(resources, group=self.protocol_id)
                 # cpu_only stages run without GPUs and outside the
@@ -147,7 +290,57 @@ class Protocol(metaclass=abc.ABCMeta):
                             node.compute = (
                                 cpu_assignment if node.cpu_only else assignment
                             )
-                return steps
+
+    def _tag_stages(self, exit_: Op) -> None:
+        """Set the fingerprint of every stage of ``exit_`` that has none yet.
+
+        Stages of protocols nested in a chain keep the fingerprint of their
+        own protocol.
+        """
+        protocol_fp = self.fingerprint()
+        for ordinal, node in enumerate(lineage(exit_)):
+            if node.stage_fp is None:
+                node.stage_fp = stage_fingerprint(protocol_fp, ordinal, node)
+
+    def fingerprint(self) -> str:
+        """Fingerprint of what this protocol computes.
+
+        It covers the code of the protocol's classes, its parameter values and
+        its sealed state. Its inputs are not part of it.
+
+        Raises:
+            RuntimeError: If the protocol is not sealed yet, i.e. its state
+                could still change.
+        """
+        if not self.sealed:
+            raise RuntimeError(
+                f"The fingerprint of {type(self).__qualname__} is only defined "
+                "once its pipeline is built.",
+            )
+
+        return digest(
+            *(
+                class_identity(cls)
+                for cls in type(self).__mro__
+                if cls not in Protocol.__mro__
+            ),
+            *(
+                fingerprint_value((name, value))
+                for name, value in self._parameter_values()
+            ),
+            *(
+                fingerprint_value((name, value))
+                for name, value in sorted(self.__dict__.items())
+                if name not in _UNFINGERPRINTED
+            ),
+        )
+
+    def _parameter_values(self) -> Tuple[Tuple[str, Any], ...]:
+        """The value of every parameter, from the backend's configuration."""
+        return tuple(
+            (name, field.__get__(self, type(self)).value)
+            for name, field in self.configuration.parameters.items()
+        )
 
     def _verify_outputs(self, outputs: Any) -> Dict[str, Any]:
         """Validate step outputs against the declared outputs.
@@ -368,9 +561,11 @@ class ChainedProtocol(Protocol):
 
         first_config = first.configuration
         second_config = second.configuration
-        self._wires = resolve_wires(first.outputs(), second_config.inputs, mapping)
+        wires = resolve_wires(first.outputs(), second_config.inputs, mapping)
+        # Immutable, since the chain is sealed with its pipeline.
+        self._wires = tuple(wires.items())
         self._chain_configuration = ProtocolConfiguration(
-            inputs=merge_inputs(first_config.inputs, second_config.inputs, self._wires),
+            inputs=merge_inputs(first_config.inputs, second_config.inputs, wires),
             parameters=merge_parameters(
                 first_config.parameters,
                 second_config.parameters,
@@ -394,10 +589,24 @@ class ChainedProtocol(Protocol):
         return self.second.outputs()
 
     def steps(self) -> Op:
+        # The hooks of both protocols ran in the hooks of the chain.
         return merge_pipelines(
-            self.first.get_pipeline(),
+            self.first._verified_steps(),
             self.second._tagged_steps(),
-            self._wires,
+            dict(self._wires),
+        )
+
+    def fingerprint(self) -> str:
+        if not self.sealed:
+            raise RuntimeError(
+                "The fingerprint of a ChainedProtocol is only defined once its "
+                "pipeline is built.",
+            )
+
+        return digest(
+            self.first.fingerprint().encode(),
+            self.second.fingerprint().encode(),
+            fingerprint_value(self._wires),
         )
 
 

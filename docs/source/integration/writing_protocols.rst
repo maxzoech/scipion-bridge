@@ -265,8 +265,34 @@ it is the place to reject invalid parameter combinations early:
         ...
 
 The ``setup()`` and ``validate_protocol_configuration()`` hooks of
-``Protocol`` are called by the Scipion backend before its first data step, but
-not by the Ray runner.
+``Protocol`` run on every backend when the pipeline is built, before
+``steps()``. Afterwards the protocol is sealed: see
+:ref:`where-state-belongs` for where state goes instead.
+
+Instructions for coding agents
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Coding agents that run into ``B.SealedProtocolError`` tend to look for a way
+around it. Copy this block into the ``AGENTS.md`` or ``CLAUDE.md`` of a
+repository with protocols:
+
+.. code-block:: markdown
+
+    ## scipion-bridge protocols are sealed
+    A protocol is sealed once `get_pipeline()` has run `setup()` and
+    `steps()`; afterwards its attributes cannot change
+    (`B.SealedProtocolError`). The functions of its stages run as copies of
+    the protocol in other processes, so state kept in a stage would differ
+    between the copies.
+    - Never write to `self` in a function passed to `map`, `map_element` or
+      `scan`, and never bypass the seal (`object.__setattr__`, `__dict__`,
+      class attributes, module globals, mutable objects held by the protocol).
+    - State across items (counts, running means, the best item so far):
+      a `.scan(func, initial=..., on_flush=...)` stage.
+    - Objects that are expensive to build (models, compiled programs):
+      `B.Resource(builder=...)`.
+    - Configuration: set it in `__init__()`, `setup()` or `steps()`, as a
+      tuple, frozenset or frozen dataclass rather than a list, dict or set.
 
 Declaring compute requirements
 ------------------------------

@@ -25,6 +25,10 @@ class LoweringContext:
         # Polymorphic lowering dispatch to the node's own implementation
         ir_node = node.lower(self)
         self.memo[node_id] = ir_node
+        # Same-named sources lower to one IRSource, which keeps the first
+        # fingerprint.
+        if ir_node.stage_fp is None:
+            ir_node.stage_fp = node.stage_fp
 
         # Recursively lower upstream nodes and wire DAG edges
         for up in node.upstream:
@@ -58,6 +62,9 @@ class Node(metaclass=abc.ABCMeta):
     def __init__(self, upstream: Optional[List[Node]] = None):
         self.upstream: List[Node] = upstream if upstream is not None else []
         self.downstream: List[Node] = []
+        # Set by the protocol whose steps created this node, see
+        # ``stage_fingerprint``; None outside of protocols.
+        self.stage_fp: Optional[str] = None
 
     def __hash__(self) -> int:
         return id(self)

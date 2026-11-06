@@ -4,7 +4,7 @@ from ...core.environment.cmd_exec import StandaloneExecProvider
 from ...core.environment.temp_files import TemporaryFilesProvider
 from ...core.environment.storage import ArrowStorageProvider
 from ...core.environment.resource_provider import DefaultResourceProvider
-from ...core.environment.protocol_config import ProtocolConfigurationProvider
+from ...core.environment.protocol_config import StaticProtocolConfigurationProvider
 from ...core.streaming.backend import StreamingBackendProvider
 
 try:
@@ -22,7 +22,12 @@ class Container(containers.DeclarativeContainer):
     shell_exec = providers.Factory(StandaloneExecProvider)
     temp_file_provider = providers.Factory(TemporaryFilesProvider)
     storage_provider = providers.Factory(ArrowStorageProvider)
-    protocol_config_provider = providers.AbstractFactory(ProtocolConfigurationProvider)
+    # Parameters resolve to their declared defaults, as in the Ray backend
+    # when no value is given.
+    protocol_config_provider = providers.Singleton(
+        StaticProtocolConfigurationProvider,
+        values={},
+    )
     resource_provider = providers.Singleton(DefaultResourceProvider)
     streaming_backend = default_streaming_backend
 

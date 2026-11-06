@@ -64,6 +64,9 @@ class IROp:
 
     downstream: List[IROp] = field(default_factory=list, repr=False)
     upstream: List[IROp] = field(default_factory=list, repr=False)
+    # Fingerprint of the computation of the stage, set for the stages of a
+    # protocol; None outside of protocols.
+    stage_fp: Optional[str] = field(default=None, kw_only=True, repr=False)
 
     def __hash__(self) -> int:
         return id(self)

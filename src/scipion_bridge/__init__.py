@@ -26,7 +26,8 @@ from .core.utils.shell import shell_command
 
 from .core import protocol
 from .core.protocol import Protocol, Field, Input, Resource, ResourceScope
-from .core.protocol import ChainedProtocol, resources
+from .core.protocol import ChainedProtocol, SealedProtocolError, ValidationError
+from .core.protocol import resources
 from .core.environment.resource_provider import (
     ResourceProvider,
     DefaultResourceProvider,
@@ -69,6 +70,8 @@ __all__ = [
     "protocol",
     "Protocol",
     "ChainedProtocol",
+    "SealedProtocolError",
+    "ValidationError",
     "Field",
     "Input",
     "Resource",

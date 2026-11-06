@@ -67,9 +67,11 @@ The generated protocol is a streaming Scipion protocol. When it runs, it:
    run through the protocol's ``runJob`` (and appear in its log), temporary
    files are created in the protocol's ``tmp`` directory, and parameter
    values are read from the form;
-2. compiles the protocol's pipeline, with a sink that writes the outputs;
-3. runs ``validate_protocol_configuration()`` and ``setup()`` as its first
-   steps;
+2. compiles the protocol's pipeline, with a sink that writes the outputs.
+   Like on every backend, this runs ``validate_protocol_configuration()`` and
+   ``setup()`` and seals the protocol;
+3. runs ``validate_protocol_configuration()`` again as its first step, so
+   that the validation appears among the steps of the Scipion protocol;
 4. polls its inputs. Whenever new items appear in an input set, it inserts a
    step that converts only those items (identified by their ids) into the
    input type and sends them into the pipeline;

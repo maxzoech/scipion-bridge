@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased (branch `basic-ray-streaming`, 2026-10-01 to 2026-10-30)
+## Unreleased
+
+### Protocols
+- Protocols are sealed once `get_pipeline()` has built their pipeline:
+  setting or deleting an attribute raises `B.SealedProtocolError`, `list`,
+  `dict`, `set` and `bytearray` attributes are rejected and NumPy arrays
+  become read-only. State across items belongs in `.scan`, expensive objects
+  in `B.Resource`.
+- `get_pipeline()` runs `validate_protocol_configuration()` and `setup()` on
+  every backend, before `steps()`. The Scipion backend no longer runs
+  `setup()` as a step of its own. A pipeline can be built once per instance.
+- Protocols have a `fingerprint()` of their code, parameter values and state;
+  every stage of a protocol's pipeline carries a `stage_fp` in the IR.
+- The standalone backend serves the declared defaults of parameters, as the
+  Ray backend does for parameters without a value.
+- `B.ValidationError` and `B.SealedProtocolError` are exported.
+
+## Branch `basic-ray-streaming` (2026-10-01 to 2026-10-30)
 
 ### Streaming operations
 - `chunk`, `collect`, `flatten`, `map_element`, `combine_latest`, `scan` and
