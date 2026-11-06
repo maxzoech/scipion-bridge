@@ -21,9 +21,9 @@ annotation is the target type:
 .. code-block:: python
 
     @B.resolver
-    def resolve_particle_stack_proxy(value: B.Set[Particle]) -> B.ParticleStackProxy:
+    def resolve_particle_stack_proxy(value: B.Set[Particle]) -> spa.ParticleStackProxy:
         """Write a Set[Particle] to a temporary STAR file and MRC stack."""
-        new_proxy = B.ParticleStackProxy.new_temporary_proxy()
+        new_proxy = spa.ParticleStackProxy.new_temporary_proxy()
         ...
         return new_proxy
 
@@ -50,7 +50,7 @@ parameter and return annotation define the edge:
         def __init__(self):
             self._star_cache = {}
 
-        def forward(self, value: B.ParticleStackProxy, *, slice=None) -> B.Set[Particle]:
+        def forward(self, value: spa.ParticleStackProxy, *, slice=None) -> B.Set[Particle]:
             ...
 
 One instance is created per resolution, and in chunked resolution one per

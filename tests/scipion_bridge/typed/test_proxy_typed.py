@@ -4,14 +4,11 @@ import warnings
 from pathlib import Path
 import tempfile
 
-from scipion_bridge.core.typed.resolve import (
-    current_registry,
-    Registry,
-    resolver,
-)
+from scipion_bridge.core.typed import current_registry, Registry, resolver
 
 import scipion_bridge as sb
-from scipion_bridge.backend.standalone.container import Container
+from scipion_bridge.single_particle import ParticleStackProxy
+from scipion_bridge.backend import Container
 from scipion_bridge.core.utils.arc import manager as arc_manager
 
 import pytest
@@ -226,7 +223,7 @@ def test_nested_proxies():
 def test_nested_proxy_groups():
 
     @sb.proxify
-    def func_1(output_path=sb.Output(sb.ParticleStackProxy)):
+    def func_1(output_path=sb.Output(ParticleStackProxy)):
         assert isinstance(output_path, str)
         meta_path = Path(output_path)
         stack_path = Path(output_path).with_suffix(".mrcs")
@@ -236,7 +233,7 @@ def test_nested_proxy_groups():
             f.write("MRC stack data from func 1")
 
     @sb.proxify
-    def func_2(output_path=sb.Output(sb.ParticleStackProxy)):
+    def func_2(output_path=sb.Output(ParticleStackProxy)):
         return func_1(output_path)
 
     container = Container()
@@ -434,7 +431,7 @@ def test_named_proxy():
 
 
 def test_proxy_group_basic():
-    group = sb.ParticleStackProxy(Path("/data/my_particles"), managed=False)
+    group = ParticleStackProxy(Path("/data/my_particles"), managed=False)
     assert group.base_path == Path("/data/my_particles")
     assert group.metadata.path == Path("/data/my_particles.star")
     assert group.particle_stack.path == Path("/data/my_particles.mrcs")
@@ -454,7 +451,7 @@ def test_proxy_group_new_temporary_proxy():
 
     temp_file_mock = TempFileMock()
     with container.temp_file_provider.override(temp_file_mock):
-        group = sb.ParticleStackProxy.new_temporary_proxy()
+        group = ParticleStackProxy.new_temporary_proxy()
         assert group.managed == True
         assert group.metadata.managed == True
         assert group.particle_stack.managed == True
@@ -470,9 +467,9 @@ def test_proxy_group_new_temporary_proxy():
 )
 def test_untyped_proxy_to_proxy_group_conversion():
     untyped = sb.Proxy(Path("/data/particles_raw"), managed=True)
-    group = untyped.typed(astype=sb.ParticleStackProxy)
+    group = untyped.typed(astype=ParticleStackProxy)
 
-    assert isinstance(group, sb.ParticleStackProxy)
+    assert isinstance(group, ParticleStackProxy)
     assert group.base_path == Path("/data/particles_raw")
     assert group.metadata.path == Path("/data/particles_raw.star")
     assert group.particle_stack.path == Path("/data/particles_raw.mrcs")
@@ -481,8 +478,8 @@ def test_untyped_proxy_to_proxy_group_conversion():
 def test_proxify_with_proxy_group():
     @sb.proxify
     def process_particles(
-        stack_input: sb.ResolveProxy[sb.ParticleStackProxy],
-        stack_output: sb.ResolveProxy = sb.Output(sb.ParticleStackProxy),
+        stack_input: sb.ResolveProxy[ParticleStackProxy],
+        stack_output: sb.ResolveProxy = sb.Output(ParticleStackProxy),
     ):
         assert stack_input == "/path/to/input_particles.star"
         # The output path will be a temp file base path without extension
@@ -501,10 +498,10 @@ def test_proxify_with_proxy_group():
 
     temp_file_mock = TempFileMock()
     with container.temp_file_provider.override(temp_file_mock):
-        input_group = sb.ParticleStackProxy(Path("/path/to/input_particles"))
+        input_group = ParticleStackProxy(Path("/path/to/input_particles"))
         out_group = process_particles(input_group)
 
-        assert isinstance(out_group, sb.ParticleStackProxy)
+        assert isinstance(out_group, ParticleStackProxy)
         assert out_group.managed == True
         assert str(out_group.metadata.path).endswith(".star")
 
@@ -518,7 +515,7 @@ def test_proxy_group_abstract_instantiation():
 
 
 def test_proxy_group_validation_and_mapping():
-    group = sb.ParticleStackProxy(Path("/data/particles"))
+    group = ParticleStackProxy(Path("/data/particles"))
 
     # Test path and primary_proxy
     assert group.primary_proxy == group.metadata
@@ -534,18 +531,18 @@ def test_proxy_group_validation_and_mapping():
     with pytest.raises(
         ValueError, match="ProxyGroup base_path must not have an extension"
     ):
-        sb.ParticleStackProxy(Path("/data/particles.star"))
+        ParticleStackProxy(Path("/data/particles.star"))
 
     # Test invalid kwarg name
     with pytest.raises(TypeError, match="Unexpected keyword argument"):
-        sb.ParticleStackProxy(Path("/data/particles"), invalid_arg=123)
+        ParticleStackProxy(Path("/data/particles"), invalid_arg=123)
 
     # Test wrong proxy class kwarg
     wrong_proxy = sb.Proxy(Path("/data/particles.vol"))
     with pytest.raises(
         TypeError, match="Expected field 'metadata' to be an instance of"
     ):
-        sb.ParticleStackProxy(Path("/data/particles"), metadata=wrong_proxy)
+        ParticleStackProxy(Path("/data/particles"), metadata=wrong_proxy)
 
 
 class Half1Volume(sb.Proxy):

@@ -20,14 +20,14 @@ import ray
 
 import scipion_bridge as B
 from scipion_bridge.backend.ray import backend
-from scipion_bridge.backend.ray.backend import RayBackend
+from scipion_bridge.backend.ray import RayBackend
 from scipion_bridge.core.environment.compute import (
     CPUS_ENV_VAR,
     NUMPY_HUGEPAGE_ENV_VAR,
 )
-from scipion_bridge.core.streaming.node import lower
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
+from scipion_bridge.core.streaming import lower
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.core.streaming import CallbackSinkWriter
 
 # Timing assertions: run on one xdist worker, after one another.
 pytestmark = [

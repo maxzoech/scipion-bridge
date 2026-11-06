@@ -95,9 +95,9 @@ types*, which stand for files of a given format:
     @B.shell_command(domain=denoise_domain, name="predict", particles="input")
     def cryodenoise_predict(
         *,
-        particles: B.ResolveProxy[B.ParticleStackProxy],
+        particles: B.ResolveProxy[spa.ParticleStackProxy],
         weights: str,
-        output: B.ResolveProxy[B.MRCStackProxy] = B.Output(B.MRCStackProxy),
+        output: B.ResolveProxy[spa.MRCStackProxy] = B.Output(spa.MRCStackProxy),
         scores: B.ResolveProxy[ScoreTable] = B.Output(ScoreTable),
     ):
         pass

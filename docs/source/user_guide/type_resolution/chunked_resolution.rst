@@ -23,7 +23,7 @@ can produce just one part of its output.
 
     @B.resolver
     def stack_to_particles(
-        value: B.ParticleStackProxy,
+        value: spa.ParticleStackProxy,
         *,
         slice: slice | None = None,
     ) -> B.Set[Particle]:
@@ -107,7 +107,7 @@ and reuse it for every chunk:
         def __init__(self) -> None:
             self._star_cache: dict[Path, Any] = {}
 
-        def forward(self, value: B.ParticleStackProxy, *, slice=None) -> B.Set[Particle]:
+        def forward(self, value: spa.ParticleStackProxy, *, slice=None) -> B.Set[Particle]:
             star = self._star_cache.setdefault(value.metadata.path, read_star(value))
             ...
 

@@ -9,7 +9,7 @@ import ray.cloudpickle
 
 import scipion_bridge as B
 from scipion_bridge.core.utils.marker import Marker
-from scipion_bridge.single_particle.particle import Particle
+from scipion_bridge.single_particle import Particle
 
 _SERIALIZERS = {
     "pickle": pickle.dumps,

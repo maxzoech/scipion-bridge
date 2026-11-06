@@ -1,3 +1,7 @@
+"""Protocols: declarations of inputs, parameters and resources, and their steps."""
+
+from .chain_utils import ChainError
+from .fields import Field, Input, Resource
 from .protocol_base import (
     ChainedProtocol,
     Protocol,
@@ -5,17 +9,15 @@ from .protocol_base import (
     ValidationError,
     resources,
 )
-from .fields import Field, Input, Resource
-from ..environment.resource_provider import ResourceScope
 
 __all__ = [
+    "Protocol",
+    "ChainedProtocol",
     "Field",
     "Input",
     "Resource",
-    "ResourceScope",
-    "Protocol",
-    "ChainedProtocol",
+    "resources",
     "ValidationError",
     "SealedProtocolError",
-    "resources",
+    "ChainError",
 ]

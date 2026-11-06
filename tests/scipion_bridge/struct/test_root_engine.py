@@ -6,15 +6,11 @@ import numpy as np
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.core.struct.exceptions import UninitializedFieldError
-from scipion_bridge.core.struct.key_path import KeyPath
-from scipion_bridge.core.struct.schema import (
-    ArraySetEntry,
-    Entry,
-    RaggedArraySetEntry,
-)
+from scipion_bridge.core.struct import UninitializedFieldError
+from scipion_bridge.core.struct import KeyPath
+from scipion_bridge.core.struct import ArraySetEntry, Entry, RaggedArraySetEntry
 from scipion_bridge.core.struct.storage import RootEngine, _BaseStorage
-from scipion_bridge.single_particle.particle import Class2D, Particle
+from scipion_bridge.single_particle import Class2D, Particle
 
 
 class Sample(B.Struct):

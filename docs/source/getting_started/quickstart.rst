@@ -214,7 +214,7 @@ program, and ``@proxify`` creates and cleans up the temporary files:
     @B.shell_command(domain=fm, name="inference", particles="input")
     def compute_latents(
         *,
-        particles: B.ResolveProxy[B.ParticleStackProxy],
+        particles: B.ResolveProxy[spa.ParticleStackProxy],
         weights: str,
         output: B.ResolveProxy[Latents] = B.Output(Latents),
     ):

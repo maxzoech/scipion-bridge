@@ -2,8 +2,8 @@ from typing import Any, Optional, Sequence, Tuple
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.struct.key_path import KeyPath
-from scipion_bridge.core.struct.schema import Entry, Schema, ArrayEntryBase, ArrayEntry
+from scipion_bridge.core.struct import KeyPath
+from scipion_bridge.core.struct import Entry, Schema, ArrayEntryBase, ArrayEntry
 from scipion_bridge.core.struct.storage import _BaseStorage, StorageView
 
 

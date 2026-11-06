@@ -16,10 +16,10 @@ from scipion_bridge.backend.ray.backend import (
     RayBackend,
     _DEFAULT_MAX_IN_FLIGHT,
 )
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.core.streaming.pipeline import Pipeline
-from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
-from scipion_bridge.core.streaming.spill import pickle_spill_store
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.core.streaming import Pipeline
+from scipion_bridge.core.streaming import CallbackSinkWriter
+from scipion_bridge.core.streaming import pickle_spill_store
 
 # Timing assertions: run on one xdist worker, after one another.
 pytestmark = [

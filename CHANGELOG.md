@@ -17,6 +17,24 @@
   Ray backend does for parameters without a value.
 - `B.ValidationError` and `B.SealedProtocolError` are exported.
 
+### Imports and public API
+- `import scipion_bridge` no longer loads Ray or any backend (about 0.4 s
+  faster): the core injects its services by name.
+- `B.` is grouped by layer and adds the streaming API: `B.Source`, `B.Sink`,
+  `B.Pipeline`, `B.SinkWriter`, `B.CallbackSinkWriter`.
+- Removed from `B.`: `ParticleStackProxy`, `StarfileProxy` and
+  `MRCStackProxy` (use `scipion_bridge.single_particle`), `ResourceProvider`
+  and `DefaultResourceProvider` (use `scipion_bridge.core.environment`), and
+  the module attributes `B.protocol` and `B.struct`.
+- Every subpackage exports its API from its `__init__`: `core.environment` is
+  new; `core.typed` exports the resolution and proxy API (except `resolve`,
+  which would hide its module; use `B.resolve`); `core.streaming` no longer
+  exports `Node`, `replace_node` and the op node classes; `core.struct` no
+  longer exports `_BaseStorage`; `core.utils` no longer re-exports `Domain`;
+  `core.protocol` exports `ChainError` instead of `ResourceScope`;
+  `backend.ray` no longer exports its actor classes, `RayResourceCoordinator`
+  and the alias `configure_ray_container`.
+
 ## Branch `basic-ray-streaming` (2026-10-01 to 2026-10-30)
 
 ### Streaming operations

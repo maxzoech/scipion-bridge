@@ -41,6 +41,3 @@ class RayContainer(containers.DeclarativeContainer):
     )
     resource_provider = providers.Singleton(RayResourceProvider)
     streaming_backend = providers.Factory(RayBackend)
-
-
-configure_ray_container = configure_ray_env

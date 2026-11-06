@@ -8,15 +8,13 @@ import numpy as np
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.core.environment.protocol_config import (
-    StaticProtocolConfigurationProvider,
-)
+from scipion_bridge.core.environment import StaticProtocolConfigurationProvider
 from scipion_bridge.core.protocol.fingerprint import class_identity
-from scipion_bridge.core.streaming.ir import IRMap, IROp, clone_ir
-from scipion_bridge.core.streaming.keyed import share_keys
-from scipion_bridge.core.streaming.node import lower
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.single_particle.particle import Particle
+from scipion_bridge.core.streaming import IRMap, IROp, clone_ir
+from scipion_bridge.core.streaming import share_keys
+from scipion_bridge.core.streaming import lower
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.single_particle import Particle
 
 
 def _identity(item):

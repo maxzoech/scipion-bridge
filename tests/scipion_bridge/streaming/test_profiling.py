@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scipion_bridge.backend.ray.backend import RayBackend
+from scipion_bridge.backend.ray import RayBackend
 from scipion_bridge.backend.ray.mailbox import Mailbox, SpillPolicy
 from scipion_bridge.backend.ray.profiling import (
     NullRecorder,
@@ -18,10 +18,10 @@ from scipion_bridge.backend.ray.profiling import (
     TraceWriter,
     logger,
 )
-from scipion_bridge.core.streaming.backend import StageStats
-from scipion_bridge.core.streaming.node import lower
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.core.streaming.spill import PickleSpillStore
+from scipion_bridge.core.streaming import StageStats
+from scipion_bridge.core.streaming import lower
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.core.streaming import PickleSpillStore
 
 _PROCESS = ProcessInfo(label="stage", pid=42, node="node")
 

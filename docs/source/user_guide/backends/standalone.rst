@@ -52,9 +52,7 @@ and to provide parameter values to protocol code:
 .. code-block:: python
 
     from dependency_injector import providers
-    from scipion_bridge.core.environment.protocol_config import (
-        StaticProtocolConfigurationProvider,
-    )
+    from scipion_bridge.core.environment import StaticProtocolConfigurationProvider
 
     values = StaticProtocolConfigurationProvider({"chunk_size": 256})
     with container.protocol_config_provider.override(providers.Object(values)):

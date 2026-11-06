@@ -1,5 +1,5 @@
 import pytest
-from scipion_bridge.core.struct.key_path import KeyPath
+from scipion_bridge.core.struct import KeyPath
 
 
 def test_basic_key_path():

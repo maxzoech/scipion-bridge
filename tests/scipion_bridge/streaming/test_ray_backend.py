@@ -1,9 +1,9 @@
 import pytest
 import ray
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
-from scipion_bridge.core.streaming.pipeline import Pipeline
-from scipion_bridge.backend.ray.backend import RayBackend
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.core.streaming import CallbackSinkWriter
+from scipion_bridge.core.streaming import Pipeline
+from scipion_bridge.backend.ray import RayBackend
 
 pytestmark = pytest.mark.usefixtures("ray_cluster")
 
@@ -51,7 +51,7 @@ def test_ray_checkpoint_and_branching():
     final_sink = stage2.write_to(final_writer)
 
     # Note: checkpoint attaches a sink to stage1
-    from scipion_bridge.core.streaming.sink import Sink
+    from scipion_bridge.core.streaming import Sink
 
     ckpt_sink = [n for n in stage1.downstream if isinstance(n, Sink)][0]
 

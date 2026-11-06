@@ -11,12 +11,13 @@ import ray
 
 import scipion_bridge as B
 from scipion_bridge import Protocol
+from scipion_bridge.core.typed import current_registry
 from scipion_bridge.core.streaming.ops import Source, MapOp
-from scipion_bridge.core.streaming.pipeline import Pipeline
-from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
+from scipion_bridge.core.streaming import Pipeline
+from scipion_bridge.core.streaming import CallbackSinkWriter
 from scipion_bridge.single_particle import XmippParticleStackProxy
-from scipion_bridge.single_particle.particle import Particle
-from scipion_bridge.backend.ray.ray_protocol_runner import RayPipelineRunner
+from scipion_bridge.single_particle import Particle
+from scipion_bridge.backend.ray import RayPipelineRunner
 
 pytestmark = pytest.mark.usefixtures("ray_cluster")
 
@@ -76,7 +77,7 @@ def test_ray_protocol_runner_hot_path_zero_dijkstra(tmp_path, monkeypatch):
     monkeypatch.setenv("SCIPION_CHUNK_SIZE", "2")
     star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
     proto = StreamingParticleProtocol()
-    reg = B.core.typed.resolve.current_registry()
+    reg = current_registry()
 
     with patch.object(
         reg, "find_resolve_func", wraps=reg.find_resolve_func

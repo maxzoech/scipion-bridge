@@ -69,22 +69,27 @@ Streaming
        ``collect``, ``flatten``, ``scan``, ``combine_latest``, ``merge``,
        ``group_by``, ``sink``,
        ``write_to``, ``checkpoint``.
+   * - :py:obj:`B.Source <scipion_bridge.core.streaming.ops.Source>`
+     - A named entry point of a graph.
+   * - :py:obj:`B.Sink <scipion_bridge.core.streaming.sink.Sink>`
+     - The end of a graph, returned by ``write_to`` and ``sink``.
+   * - :py:obj:`B.Pipeline <scipion_bridge.core.streaming.pipeline.Pipeline>`
+     - ``Pipeline.from_sink(*sinks, backend=...)``, then ``send``, ``flush``,
+       ``stats``, ``close``.
+   * - :py:obj:`B.SinkWriter <scipion_bridge.core.streaming.sink_writer.SinkWriter>`,
+       :py:obj:`B.CallbackSinkWriter <scipion_bridge.core.streaming.sink_writer.CallbackSinkWriter>`
+     - The protocol for asynchronous output writers (``write``, ``finalize``),
+       and a writer calling a function.
    * - :py:obj:`B.FLUSH <scipion_bridge.core.streaming.node.FLUSH>`,
        :py:obj:`B.FlushSignal <scipion_bridge.core.streaming.node.FlushSignal>`
      - The end-of-stream signal.
 
-From ``scipion_bridge.core.streaming``:
+From ``scipion_bridge.core.streaming``, which also holds the IR and the
+interfaces for backends (see :doc:`/developer/streaming_internals`):
 
 .. list-table::
    :widths: 30 70
 
-   * - :py:obj:`Source <scipion_bridge.core.streaming.ops.Source>`
-     - A named entry point of a graph.
-   * - :py:obj:`Pipeline <scipion_bridge.core.streaming.pipeline.Pipeline>`
-     - ``Pipeline.from_sink(*sinks, backend=...)``, then ``send``, ``flush``,
-       ``stats``, ``close``.
-   * - :py:obj:`SinkWriter <scipion_bridge.core.streaming.sink_writer.SinkWriter>`
-     - The protocol for asynchronous output writers (``write``, ``finalize``).
    * - :py:obj:`Keyed <scipion_bridge.core.streaming.ir.Keyed>`
      - A ``(key, value)`` result of ``group_by``.
    * - :py:obj:`StageStats <scipion_bridge.core.streaming.backend.StageStats>`
@@ -114,8 +119,6 @@ Shell commands and proxies
      - A parameter annotation: resolve to proxy ``P`` and pass its path.
    * - :py:obj:`B.Output(P) <scipion_bridge.core.typed.proxy.Output>`
      - A parameter default: allocate a managed temporary ``P`` and return it.
-   * - ``B.ParticleStackProxy``, ``B.StarfileProxy``, ``B.MRCStackProxy``
-     - Proxies for single particle data.
 
 Type resolution
 ---------------
@@ -144,7 +147,17 @@ Single particle analysis
 
 ``scipion_bridge.single_particle`` provides ``Particle``, ``FlexParticle``,
 ``CTF``, ``Coordinate``, ``Acquisition`` and ``Class2D``, the single particle
-proxies, and the resolvers between them. See :doc:`/user_guide/structs/index`.
+proxies (``ParticleStackProxy``, ``StarfileProxy``, ``MRCStackProxy``, and
+those of Xmipp) and the resolvers between them. See
+:doc:`/user_guide/structs/index`.
+
+Services
+--------
+
+``scipion_bridge.core.environment`` holds the interfaces of the services a
+backend provides (shell execution, temporary files, parameter values,
+resources and storage), with ``ResourceProvider`` and
+``DefaultResourceProvider``.
 
 Backends
 --------

@@ -148,9 +148,7 @@ directly. Two services must be provided for them:
 .. code-block:: python
 
     from dependency_injector import providers
-    from scipion_bridge.core.environment.protocol_config import (
-        StaticProtocolConfigurationProvider,
-    )
+    from scipion_bridge.core.environment import StaticProtocolConfigurationProvider
 
 
     @pytest.fixture

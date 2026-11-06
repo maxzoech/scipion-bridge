@@ -94,7 +94,7 @@ def test_set_of_classes_2d_struct():
 
 
 if __name__ == "__main__":
-    from scipion_bridge.backend.standalone.container import configure_default_env
+    from scipion_bridge.backend import configure_default_env
 
     # Wire the container for 'scipion_bridge'
     container = configure_default_env()

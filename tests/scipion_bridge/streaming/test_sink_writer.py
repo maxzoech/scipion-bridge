@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any
-from scipion_bridge.core.streaming.sink_writer import SinkWriter, CallbackSinkWriter
+from scipion_bridge.core.streaming import SinkWriter, CallbackSinkWriter
 
 
 def test_callback_sink_writer_async():

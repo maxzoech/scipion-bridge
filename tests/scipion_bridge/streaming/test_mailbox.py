@@ -11,9 +11,9 @@ import weakref
 import pytest
 
 from scipion_bridge.backend.ray.mailbox import Mailbox, Ref, SpillPolicy, Spilled
-from scipion_bridge.core.streaming.backend import StageStats
-from scipion_bridge.core.streaming.node import FLUSH, FlushSignal
-from scipion_bridge.core.streaming.spill import PickleSpillStore, SpillStore
+from scipion_bridge.core.streaming import StageStats
+from scipion_bridge.core.streaming import FLUSH, FlushSignal
+from scipion_bridge.core.streaming import PickleSpillStore, SpillStore
 
 
 class RecordingStore(SpillStore[int]):

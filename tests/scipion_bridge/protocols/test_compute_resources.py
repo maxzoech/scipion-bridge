@@ -15,10 +15,10 @@ from scipion_bridge.core.environment.compute import (
     gpu_memory_env,
     numpy_hugepage_env,
 )
-from scipion_bridge.core.streaming.ir import IRMap
-from scipion_bridge.core.streaming.node import lower
+from scipion_bridge.core.streaming import IRMap
+from scipion_bridge.core.streaming import lower
 from scipion_bridge.core.streaming.ops import MapElementOp, MapOp, Source, lineage
-from scipion_bridge.single_particle.particle import Particle
+from scipion_bridge.single_particle import Particle
 
 
 def _second(item):

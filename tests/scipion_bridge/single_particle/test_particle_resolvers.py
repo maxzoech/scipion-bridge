@@ -7,7 +7,7 @@ import pytest
 import starfile
 
 import scipion_bridge as B
-from scipion_bridge.backend.standalone.container import Container
+from scipion_bridge.backend import Container
 from scipion_bridge.single_particle import (
     Particle,
     MRCStackProxy,

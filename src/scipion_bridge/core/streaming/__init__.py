@@ -1,78 +1,61 @@
-from .node import Node, FlushSignal, FLUSH, lower, replace_node, LoweringContext
-from .ops import (
-    Op,
-    Source,
-    MapOp,
-    MapElementOp,
-    ChunkOp,
-    CollectOp,
-    FlattenOp,
-    ScanOp,
-    CombineLatestOp,
-    MergeOp,
-    KeyedOp,
-)
+"""Declarative streaming pipelines, lowered to an IR that backends execute."""
+
+from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
 from .element_mapper import ElementMapConfig
-from .sink import Sink
-from .sink_writer import SinkWriter, CallbackSinkWriter
 from .ir import (
-    IROp,
-    IRSource,
-    IRMap,
+    DEFAULT_GROUP_BY_WORKERS,
+    GroupByWorkers,
     IRAccumulate,
-    IRSink,
     IRDemux,
+    IRMap,
+    IROp,
+    IRSink,
+    IRSource,
     Keyed,
     Tagged,
     WorkersFrom,
-    DEFAULT_GROUP_BY_WORKERS,
     clone_ir,
 )
 from .keyed import share_keys
-from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
-from .spill import PickleSpillStore, SpillStore, SpillStoreFactory, pickle_spill_store
+from .node import FLUSH, FlushSignal, LoweringContext, lower
+from .ops import Op, Source
 from .pipeline import Pipeline
+from .sink import Sink
+from .sink_writer import CallbackSinkWriter, SinkWriter
+from .spill import PickleSpillStore, SpillStore, SpillStoreFactory, pickle_spill_store
 
 __all__ = [
-    "Node",
+    # Pipelines
     "Op",
     "Source",
-    "MapOp",
-    "MapElementOp",
-    "ElementMapConfig",
-    "ChunkOp",
-    "CollectOp",
-    "FlattenOp",
-    "ScanOp",
-    "CombineLatestOp",
-    "MergeOp",
-    "KeyedOp",
     "Sink",
-    "FlushSignal",
-    "FLUSH",
+    "Pipeline",
     "SinkWriter",
     "CallbackSinkWriter",
+    "FlushSignal",
+    "FLUSH",
+    "Keyed",
+    "ElementMapConfig",
+    "StageStats",
+    "SpillStore",
+    "SpillStoreFactory",
+    "PickleSpillStore",
+    "pickle_spill_store",
+    # Backends: lowering and the IR
+    "StreamingBackendProvider",
+    "CompiledPipeline",
+    "lower",
+    "LoweringContext",
     "IROp",
     "IRSource",
     "IRMap",
     "IRAccumulate",
     "IRSink",
     "IRDemux",
-    "Keyed",
     "Tagged",
     "WorkersFrom",
+    "GroupByWorkers",
     "DEFAULT_GROUP_BY_WORKERS",
-    "share_keys",
     "clone_ir",
-    "lower",
-    "replace_node",
-    "LoweringContext",
-    "CompiledPipeline",
-    "StageStats",
-    "StreamingBackendProvider",
-    "SpillStore",
-    "SpillStoreFactory",
-    "PickleSpillStore",
-    "pickle_spill_store",
-    "Pipeline",
+    "share_keys",
 ]

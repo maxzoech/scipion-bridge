@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 import scipion_bridge as B
-from scipion_bridge.core.environment.storage import NumPyStorageProvider
-from scipion_bridge.backend.standalone.container import Container
+from scipion_bridge.core.environment import NumPyStorageProvider
+from scipion_bridge.backend import Container
 
 
 class Particle(B.Struct):
@@ -47,7 +47,7 @@ def test_container_storage_provider_injection():
 def test_slice_arrow_array():
     import pyarrow as pa
     from scipion_bridge.core.struct.utils.arrow_utils import slice_arrow_array
-    from scipion_bridge.core.struct.key_path import KeyPath
+    from scipion_bridge.core.struct import KeyPath
 
     arr = pa.array([10, 20, 30, 40, 50])
 

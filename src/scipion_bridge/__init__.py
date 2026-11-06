@@ -1,93 +1,117 @@
-from .core.typed.resolve import (
-    resolver,
-    resolve_params,
-    resolve,
-    resolve_iter,
-    find_resolver,
-    lift_resolvers,
-    Resolve,
-    ComposedResolver,
-    estimate_optimal_chunk_size,
+"""scipion-bridge: columnar types, protocols and streaming pipelines for Scipion.
+
+The user API, imported as::
+
+    import scipion_bridge as B
+
+Domain types and proxies of single particle analysis are in
+``scipion_bridge.single_particle``; backends are in ``scipion_bridge.backend``.
+"""
+
+# Structs
+from .core.struct import Arg, Array, Collection, Dim, Set, Struct, concat
+
+# Protocols and their compute resources
+from .core.protocol import (
+    ChainedProtocol,
+    Field,
+    Input,
+    Protocol,
+    Resource,
+    SealedProtocolError,
+    ValidationError,
+    resources,
+)
+from .core.environment import ComputeResources, Domain, ResourceScope, TaskType
+
+# Streaming
+from .core.streaming import (
+    FLUSH,
+    CallbackSinkWriter,
+    FlushSignal,
+    Op,
+    Pipeline,
+    Sink,
+    SinkWriter,
+    Source,
 )
 
-from .core.typed import proxy
-from .core.typed.proxy import (
-    proxify,
+# Type resolution and proxies
+from .core.typed import (
+    ComposedResolver,
+    Output,
     Proxy,
     ProxyGroup,
-    Output,
+    Resolve,
     ResolveProxy,
+    estimate_optimal_chunk_size,
+    find_resolver,
+    lift_resolvers,
     namedproxy,
+    proxify,
+    resolve_iter,
+    resolve_params,
+    resolver,
 )
-from .single_particle.proxies import ParticleStackProxy, StarfileProxy, MRCStackProxy
-from .core.environment.domain import Domain
-from .core.environment.compute import ComputeResources, TaskType
-from .core.utils.shell import shell_command
+from .core.typed.resolve import resolve
 
-from .core import protocol
-from .core.protocol import Protocol, Field, Input, Resource, ResourceScope
-from .core.protocol import ChainedProtocol, SealedProtocolError, ValidationError
-from .core.protocol import resources
-from .core.environment.resource_provider import (
-    ResourceProvider,
-    DefaultResourceProvider,
-)
+# Shell commands
+from .core.utils import shell_command
 
-from .core import struct
-from .core.struct import Struct, Set, Collection, concat, Array, Arg, Dim
-
-from .core.streaming import Op, FlushSignal, FLUSH
-
-from .core.typed import core_resolvers
+# Registration: the resolvers of the core types, of proxies and of single
+# particle analysis resolve from `scipion_bridge`.
+from .core.typed import core_resolvers, proxy
 from . import single_particle
 
-lift_resolvers(core_resolvers, proxy)
 lift_resolvers(core_resolvers, proxy, single_particle)
 
 __all__ = [
-    "resolver",
-    "resolve_params",
-    "resolve",
-    "resolve_iter",
-    "find_resolver",
-    "Resolve",
-    "ComposedResolver",
-    "proxify",
-    "Proxy",
-    "ProxyGroup",
-    "ParticleStackProxy",
-    "StarfileProxy",
-    "MRCStackProxy",
-    "Output",
-    "ResolveProxy",
-    "namedproxy",
-    "estimate_optimal_chunk_size",
-    "shell_command",
-    "Domain",
-    "ComputeResources",
-    "TaskType",
-    "resources",
-    "protocol",
-    "Protocol",
-    "ChainedProtocol",
-    "SealedProtocolError",
-    "ValidationError",
-    "Field",
-    "Input",
-    "Resource",
-    "ResourceScope",
-    "ResourceProvider",
-    "DefaultResourceProvider",
-    "struct",
+    # Structs
     "Struct",
     "Set",
     "Collection",
-    "concat",
     "Array",
-    "Op",
-    "FlushSignal",
-    "FLUSH",
     "Arg",
     "Dim",
-    "single_particle",
+    "concat",
+    # Protocols and their compute resources
+    "Protocol",
+    "ChainedProtocol",
+    "Input",
+    "Field",
+    "Resource",
+    "ResourceScope",
+    "resources",
+    "ComputeResources",
+    "TaskType",
+    "Domain",
+    "ValidationError",
+    "SealedProtocolError",
+    # Streaming
+    "Op",
+    "Source",
+    "Sink",
+    "Pipeline",
+    "SinkWriter",
+    "CallbackSinkWriter",
+    "FlushSignal",
+    "FLUSH",
+    # Type resolution and proxies
+    "resolver",
+    "resolve",
+    "resolve_iter",
+    "resolve_params",
+    "find_resolver",
+    "lift_resolvers",
+    "Resolve",
+    "ComposedResolver",
+    "estimate_optimal_chunk_size",
+    "Proxy",
+    "ProxyGroup",
+    "Output",
+    "ResolveProxy",
+    "namedproxy",
+    "proxify",
+    # Shell commands
+    "shell_command",
 ]

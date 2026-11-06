@@ -12,7 +12,7 @@ from scipion_bridge.single_particle import (
     Class2D,
     Acquisition,
 )
-from scipion_bridge.core.struct.storage import UninitializedFieldError
+from scipion_bridge.core.struct import UninitializedFieldError
 
 # ---------------------------------------------------------------------------
 # Schema tests

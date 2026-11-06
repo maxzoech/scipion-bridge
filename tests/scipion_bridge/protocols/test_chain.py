@@ -2,9 +2,9 @@ import pytest
 
 import scipion_bridge as B
 from scipion_bridge import ChainedProtocol, Protocol
-from scipion_bridge.core.protocol.chain_utils import ChainError
+from scipion_bridge.core.protocol import ChainError
 from scipion_bridge.core.streaming import LoweringContext, Source
-from scipion_bridge.single_particle.particle import Particle
+from scipion_bridge.single_particle import Particle
 
 
 class Stage1(Protocol):

@@ -167,6 +167,28 @@ class Foo:
 
 All imports should be kept at the top level of the module
 
+### Imports and public API
+- `scipion_bridge` (imported as `B`) is the user API: what is needed to write
+  structs, protocols, proxies, resolvers and pipelines. Its `__init__.py` is
+  grouped by layer, and `__all__` follows the same groups and order.
+- The `__init__.py` of a subpackage exports the API of that package for code
+  outside of it (users, backends, docs). It imports only from its own modules,
+  never exports private (`_`) names, and never exports a name that hides one
+  of its submodules (such as `resolve` in `core.typed`).
+- Code outside of the library (docs, examples, benchmarks, and tests that use
+  a package as a client) imports from `scipion_bridge` or from a subpackage,
+  not from its modules. Tests of the internals of a module (private helpers,
+  module constants) import that module.
+- Inside the library, modules import sibling and cross-package modules
+  directly, never through a package `__init__`, which avoids import cycles.
+  Layers only import downward: `core.environment` → `core.utils` →
+  `core.typed`/`core.struct` → `core.streaming` → `core.protocol` →
+  `single_particle` → `backend`. The core never imports a backend: inject
+  services by name, `Provide["temp_file_provider"]`.
+- Import-time registration (lifting resolvers, registering visualizers)
+  happens in one marked block at the end of a package's `__init__.py`.
+- `tests/scipion_bridge/test_public_api.py` checks these namespaces.
+
 ### Prefer match-case over if-else when possible
 Instead of using large if-else blocks, use pattern matching. An example of this
 is the __get_item__ method inside sets.

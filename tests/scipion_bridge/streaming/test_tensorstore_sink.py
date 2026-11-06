@@ -5,10 +5,10 @@ import tensorstore as ts
 from pathlib import Path
 
 import scipion_bridge as B
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.core.streaming.pipeline import Pipeline
-from scipion_bridge.backend.ray.backend import RayBackend
-from scipion_bridge.backend.ray.sinks.tensorstore_sink import TensorStoreSinkWriter
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.core.streaming import Pipeline
+from scipion_bridge.backend.ray import RayBackend
+from scipion_bridge.backend.ray.sinks import TensorStoreSinkWriter
 
 
 class Metadata(B.Struct):

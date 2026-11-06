@@ -449,7 +449,7 @@ def test_find_resolver_precomputation(tmp_path):
     import starfile
     import numpy as np
     from pathlib import Path
-    from scipion_bridge.single_particle.particle import Particle
+    from scipion_bridge.single_particle import Particle
 
     mrc_path = tmp_path / "particles.mrcs"
     star_path = tmp_path / "particles.star"

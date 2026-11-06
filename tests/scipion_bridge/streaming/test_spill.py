@@ -3,7 +3,7 @@
 import numpy as np
 
 import scipion_bridge as B
-from scipion_bridge.core.streaming.spill import PickleSpillStore, pickle_spill_store
+from scipion_bridge.core.streaming import PickleSpillStore, pickle_spill_store
 
 
 class SpillItem(B.Struct):

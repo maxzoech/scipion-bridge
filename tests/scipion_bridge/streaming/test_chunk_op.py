@@ -2,12 +2,12 @@ import numpy as np
 import pytest
 import ray
 import scipion_bridge as B
-from scipion_bridge.backend.ray.backend import RayBackend
-from scipion_bridge.core.streaming.ir import IRAccumulate
-from scipion_bridge.core.streaming.node import lower
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.core.streaming.pipeline import Pipeline
-from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
+from scipion_bridge.backend.ray import RayBackend
+from scipion_bridge.core.streaming import IRAccumulate
+from scipion_bridge.core.streaming import lower
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.core.streaming import Pipeline
+from scipion_bridge.core.streaming import CallbackSinkWriter
 
 
 class Item(B.Struct):

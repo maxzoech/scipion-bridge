@@ -70,11 +70,11 @@ calls, without affecting other code:
 
     def export(particles):
         @B.resolver
-        def write_with_extra_columns(value: B.Set[Particle]) -> B.ParticleStackProxy:
+        def write_with_extra_columns(value: B.Set[Particle]) -> spa.ParticleStackProxy:
             ...
 
         # Uses write_with_extra_columns instead of the built-in resolver.
-        return B.resolve(particles, astype=B.ParticleStackProxy)
+        return B.resolve(particles, astype=spa.ParticleStackProxy)
 
 For a module-wide replacement, register the resolver for a distinct proxy
 type and force it with an intermediate type, as described next. Relying on

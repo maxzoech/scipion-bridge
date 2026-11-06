@@ -7,7 +7,6 @@ from functools import wraps
 import shutil
 
 from dependency_injector.wiring import Provide, inject
-from ...backend.standalone.container import Container
 from ..environment.temp_files import TemporaryFilesProvider
 from ..utils.arc import manager as arc_manager
 from ..utils.func_params import extract_func_params
@@ -273,9 +272,7 @@ class Proxy(metaclass=ProxyMetaclass):
     def new_temporary_proxy(
         cls,
         base_path: Optional[os.PathLike] = None,
-        temp_file_provider: TemporaryFilesProvider = Provide[
-            Container.temp_file_provider
-        ],
+        temp_file_provider: TemporaryFilesProvider = Provide["temp_file_provider"],
     ) -> "Proxy":
         file_ext = cls.extension() or cls.file_ext() or ""
         file_suffix = cls.suffix() or ""
@@ -305,9 +302,7 @@ class Proxy(metaclass=ProxyMetaclass):
     @inject
     def __del__(
         self,
-        temp_file_provider: TemporaryFilesProvider = Provide[
-            Container.temp_file_provider
-        ],
+        temp_file_provider: TemporaryFilesProvider = Provide["temp_file_provider"],
     ):
 
         try:
@@ -514,9 +509,7 @@ class ProxyGroup(Proxy, ABC):
     def new_temporary_proxy(
         cls,
         base_path: Optional[os.PathLike] = None,
-        temp_file_provider: TemporaryFilesProvider = Provide[
-            Container.temp_file_provider
-        ],
+        temp_file_provider: TemporaryFilesProvider = Provide["temp_file_provider"],
     ) -> "ProxyGroup":
         if base_path is not None:
             base_path = Path(base_path)

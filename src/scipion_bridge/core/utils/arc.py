@@ -4,7 +4,6 @@ import warnings
 from pathlib import Path
 
 from dependency_injector.wiring import Provide, inject
-from ...backend.standalone.container import Container
 from ..environment.temp_files import TemporaryFilesProvider
 
 from typing import Optional
@@ -18,9 +17,7 @@ class FileReferenceCounter:
     def new_managed_file(
         self,
         file_ext: Optional[str],
-        temp_file_provider: TemporaryFilesProvider = Provide[
-            Container.temp_file_provider
-        ],
+        temp_file_provider: TemporaryFilesProvider = Provide["temp_file_provider"],
     ) -> Path:
 
         new_path = temp_file_provider.new_temporary_file(file_ext)
@@ -50,9 +47,7 @@ class FileReferenceCounter:
     def remove_reference(
         self,
         path: os.PathLike,
-        temp_file_provider: TemporaryFilesProvider = Provide[
-            Container.temp_file_provider
-        ],
+        temp_file_provider: TemporaryFilesProvider = Provide["temp_file_provider"],
     ):
         assert (
             path in self.references

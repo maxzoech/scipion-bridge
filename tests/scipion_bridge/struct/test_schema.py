@@ -2,14 +2,14 @@ import numpy as np
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.core.struct.schema import (
+from scipion_bridge.core.struct import (
     Schema,
     ArrayEntry,
     ArraySetEntry,
     SchemaEntry,
     SchemaSetEntry,
 )
-from scipion_bridge.core.struct.key_path import KeyPath
+from scipion_bridge.core.struct import KeyPath
 
 
 def test_schema_construction_and_static_property():

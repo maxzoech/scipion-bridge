@@ -52,7 +52,8 @@ Compilation
 2. **Actors.** Every node that is not *hosted* becomes a named actor
    (``<pipeline id>:<label>``): ``RaySourceActor``, ``RayAccumulatorActor``,
    ``RaySinkActor``, ``RayDemuxActor``, or ``RayMergeActor`` for a map with
-   several inputs. A map with a single input is hosted: it has no actor of its
+   several inputs, all defined in ``scipion_bridge.backend.ray.backend``. A
+   map with a single input is hosted: it has no actor of its
    own, and its calls are submitted by the actor of the nearest upstream stage
    (``_host_of``).
 3. **Routes.** Every actor receives its *routes* with ``connect``: a
@@ -218,7 +219,7 @@ Shared resources
 
 ``RayResourceProvider`` caches process-scope resources per worker process.
 Shared resources are built once per cluster by a detached, named
-``RayResourceCoordinator`` actor, which runs the builder as a task holding 35%
+``RayResourceCoordinator`` actor (``backend/ray/resource_provider.py``), which runs the builder as a task holding 35%
 of the cluster's CPU cores and keeps the resulting object reference. Every
 worker fetches the same object.
 

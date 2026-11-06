@@ -78,7 +78,7 @@ which reads large stacks on spinning disks at a fraction of their speed.
    receive the path of the STAR file.
 
 These three are also exported from the top-level namespace as
-``B.StarfileProxy``, ``B.MRCStackProxy`` and ``B.ParticleStackProxy``.
+``spa.StarfileProxy``, ``spa.MRCStackProxy`` and ``spa.ParticleStackProxy``.
 
 Particles extracted by Xmipp, for example by ``XmippProtExtractParticles`` in
 Scipion, come as one ``<stem>.mrcs`` stack and one ``<stem>.xmd`` metadata

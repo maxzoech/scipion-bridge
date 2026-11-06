@@ -1,6 +1,5 @@
-from .shell import shell_command, Domain
+from .shell import shell_command
 
 __all__ = [
     "shell_command",
-    "Domain",
 ]

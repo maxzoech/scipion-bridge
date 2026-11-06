@@ -1,6 +1,6 @@
 import pytest
 from scipion_bridge.core.utils.shell import Domain
-from scipion_bridge.core.environment.cmd_exec import StandaloneExecProvider
+from scipion_bridge.core.environment import StandaloneExecProvider
 from subprocess import PIPE
 
 PYTHON_DOMAIN = Domain("PY", [])

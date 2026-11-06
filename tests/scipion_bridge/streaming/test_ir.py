@@ -1,9 +1,9 @@
 from scipion_bridge.core.streaming.element_mapper import ElementMapper
-from scipion_bridge.core.streaming.ops import Source
-from scipion_bridge.core.streaming.sink import Sink
-from scipion_bridge.core.streaming.sink_writer import CallbackSinkWriter
-from scipion_bridge.core.streaming.ir import IRSource, IRMap, IRSink, IRAccumulate
-from scipion_bridge.core.streaming.node import lower
+from scipion_bridge.core.streaming import Source
+from scipion_bridge.core.streaming import Sink
+from scipion_bridge.core.streaming import CallbackSinkWriter
+from scipion_bridge.core.streaming import IRSource, IRMap, IRSink, IRAccumulate
+from scipion_bridge.core.streaming import lower
 
 
 def test_linear_lowering():

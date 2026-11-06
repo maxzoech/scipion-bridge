@@ -1,27 +1,27 @@
 """Core Struct and Set abstractions and Arrow storage engine."""
 
+from .collection import Collection
+from .exceptions import UninitializedFieldError
+from .key_path import IndexType, KeyPath
 from .schema import (
-    Entry,
-    Schema,
-    ArrayEntryBase,
     ArrayEntry,
+    ArrayEntryBase,
     ArraySetEntry,
+    CollectionEntry,
+    Entry,
     RaggedArraySetEntry,
+    Schema,
+    SchemaConvertible,
     SchemaEntry,
     SchemaSetEntry,
-    CollectionEntry,
+    SetEntryBase,
 )
-from .struct import Struct, Array, Arg, Dim
 from .set import Set, concat
-from .collection import Collection
-from .key_path import KeyPath, IndexType
-from .storage import (
-    _BaseStorage,
-    StorageView,
-)
-from .exceptions import UninitializedFieldError
+from .storage import StorageView
+from .struct import Arg, Array, Dim, Struct
 
 __all__ = [
+    # Types
     "Struct",
     "Set",
     "Collection",
@@ -29,18 +29,20 @@ __all__ = [
     "Array",
     "Arg",
     "Dim",
-    "Entry",
     "KeyPath",
     "IndexType",
+    "UninitializedFieldError",
+    # Schemas and storage, for sinks and backends
     "Schema",
-    "_BaseStorage",
-    "StorageView",
+    "SchemaConvertible",
+    "Entry",
     "ArrayEntryBase",
     "ArrayEntry",
+    "SetEntryBase",
     "ArraySetEntry",
     "RaggedArraySetEntry",
     "SchemaEntry",
     "SchemaSetEntry",
     "CollectionEntry",
-    "UninitializedFieldError",
+    "StorageView",
 ]

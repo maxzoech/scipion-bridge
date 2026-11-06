@@ -19,7 +19,7 @@ from scipion_bridge.single_particle import (
     Class2D as BClass2D,
     FlexParticle as BFlexParticle,
 )
-from scipion_bridge.core.struct.storage import UninitializedFieldError
+from scipion_bridge.core.struct import UninitializedFieldError
 from scipion_bridge.backend.pyworkflow import resolvers as res
 from scipion_bridge.backend.pyworkflow.utils.resolve_graph import (
     find_pointer_class,

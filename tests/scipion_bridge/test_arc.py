@@ -2,7 +2,7 @@ import os
 
 from pathlib import Path
 from scipion_bridge.core.utils.arc import FileReferenceCounter
-from scipion_bridge.backend.standalone.container import Container
+from scipion_bridge.backend import Container
 
 import pytest
 from typing import Optional

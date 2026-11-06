@@ -12,9 +12,7 @@ from numpy._core.multiarray import (  # noqa: E402
 import pytest  # noqa: E402
 import ray  # noqa: E402
 
-from scipion_bridge.backend.standalone.container import (  # noqa: E402
-    configure_default_env,
-)
+from scipion_bridge.backend import configure_default_env
 
 # Eagerly wire container so top-level Struct definitions in test modules collect cleanly
 _test_container = configure_default_env()

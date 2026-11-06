@@ -16,7 +16,7 @@ functions that produces it from the type it has.
         return float(particles["ctf"]["defocus_u"].mean())
 
     mean_defocus(particles)                              # a Set, used as is
-    mean_defocus(B.ParticleStackProxy("data/particles")) # read from disk first
+    mean_defocus(spa.ParticleStackProxy("data/particles")) # read from disk first
 
 Type resolution is what connects the layers of the library: the Ray runner
 uses it to read inputs from files, ``@B.proxify`` to write data to the files
@@ -63,7 +63,7 @@ There are three ways to resolve a value.
 
 .. code-block:: python
 
-    stack = B.resolve(particles, astype=B.ParticleStackProxy)
+    stack = B.resolve(particles, astype=spa.ParticleStackProxy)
 
 **Through annotated parameters**, with ``@B.resolve_params`` and
 ``B.Resolve[T]``. Every argument of an annotated parameter is resolved on
@@ -72,7 +72,7 @@ each call; other parameters are passed through:
 .. code-block:: python
 
     @B.resolve_params
-    def f(stack: B.Resolve[B.ParticleStackProxy], threshold: float): ...
+    def f(stack: B.Resolve[spa.ParticleStackProxy], threshold: float): ...
 
 **Through a precomputed resolver**, with ``B.find_resolver``. It runs the
 graph search once and returns a ``ComposedResolver``, which can be called

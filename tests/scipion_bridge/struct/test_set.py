@@ -5,7 +5,7 @@ import numpy as np
 import pyarrow as pa
 
 import scipion_bridge as B
-from scipion_bridge.core.struct.schema import (
+from scipion_bridge.core.struct import (
     Entry,
     Schema,
     ArrayEntry,
@@ -15,7 +15,7 @@ from scipion_bridge.core.struct.schema import (
     SchemaEntry,
     ArrayEntryBase,
 )
-from scipion_bridge.core.struct.key_path import KeyPath
+from scipion_bridge.core.struct import KeyPath
 from scipion_bridge.core.struct.storage import _BaseStorage
 
 

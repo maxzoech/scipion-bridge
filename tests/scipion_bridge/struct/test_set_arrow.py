@@ -11,8 +11,8 @@ import ray
 import ray.cloudpickle
 
 import scipion_bridge as B
-from scipion_bridge.core.struct.exceptions import UninitializedFieldError
-from scipion_bridge.single_particle.particle import Class2D, Particle
+from scipion_bridge.core.struct import UninitializedFieldError
+from scipion_bridge.single_particle import Class2D, Particle
 
 
 class Sample(B.Struct):
