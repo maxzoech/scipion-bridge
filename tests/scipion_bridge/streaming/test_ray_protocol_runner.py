@@ -1,6 +1,7 @@
+import os
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Tuple
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
@@ -392,6 +393,29 @@ def test_ray_pipeline_runner_with_shared_resource_multi_worker(tmp_path, monkeyp
     assert ray.get(tracker.get_count.remote()) == 1
 
 
+@ray.remote
+class PidTracker:
+    """Records the processes that built a resource and those that ran a call."""
+
+    def __init__(self):
+        self.builds: List[int] = []
+        self.calls: List[int] = []
+
+    def built(self, pid: int) -> None:
+        self.builds.append(pid)
+
+    def called(self, pid: int) -> None:
+        self.calls.append(pid)
+
+    def pids(self) -> Tuple[List[int], List[int]]:
+        return self.builds, self.calls
+
+
+def _build_process_resource(tracker: Any) -> dict:
+    ray.get(tracker.built.remote(os.getpid()))
+    return {"pid": os.getpid()}
+
+
 class RayProcessResourceMultiWorkerProtocol(Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input(
         label="Input Particles",
@@ -400,16 +424,20 @@ class RayProcessResourceMultiWorkerProtocol(Protocol):
 
     tracker_handle: Any = None
     process_res: B.Resource[dict] = B.Resource(
-        builder=lambda self: {"val": ray.get(self.tracker_handle.increment.remote())},
+        builder=lambda self: _build_process_resource(self.tracker_handle),
         scope=B.ResourceScope.PROCESS,
     )
 
+    def _use_resource(self) -> None:
+        assert self.process_res["pid"] == os.getpid()
+        ray.get(self.tracker_handle.called.remote(os.getpid()))
+
     def _step1(self, particles: B.Set[Particle]):
-        _ = self.process_res
+        self._use_resource()
         return particles
 
     def _step2(self, particles: B.Set[Particle]):
-        _ = self.process_res
+        self._use_resource()
         return {"output": particles}
 
     def outputs(self):
@@ -420,19 +448,24 @@ class RayProcessResourceMultiWorkerProtocol(Protocol):
 
 
 def test_ray_pipeline_runner_with_process_resource_multi_worker(tmp_path, monkeypatch):
-    """Verify that a PROCESS resource runs once per worker actor process (2 times for 2 actors)."""
+    """A PROCESS resource is built once in every process that runs a call.
+
+    Map calls run as Ray tasks on pooled worker processes, so how many
+    processes run them depends on Ray's scheduling, not on the stages.
+    """
     monkeypatch.setenv("SCIPION_CHUNK_SIZE", "2")
     star_path, _ = _create_sample_particles(tmp_path, n_particles=6)
 
-    tracker = BuilderTracker.remote()
+    tracker = PidTracker.remote()
     proto = RayProcessResourceMultiWorkerProtocol()
     proto.tracker_handle = tracker
 
     runner = RayPipelineRunner(proto)
     runner.run(particles=star_path)
 
-    # 2 distinct worker actors each initialize their own process-local copy:
-    assert ray.get(tracker.get_count.remote()) == 2
+    builds, calls = ray.get(tracker.pids.remote())
+    assert len(builds) == len(set(builds))
+    assert set(builds) == set(calls)
 
 
 class RechunkProtocol(Protocol):

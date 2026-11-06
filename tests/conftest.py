@@ -12,7 +12,7 @@ from numpy._core.multiarray import (  # noqa: E402
 import pytest  # noqa: E402
 import ray  # noqa: E402
 
-from scipion_bridge.backend import configure_default_env
+from scipion_bridge.backend import configure_default_env  # noqa: E402
 
 # Eagerly wire container so top-level Struct definitions in test modules collect cleanly
 _test_container = configure_default_env()
@@ -25,10 +25,15 @@ def setup_test_container():
 
 
 def pytest_collection_modifyitems(items):
-    """Mark the tests running on the Ray cluster, to select them with ``-m ray``."""
+    """Mark the tests running on the Ray cluster (``-m ray``) and those of the
+    xdist group "timing" (``-m timing``), which CI runs alone."""
     for item in items:
         if "ray_cluster" in item.fixturenames:
             item.add_marker(pytest.mark.ray)
+        if any(
+            marker.args == ("timing",) for marker in item.iter_markers("xdist_group")
+        ):
+            item.add_marker(pytest.mark.timing)
 
 
 @pytest.fixture(scope="session")
@@ -41,6 +46,9 @@ def ray_cluster():
     costs about a second per actor. Every actor of a pipeline takes a worker
     process of its own, and Ray starts only ``num_cpus`` of them at a time
     unless ``worker_maximum_startup_concurrency`` raises the limit.
+
+    The object store is capped: by default Ray reserves 30% of the node's
+    memory for it, in every cluster of a parallel run.
     """
     tests_dir = os.path.abspath("tests")
     paths = [
@@ -55,6 +63,7 @@ def ray_cluster():
             num_cpus=2,
             # Logical GPUs: Ray schedules them without a GPU driver.
             num_gpus=2,
+            object_store_memory=512 * 1024**2,
             _system_config={"worker_maximum_startup_concurrency": 8},
         )
         yield

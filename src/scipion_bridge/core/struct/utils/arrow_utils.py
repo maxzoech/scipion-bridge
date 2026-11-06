@@ -306,10 +306,33 @@ def slice_arrow_array(arr: pa.Array, offset: Any) -> pa.Array:
     return arr
 
 
+def tensor_to_numpy(col: pa.FixedShapeTensorArray) -> np.ndarray:
+    """The cells of a FixedShapeTensorArray as one array of shape (N, *cell shape).
+
+    Null cells keep the values stored for them: the containers track which of
+    their rows are initialized themselves. ``to_numpy_ndarray`` raises on null
+    cells since pyarrow 26 and ignored them before, so the storage is read
+    directly to behave the same with every version.
+    """
+    tensor_type = col.type
+    assert isinstance(tensor_type, pa.FixedShapeTensorType)
+    assert (
+        tensor_type.permutation is None
+    ), f"Permuted tensor layouts are not supported, got {tensor_type}."
+
+    storage = col.storage
+    assert isinstance(storage, pa.FixedSizeListArray)
+    cell_size = storage.type.list_size
+    values = storage.values.slice(storage.offset * cell_size, len(col) * cell_size)
+    return values.to_numpy(zero_copy_only=False).reshape(
+        (len(col), *tensor_type.shape),
+    )
+
+
 def arrow_to_numpy(col: pa.Array, shape: Tuple[Optional[int], ...]) -> np.ndarray:
     """Convert an Arrow array (ExtensionArray, ListArray, or primitive) to an N-D NumPy array."""
-    if isinstance(col, pa.ExtensionArray):
-        return col.to_numpy_ndarray()
+    if isinstance(col, pa.FixedShapeTensorArray):
+        return tensor_to_numpy(col)
 
     if isinstance(col, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)):
         outer_dims = [len(col)]
@@ -323,8 +346,8 @@ def arrow_to_numpy(col: pa.Array, shape: Tuple[Optional[int], ...]) -> np.ndarra
             outer_dims.append(total_items // parent_len)
             curr = curr.values
 
-        if isinstance(curr, pa.ExtensionArray):
-            leaf_np = curr.to_numpy_ndarray()
+        if isinstance(curr, pa.FixedShapeTensorArray):
+            leaf_np = tensor_to_numpy(curr)
         else:
             leaf_np = curr.to_numpy(zero_copy_only=False)
 

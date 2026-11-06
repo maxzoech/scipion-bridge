@@ -13,8 +13,6 @@ import ray.cloudpickle
 import scipion_bridge as B
 from scipion_bridge.single_particle import Class2D, Particle
 
-pytestmark = pytest.mark.usefixtures("ray_cluster")
-
 
 class Frame(B.Struct):
     pixels: B.Array[float] = B.Array(shape=(2, 2))
@@ -32,6 +30,27 @@ _SERIALIZERS = {
     "ray.cloudpickle": (ray.cloudpickle.dumps, ray.cloudpickle.loads),
     "ray.put": (ray.put, ray.get),
 }
+
+# Only ray.put needs the Ray test cluster; the other serializers run in-process.
+# pytest.param cannot add usefixtures, so the case is marked `ray` and the
+# fixture `serializer` starts the cluster for it.
+_SERIALIZER_PARAMS = [
+    "pickle",
+    "cloudpickle",
+    "ray.cloudpickle",
+    pytest.param("ray.put", marks=pytest.mark.ray),
+]
+
+
+@pytest.fixture
+def serializer(request: pytest.FixtureRequest) -> str:
+    """The name of a serializer in _SERIALIZERS, with the Ray cluster for ray.put."""
+    match request.param:
+        case "ray.put":
+            request.getfixturevalue("ray_cluster")
+        case _:
+            pass
+    return request.param
 
 
 def _particles(n: int, offset: float) -> B.Set[Particle]:
@@ -72,7 +91,7 @@ def _assert_class_equal(actual: Class2D, expected: Class2D) -> None:
 # -- Struct ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+@pytest.mark.parametrize("serializer", _SERIALIZER_PARAMS, indirect=True)
 def test_owning_struct_roundtrip(serializer):
     dumps, loads = _SERIALIZERS[serializer]
     cls = _class(3, n=2)
@@ -129,7 +148,7 @@ def test_struct_to_arrow_is_a_single_row():
 # -- Collection --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+@pytest.mark.parametrize("serializer", _SERIALIZER_PARAMS, indirect=True)
 def test_sparse_collection_roundtrip(serializer):
     dumps, loads = _SERIALIZERS[serializer]
     collection = _classes(
@@ -177,7 +196,7 @@ def test_collection_to_arrow_has_one_row_per_slot():
     ]
 
 
-@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+@pytest.mark.parametrize("serializer", _SERIALIZER_PARAMS, indirect=True)
 def test_collection_item_view_roundtrip(serializer):
     dumps, loads = _SERIALIZERS[serializer]
     collection = _classes(3, {0: _class(0, n=2), 2: _class(2, n=4)})
@@ -222,7 +241,7 @@ def test_collection_to_arrow_with_ragged_static_nested_sets():
     ]
 
 
-@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+@pytest.mark.parametrize("serializer", _SERIALIZER_PARAMS, indirect=True)
 def test_collection_with_ragged_static_nested_sets_roundtrip(serializer):
     dumps, loads = _SERIALIZERS[serializer]
     collection = _ragged_static_classes()
@@ -274,7 +293,7 @@ def test_collection_item_view_does_not_pickle_other_slots():
     ],
     ids=["empty-filled", "filled-empty", "only-third", "alternating"],
 )
-@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+@pytest.mark.parametrize("serializer", _SERIALIZER_PARAMS, indirect=True)
 def test_collection_slot_patterns_roundtrip(slots, serializer):
     dumps, loads = _SERIALIZERS[serializer]
     collection = _classes(
@@ -350,7 +369,7 @@ def test_set_slice_roundtrip_does_not_include_parent_rows():
     assert len(pickle.dumps(particles[10:12])) < 0.15 * len(pickle.dumps(particles))
 
 
-@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+@pytest.mark.parametrize("serializer", _SERIALIZER_PARAMS, indirect=True)
 def test_ragged_set_columns_keep_their_type(serializer):
     # PyArrow's pickling drops the nullability of nested fields; without
     # restoring it, regular rows would come back as Awkward option types.
@@ -365,6 +384,7 @@ def test_ragged_set_columns_keep_their_type(serializer):
     assert np.array_equal(restored[1].pixels, np.full((4, 4), 1.0, np.float32))
 
 
+@pytest.mark.usefixtures("ray_cluster")
 def test_regular_dynamic_column_through_ray_is_zero_copy_numpy():
     particles = B.Set[Particle](capacity=3)
     particles["pixels"] = np.arange(36, dtype=np.float32).reshape(3, 3, 4)

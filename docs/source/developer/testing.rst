@@ -71,6 +71,8 @@ The Ray test cluster
   ``-m "not ray"`` and ``-m ray`` select the two halves of the suite.
 * The cluster has 2 CPUs and 2 logical GPUs. Tests that assert scheduling
   (overlap of calls, queuing on GPUs) rely on these numbers.
+* Its object store is capped at 512 MiB, since every xdist worker starts a
+  cluster of its own. Keep the data of Ray tests small.
 * Ray's auto-init is disabled (``RAY_ENABLE_AUTO_CONNECT=0``): a test that
   uses Ray without the fixture fails instead of starting an unconfigured
   cluster.
@@ -118,6 +120,9 @@ assertion allows, and assert relations (overlap, order) rather than absolute
 durations. Modules with timing assertions are marked
 ``pytest.mark.xdist_group("timing")`` so that parallel runs execute them on
 one worker, one after another. Add new timing-sensitive modules to that group.
+Their tests are also marked ``timing`` automatically, to run them alone
+(``-m "ray and timing"``) when other clusters on the same CPUs distort their
+timings.
 
 **Batch subprocesses.** Starting a Python subprocess costs about 2 s for the
 imports. Batch work into one subprocess where possible (see
@@ -145,8 +150,10 @@ CI (``.github/workflows/python-app.yml``) runs on every push with Python 3.11:
 1. ``flake8`` for syntax errors and undefined names (failing), and for style
    and complexity (warnings only);
 2. the non-Ray tests with coverage;
-3. the Ray tests in parallel (``-n auto --dist loadgroup``), appending to the
-   same coverage data.
+3. the Ray tests in one process (``-m ray``), appending to the same coverage
+   data. Every xdist worker would start a Ray cluster of its own: parallel
+   clusters ran the 16 GB runner out of memory and distorted the timing
+   tests.
 
 Benchmarks
 ----------

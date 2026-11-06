@@ -50,6 +50,7 @@ ray = ["ray", "tensorstore"]
 [tool.pytest.ini_options]
 markers = [
     "ray: runs on the Ray test cluster, added to every test using the ray_cluster fixture; deselect with -m 'not ray'",
+    "timing: asserts timing or scheduling relations, added to every test of the xdist group 'timing'; CI runs them alone",
 ]
 
 [tool.coverage.report]

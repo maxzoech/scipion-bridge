@@ -46,12 +46,14 @@ change:
 |---|---|---|
 | `pytest -m "not ray" tests` | struct, typed, protocol and all in-process tests; Ray never starts | ~15 s |
 | `pytest tests/scipion_bridge/streaming/test_<file>.py` | the Ray tests of one module | seconds to ~2 min |
+| `pytest -m "ray and timing" tests` | the tests asserting timing relations, alone | ~2 min |
 | `pytest -n auto --dist loadgroup tests` | the full suite in parallel | ~3 min |
 | `pytest tests` | the full suite in one process | ~6 min |
 
 Run the full suite only when a change touches shared backend code that the
 targeted modules cannot cover. CI runs the non-Ray tests first, then the Ray
-tests in parallel, and combines their coverage.
+tests in one process (`-m ray`, one Ray cluster: parallel clusters ran the
+16 GB runner out of memory), and combines their coverage.
 
 Ray needs local networking to start its cluster. In a sandbox that blocks it,
 `ray.init()` times out during startup and every Ray test errors; the non-Ray
@@ -66,6 +68,8 @@ tests still run there.
   `-m "not ray"` and `-m ray` select the two halves of the suite.
 - The cluster has 2 CPUs and 2 logical GPUs. Tests that assert scheduling
   (overlap of calls, queuing on GPUs) rely on these numbers.
+- Its object store is capped at 512 MiB, since every xdist worker starts a
+  cluster of its own. Keep the data of Ray tests small.
 - Ray's auto-init is disabled: a test that uses Ray without the fixture fails
   instead of starting an unconfigured cluster.
 - Every actor of a pipeline starts a worker process of its own, which imports
@@ -82,7 +86,9 @@ tests still run there.
   relations (overlap, order) rather than absolute durations.
 - Modules with timing assertions are marked `pytest.mark.xdist_group("timing")`
   so that parallel runs execute them on one worker, one after another. Add new
-  timing-sensitive modules to that group.
+  timing-sensitive modules to that group. Their tests are also marked `timing`
+  automatically, to run them alone (`-m "ray and timing"`) when other clusters
+  on the same CPUs distort their timings.
 - Starting a Python subprocess costs about 2 s for the imports. Batch work into
   one subprocess where possible (see `test_marker_pickle.py`).
 

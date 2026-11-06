@@ -35,6 +35,15 @@
   `backend.ray` no longer exports its actor classes, `RayResourceCoordinator`
   and the alias `configure_ray_container`.
 
+### Tooling
+- Static tensor columns are read from their Arrow storage, so null cells of a
+  sparse `Collection` load with pyarrow 26, whose `to_numpy_ndarray` rejects
+  them.
+- CI runs the Ray tests in one process, with one Ray cluster, and the test
+  cluster's object store is capped at 512 MiB, against out-of-memory kills on
+  the hosted runner. Tests marked `xdist_group("timing")` are marked `timing`
+  automatically.
+
 ## Branch `basic-ray-streaming` (2026-10-01 to 2026-10-30)
 
 ### Streaming operations

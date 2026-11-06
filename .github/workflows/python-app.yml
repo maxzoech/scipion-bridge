@@ -35,6 +35,7 @@ jobs:
           python -m pytest -m "not ray" --cov=scipion_bridge --cov-report= tests
       - name: Test on Ray
         run: |
-          # Every xdist worker starts a Ray cluster of its own; the modules with
-          # timing assertions share the xdist group "timing" and run on one worker.
-          python -m pytest -m ray -n auto --dist loadgroup --cov=scipion_bridge --cov-append tests
+          # One process, so one Ray cluster: parallel workers each start a
+          # cluster of their own, which ran the 16 GB runner out of memory and
+          # competed for the CPUs with the tests asserting timing relations.
+          python -m pytest -m ray --cov=scipion_bridge --cov-append tests
