@@ -6,7 +6,7 @@ from numpy._core.multiarray import (
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.backend.ray.backend import _ray_options
+from scipion_bridge.backend.ray.backend import _check_pools_fit, _ray_options
 from scipion_bridge.core.environment.compute import (
     NUMPY_HUGEPAGE_ENV_VAR,
     ComputeAssignment,
@@ -255,6 +255,56 @@ def test_decorator_passes_min_vram():
             return Source("x")
 
     assert Small.compute_resources == B.ComputeResources(min_vram=6)
+
+
+def test_decorator_passes_replicas():
+    @B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=3)
+    class Pooled(B.Protocol):
+        def outputs(self):
+            return {}
+
+        def steps(self):
+            return Source("x")
+
+    assert Pooled.compute_resources == B.ComputeResources(
+        gpus=1,
+        task=B.TaskType.LONG_RUNNING,
+        replicas=3,
+    )
+
+
+def test_a_pool_needs_a_replica():
+    with pytest.raises(ValueError, match="at least one replica"):
+        B.ComputeResources(replicas=0)
+
+
+def _pool(gpus, cpus, replicas):
+    return ({"num_gpus": gpus, "num_cpus": cpus}, replicas)
+
+
+@pytest.mark.parametrize(
+    "pools",
+    [
+        {"a": _pool(1, 0, 2)},
+        {"a": _pool(1, 0, 1), "b": _pool(0.5, 1, 2)},
+        {},
+    ],
+)
+def test_pools_that_fit_the_cluster_at_once_pass(pools):
+    _check_pools_fit(pools, {"GPU": 2, "CPU": 2})
+
+
+@pytest.mark.parametrize(
+    "pools",
+    [
+        {"a": _pool(1, 0, 3)},
+        {"a": _pool(1, 0, 1), "b": _pool(1, 0, 2)},
+        {"a": _pool(0, 1, 3)},
+    ],
+)
+def test_pools_that_fit_only_one_after_another_raise(pools):
+    with pytest.raises(ValueError, match="at once"):
+        _check_pools_fit(pools, {"GPU": 2, "CPU": 2})
 
 
 def test_a_share_of_a_gpu_limits_preallocation():

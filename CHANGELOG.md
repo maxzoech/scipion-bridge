@@ -36,6 +36,10 @@
   and the alias `configure_ray_container`.
 
 ### Streaming
+- Long-running protocols run on a pool of executors:
+  `@B.resources(..., task=B.TaskType.LONG_RUNNING, replicas=n)` spreads the
+  calls of their maps over `n` processes, in order. Compiling fails if the
+  pools of a pipeline do not fit the cluster at once.
 - Map calls on Ray no longer carry their function: a pipeline puts the
   functions of its maps, its parameters and its profiling setup in the object
   store once, and every worker process unpacks them once. A protocol's map

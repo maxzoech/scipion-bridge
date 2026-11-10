@@ -5,6 +5,9 @@ from functools import cache
 from pathlib import Path
 from typing import (
     Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
     Callable,
     Coroutine,
     Dict,
@@ -18,6 +21,7 @@ from typing import (
 )
 import abc
 import asyncio
+import contextlib
 import logging
 import math
 import os
@@ -114,8 +118,10 @@ class _Apply:
     compute: Optional[ComputeAssignment]
     # Ray options of the task of every call (resources, runtime env).
     options: Dict[str, Any]
-    # Coordinator of the executor of a long-running compute group.
+    # Coordinator of the pool of a long-running compute group.
     group: Optional[Any]
+    # Executors in the pool of the group.
+    replicas: int
     routes: List[_Route]
 
 
@@ -873,6 +879,9 @@ class RayComputeExecutor:
         finally:
             lock.release()
 
+    def ready(self) -> None:
+        """Return once the executor holds its resources and runs."""
+
     def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of the executor."""
         self._recorder.flush_sync()
@@ -880,63 +889,169 @@ class RayComputeExecutor:
 
 @ray.remote
 class RayComputeGroup:
-    """Coordinator of the executor of a long-running group of maps.
+    """Coordinator of the pool of executors of a long-running group of maps.
 
-    The executor is created on the first ``acquire`` and killed, releasing
-    its resources, once every map of the group has passed FLUSH. Items
-    arriving after a flush create a new executor.
+    The pool holds up to ``replicas`` executors. The maps of the group lease
+    executors to send their calls to: an executor nobody leases is preferred,
+    then a new one while the pool is not full, then the one with the fewest
+    leases. An executor is handed out once it holds its resources.
+
+    The executors are killed, releasing their resources, once every map of
+    the group has passed FLUSH. Items arriving after a flush create new ones.
     """
 
     def __init__(
         self,
         options: Dict[str, Any],
         members: int,
+        replicas: int,
         parameters: Mapping[str, Any],
         group: str,
         profile: Optional[ProfileConfig],
     ) -> None:
         self._options = options
         self._members = members
+        self._replicas = replicas
         self._parameters = parameters
         self._group = group
         self._profile = profile
         self._recorder = make_recorder(profile, f"group({group})")
-        self._executor: Optional[Any] = None
+        self._executors: Dict[int, Any] = {}
+        # Leases of every executor, by its id.
+        self._leases: Dict[int, int] = {}
+        self._next_id = 0
         self._released = 0
         self._lock = asyncio.Lock()
 
-    async def acquire(self) -> Any:
-        """Return the executor of the group, creating it if necessary."""
+    async def lease(self, held: Sequence[int]) -> Tuple[int, Any]:
+        """Lease an executor of the pool that the map does not hold yet.
+
+        Creates one if necessary. A map holds fewer executors than the pool
+        has replicas, so one is always left to lease.
+        """
         async with self._lock:
-            if self._executor is None:
-                self._recorder.instant("executor_create", "group")
-                self._executor = RayComputeExecutor.options(
-                    max_concurrency=self._members * _EXECUTOR_CALLS_IN_FLIGHT,
-                    **self._options,
-                ).remote(self._parameters, self._group, self._profile)
-            return self._executor
+            others = {i: n for i, n in self._leases.items() if i not in held}
+            unleased = [i for i, leases in others.items() if leases == 0]
+            match (unleased, len(self._executors) < self._replicas):
+                case ([first, *_], _):
+                    executor_id = first
+                case ([], True):
+                    executor_id = await self._create()
+                case _:
+                    executor_id = min(others, key=others.__getitem__)
+            self._leases[executor_id] += 1
+            return executor_id, self._executors[executor_id]
+
+    async def _create(self) -> int:
+        executor_id = self._next_id
+        self._next_id += 1
+        self._recorder.instant("executor_create", "group", executor=executor_id)
+        executor: Any = RayComputeExecutor.options(
+            max_concurrency=self._members * _EXECUTOR_CALLS_IN_FLIGHT,
+            **self._options,
+        ).remote(self._parameters, self._group, self._profile)
+        await executor.ready.remote()
+        self._executors[executor_id] = executor
+        self._leases[executor_id] = 0
+        return executor_id
 
     async def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of the group."""
         await self._recorder.flush()
 
-    async def release(self) -> None:
-        """Mark a map as flushed; kill the executor once all are flushed."""
+    async def release(self, executor_ids: Sequence[int]) -> None:
+        """Return the leases of a flushed map; kill the pool once all are flushed."""
         async with self._lock:
+            for executor_id in executor_ids:
+                self._leases[executor_id] -= 1
             self._released += 1
-            match (self._released < self._members, self._executor):
-                case (True, _):
+            match self._released < self._members:
+                case True:
                     pass
-                case (False, None):
+                case False:
                     self._released = 0
-                case (False, executor):
-                    self._released = 0
-                    self._executor = None
-                    # Killing the executor discards the events it holds.
-                    await executor.flush_profile.remote()
-                    ray.kill(executor)
-                    self._recorder.instant("executor_kill", "group")
-                    await self._recorder.flush()
+                    await self._kill_all()
+
+    async def _kill_all(self) -> None:
+        executors = list(self._executors.values())
+        self._executors.clear()
+        self._leases.clear()
+        # Killing an executor discards the events it holds.
+        await asyncio.gather(*(e.flush_profile.remote() for e in executors))
+        for executor in executors:
+            ray.kill(executor)
+        match executors:
+            case []:
+                pass
+            case _:
+                self._recorder.instant("executor_kill", "group", count=len(executors))
+                await self._recorder.flush()
+
+
+class _LeasedExecutors:
+    """The executors a map leased from its pool, and its calls on each.
+
+    A call goes to the leased executor with the fewest calls in flight, each
+    taking at most ``capacity``. When all are full, the map leases another
+    executor, up to ``replicas``, or waits for a call to finish.
+    """
+
+    def __init__(
+        self,
+        lease: Callable[[Sequence[int]], Awaitable[Tuple[int, Any]]],
+        replicas: int,
+        capacity: int,
+    ) -> None:
+        self._lease = lease
+        self._replicas = replicas
+        self._capacity = capacity
+        self._executors: Dict[int, Any] = {}
+        self._in_flight: Dict[int, int] = {}
+        self._changed = asyncio.Condition()
+
+    @property
+    def ids(self) -> List[int]:
+        """The ids of the leased executors."""
+        return list(self._executors)
+
+    def clear(self) -> None:
+        """Forget the leases, which the map returns on FLUSH."""
+        self._executors.clear()
+        self._in_flight.clear()
+
+    @contextlib.asynccontextmanager
+    async def slot(self) -> AsyncGenerator[Any]:
+        """An executor with room for one more call, for the duration of it."""
+        executor_id = await self._acquire()
+        try:
+            yield self._executors[executor_id]
+        finally:
+            async with self._changed:
+                self._in_flight[executor_id] -= 1
+                self._changed.notify_all()
+
+    async def _acquire(self) -> int:
+        """An idle executor, else a new lease, else the least busy with room."""
+        async with self._changed:
+            while True:
+                idle = [i for i, calls in self._in_flight.items() if calls == 0]
+                free = [
+                    i for i, calls in self._in_flight.items() if calls < self._capacity
+                ]
+                match (idle, len(self._executors) < self._replicas, free):
+                    case ([executor_id, *_], _, _):
+                        self._in_flight[executor_id] += 1
+                        return executor_id
+                    case ([], True, _):
+                        executor_id, executor = await self._lease(self.ids)
+                        self._executors[executor_id] = executor
+                        self._in_flight.setdefault(executor_id, 0)
+                    case ([], False, [_, *_]):
+                        executor_id = min(free, key=self._in_flight.__getitem__)
+                        self._in_flight[executor_id] += 1
+                        return executor_id
+                    case _:
+                        await self._changed.wait()
 
 
 class _MapRunner:
@@ -946,9 +1061,10 @@ class _MapRunner:
       task per call, so Ray queues the calls of all maps on the resources. A
       call claiming GPUs runs in a process of its own (see
       ``_run_in_gpu_task``).
-    - Long-running resources are held by the executor of the map's group.
-      Its calls run one at a time, as in a stage of its own, while the next
-      call is already being transferred to the executor.
+    - Long-running resources are held by the pool of executors of the map's
+      group. A call goes to the least busy executor the map leased; in each,
+      the map's calls run one at a time, as in a stage of its own, while the
+      next call is already being transferred to the executor.
     """
 
     def __init__(
@@ -970,9 +1086,12 @@ class _MapRunner:
         self._group = route.group
         self._recorder = recorder
         self.stats = StageStats()
-        self._executor_calls = asyncio.Semaphore(_EXECUTOR_CALLS_IN_FLIGHT)
-        # The executor stays alive until this map released it on FLUSH.
-        self._executor: Optional[Any] = None
+        # The executors stay alive until this map released them on FLUSH.
+        self._executors = _LeasedExecutors(
+            self._lease,
+            replicas=route.replicas,
+            capacity=_EXECUTOR_CALLS_IN_FLIGHT,
+        )
 
     async def run(self, item: Any) -> ray.ObjectRef:
         """Submit a call and wait until its result is in the object store.
@@ -999,8 +1118,7 @@ class _MapRunner:
             case ComputeAssignment(
                 resources=ComputeResources(task=TaskType.LONG_RUNNING),
             ):
-                async with self._executor_calls:
-                    executor = await self._acquire()
+                async with self._executors.slot() as executor:
                     return await self._completions.done(
                         executor.call.remote(self._functions, self._label, item),
                     )
@@ -1013,8 +1131,9 @@ class _MapRunner:
             case None:
                 pass
             case group:
-                self._executor = None
-                await group.release.remote()
+                leases = self._executors.ids
+                self._executors.clear()
+                await group.release.remote(leases)
 
     def _submit(self, item: Any) -> ray.ObjectRef:
         return self._task.options(**self._options).remote(
@@ -1023,11 +1142,9 @@ class _MapRunner:
             item,
         )
 
-    async def _acquire(self) -> Any:
+    async def _lease(self, held: Sequence[int]) -> Tuple[int, Any]:
         assert self._group is not None, "Long-running map has no compute group."
-        if self._executor is None:
-            self._executor = await self._group.acquire.remote()
-        return self._executor
+        return await self._group.lease.remote(held)
 
 
 # Longest time a newly submitted call waits to join the poll of the calls in
@@ -1773,9 +1890,22 @@ class RayBackend(StreamingBackendProvider):
         profile, owns_profile = self._profile_config(pipeline_id)
         groups = self._compute_groups(all_nodes, claims, profile)
         spill, spill_root = self._spill_config()
+        # Every executor of a pool takes calls of a map at once; the items on
+        # the routes of a stage must cover them all.
+        pooled_calls = max(
+            (
+                _replicas(compute) * _EXECUTOR_CALLS_IN_FLIGHT
+                for node in all_nodes
+                if isinstance(node, IRMap)
+                and isinstance(compute := node.compute, ComputeAssignment)
+                and compute.resources.task == TaskType.LONG_RUNNING
+                and _replicas(compute) > 1
+            ),
+            default=0,
+        )
         config = _StageConfig(
             queue_size=self.queue_size,
-            max_in_flight=self.max_in_flight,
+            max_in_flight=max(self.max_in_flight, pooled_calls),
             buffer_size=self.buffer_size,
             spill=spill,
             profile=profile,
@@ -1993,9 +2123,14 @@ class RayBackend(StreamingBackendProvider):
         claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]],
         profile: Optional[ProfileConfig],
     ) -> Dict[str, Any]:
-        """Create a coordinator for every long-running group among ``nodes``."""
+        """Create a coordinator for every long-running group among ``nodes``.
+
+        Raises:
+            ValueError: If the pools of the groups do not fit the cluster at
+                once.
+        """
         members: Dict[str, int] = {}
-        options: Dict[str, Dict[str, Any]] = {}
+        pools: Dict[str, Tuple[Dict[str, Any], int]] = {}
         for node in nodes:
             match node:
                 case IRMap(
@@ -2005,16 +2140,38 @@ class RayBackend(StreamingBackendProvider):
                     ) as compute,
                 ):
                     members[group] = members.get(group, 0) + 1
-                    options[group] = claims[compute]
+                    pools[group] = (claims[compute], _replicas(compute))
                 case _:
                     pass
 
+        _check_pools_fit(pools, ray.cluster_resources())
         return {
             group: RayComputeGroup.options(
                 runtime_env={"env_vars": numpy_hugepage_env()},
-            ).remote(options[group], count, self.parameters, group, profile)
+            ).remote(
+                pools[group][0],
+                count,
+                pools[group][1],
+                self.parameters,
+                group,
+                profile,
+            )
             for group, count in members.items()
         }
+
+
+def _replicas(compute: Optional[ComputeAssignment]) -> int:
+    """Executors in the pool of a map's group: one unless declared otherwise."""
+    match compute:
+        case ComputeAssignment(
+            resources=ComputeResources(
+                task=TaskType.LONG_RUNNING,
+                replicas=int(replicas),
+            ),
+        ):
+            return replicas
+        case _:
+            return 1
 
 
 def _group_of(
@@ -2064,6 +2221,7 @@ class _RouteBuilder:
             compute=node.compute,
             options=self.claims[node.compute],
             group=_group_of(self.groups, node.compute),
+            replicas=_replicas(node.compute),
             routes=self._routes(node),
         )
 
@@ -2118,6 +2276,34 @@ def _needs_gpu_memory(node: IROp) -> bool:
             return True
         case _:
             return any(_needs_gpu_memory(upstream) for upstream in node.upstream)
+
+
+def _check_pools_fit(
+    pools: Mapping[str, Tuple[Dict[str, Any], int]],
+    cluster: Mapping[str, float],
+) -> None:
+    """Raise unless the long-running pools fit the cluster at once.
+
+    Args:
+        pools: The Ray options of an executor and the replicas, by group.
+        cluster: The resources of the Ray cluster.
+
+    The executors of a pool hold their resources until FLUSH: a pool that
+    fits only once another released its GPUs would wait for them forever.
+    """
+    gpus = sum(options["num_gpus"] * replicas for options, replicas in pools.values())
+    cpus = sum(options["num_cpus"] * replicas for options, replicas in pools.values())
+    cluster_gpus, cluster_cpus = cluster.get("GPU", 0), cluster.get("CPU", 0)
+    match (gpus <= cluster_gpus, cpus <= cluster_cpus):
+        case (True, True):
+            pass
+        case _:
+            raise ValueError(
+                f"The long-running protocols {sorted(pools)} hold {gpus:g} GPUs "
+                f"and {cpus:g} CPUs at once, but the Ray cluster has "
+                f"{cluster_gpus:g} GPUs and {cluster_cpus:g} CPUs. Reduce "
+                "their replicas or their claims.",
+            )
 
 
 def _check_cluster_fits(assignment: ComputeAssignment, num_gpus: float) -> None:

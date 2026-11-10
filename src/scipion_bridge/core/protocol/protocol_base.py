@@ -619,6 +619,7 @@ def resources(
     min_vram: Optional[float] = None,
     cpus: Optional[float] = None,
     task: TaskType = TaskType.EPHEMERAL,
+    replicas: Optional[int] = None,
 ) -> Callable[[ProtocolT], ProtocolT]:
     """Declare the compute resources of a protocol's stages.
 
@@ -630,7 +631,13 @@ def resources(
 
     See :class:`ComputeResources` for the arguments.
     """
-    compute = ComputeResources(gpus=gpus, min_vram=min_vram, cpus=cpus, task=task)
+    compute = ComputeResources(
+        gpus=gpus,
+        min_vram=min_vram,
+        cpus=cpus,
+        task=task,
+        replicas=replicas,
+    )
 
     def decorate(cls: ProtocolT) -> ProtocolT:
         if not issubclass(cls, Protocol):

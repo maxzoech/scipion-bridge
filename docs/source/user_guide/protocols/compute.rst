@@ -61,8 +61,18 @@ Options
    ``TaskType.EPHEMERAL`` (the default) or ``TaskType.LONG_RUNNING``,
    described below.
 
+``replicas``
+   The number of executor processes of a long-running protocol, each holding
+   the resources (default 1). The calls of the protocol's maps are spread over
+   them, in order: ``@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING,
+   replicas=2)`` runs a model on two GPUs, without partitioning the stream in
+   the protocol.
+
 A protocol whose declaration exceeds the cluster (more GPUs or CPUs per call
-than the cluster has) fails when the pipeline is compiled.
+than the cluster has) fails when the pipeline is compiled. So do long-running
+protocols whose executors, all replicas together, do not fit the cluster at
+once: an executor holds its resources until the stream is flushed, so one
+that fits only after another one released its GPUs would wait forever.
 
 Ephemeral and long-running tasks
 --------------------------------
@@ -80,13 +90,14 @@ fits external programs, which hold the GPU only while they run; it does not
 fit in-process models, which would be loaded for every batch. CPU calls run
 in reused worker processes, which keep their resources.
 
-**Long-running.** A dedicated executor process holds the resources from the
-first call until the stream is flushed, then releases them; items that arrive
-after a flush start a new executor. All maps of the protocol (except
-``cpu_only`` ones) run on the same executor, so process-scope resources such as
-a model are built once. Each map runs one call at a time on the executor,
+**Long-running.** A pool of ``replicas`` dedicated executor processes holds
+the resources from the first call until the stream is flushed, then releases
+them; items that arrive after a flush start new executors. All maps of the
+protocol (except ``cpu_only`` ones) run on the pool, so process-scope
+resources such as a model are built once per executor. A call goes to an idle
+executor if there is one; each map runs one call at a time on an executor,
 while the input of its next call is already being transferred, which hides the
-transfer behind the computation.
+transfer behind the computation. The results keep the order of the items.
 
 .. list-table::
    :header-rows: 1

@@ -130,13 +130,26 @@ disables reuse automatically for GPUs requested in the decorator, not through
 ``.options()``, hence the separate definition. CPU calls reuse worker
 processes.
 
-**Long-running calls** run on a ``RayComputeExecutor``, a threaded actor that
-holds the group's resources. The ``RayComputeGroup`` coordinator creates it on
-the first ``acquire`` and kills it once every map of the group has released
-it at FLUSH; items arriving after a flush create a new executor. Every map has
-two calls in flight on the executor, but a per-map lock runs its function one
-call at a time; Ray deserializes the argument of the next call and serializes
-the result of the previous one meanwhile.
+**Long-running calls** run on a pool of ``RayComputeExecutor``\ s, threaded
+actors that hold the group's resources. The ``RayComputeGroup`` coordinator
+keeps up to ``replicas`` of them and hands them out as *leases*: a map leases
+an executor it does not hold yet, preferably one nobody leases, else a new one
+while the pool is not full, else the one with the fewest leases. An executor
+is handed out once it holds its resources (``ready``). On the map's side,
+``_LeasedExecutors`` sends a call to an idle leased executor, else leases
+another, else to the least busy one with fewer than two calls in flight, else
+waits. Every map has at most two calls in flight on an executor, but a
+per-map lock runs its function one call at a time; Ray deserializes the
+argument of the next call and serializes the result of the previous one
+meanwhile. At FLUSH, every map returns its leases, and the coordinator kills
+the pool once all maps of the group have; items arriving after a flush create
+new executors. Results return in order through the forward tasks of the
+stage, as for tasks.
+
+``_check_pools_fit`` rejects, at compile time, long-running pools that do not
+fit the cluster at once: their executors hold their resources until FLUSH, so
+an executor that fits only after another pool released its GPUs would wait
+forever.
 
 Function tables
 ^^^^^^^^^^^^^^^

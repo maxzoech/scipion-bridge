@@ -254,6 +254,64 @@ def test_long_running_resources_are_released_on_flush():
         pipeline.close()
 
 
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=CLUSTER_GPUS)
+class PooledInference(B.Protocol):
+    items: B.Input[int] = B.Input()
+    model: B.Resource[int] = B.Resource(builder=_build_model)
+    recorder: Any
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(self._forward)
+
+    def _forward(self, item):
+        _record(self.recorder, "forward", seconds=0.3)
+        return {"out": item + self.model}
+
+
+def test_a_pool_spreads_the_calls_over_its_executors_in_order():
+    protocol = PooledInference()
+    protocol.recorder = Recorder.remote()
+    collector = Collector.remote()
+    pipeline = _compile(protocol, collector)
+
+    try:
+        for item in range(6):
+            pipeline.send("items", item)
+        pipeline.flush()
+
+        calls = ray.get(protocol.recorder.get_calls.remote())
+        assert _max_overlap(calls) == CLUSTER_GPUS
+        assert len({call["pid"] for call in calls}) == CLUSTER_GPUS
+        assert len({tuple(call["gpus"]) for call in calls}) == CLUSTER_GPUS
+        # Every executor builds the process-scope model once.
+        assert ray.get(protocol.recorder.get_builds.remote()) == CLUSTER_GPUS
+        results = ray.get(collector.get.remote())
+        assert [result["out"] for result in results] == list(range(10, 16))
+        assert _wait_for_free_gpus() == CLUSTER_GPUS
+    finally:
+        pipeline.close()
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=CLUSTER_GPUS + 1)
+class OversizedPool(B.Protocol):
+    items: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(lambda item: {"out": item})
+
+
+def test_a_pool_that_does_not_fit_at_once_raises():
+    # Every executor fits on its own, but they hold their GPUs until FLUSH.
+    with pytest.raises(ValueError, match="at once"):
+        _compile(OversizedPool(), Collector.remote())
+
+
 def _restore_slowly(value):
     time.sleep(0.2)  # Stands in for deserializing a large chunk.
     return SlowItem(value)

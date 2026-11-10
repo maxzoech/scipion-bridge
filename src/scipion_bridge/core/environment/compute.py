@@ -63,12 +63,16 @@ class ComputeResources:
             none: the calls may use all cores of the machine and the OS
             scheduler shares them.
         task: Whether the resources are taken per call or held across calls.
+        replicas: Number of processes of a long-running protocol, each
+            holding the resources; the calls of its maps are spread over
+            them. ``None`` means one.
     """
 
     gpus: float = 0
     min_vram: Optional[float] = None
     cpus: Optional[float] = None
     task: TaskType = TaskType.EPHEMERAL
+    replicas: Optional[int] = None
 
     def __post_init__(self) -> None:
         negative = [
@@ -83,6 +87,10 @@ class ComputeResources:
         if negative:
             raise ValueError(
                 f"Compute resources must not be negative, got {self}.",
+            )
+        if self.replicas is not None and self.replicas < 1:
+            raise ValueError(
+                f"Compute resources need at least one replica, got {self}.",
             )
 
 
