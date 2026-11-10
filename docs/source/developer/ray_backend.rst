@@ -119,43 +119,73 @@ Map execution
 Each ``_Apply`` route has a ``_MapRunner``, which runs the calls of one map
 with the map's compute resources.
 
-**Ephemeral calls** (and maps without resources) run as Ray tasks of
-``_run_map_call``, which serves the pipeline's parameters in the worker
-process, records the call for the profiler, and calls the function. Ray
-queues the calls of all maps on the cluster's resources. Calls that claim
-GPUs use a task definition with ``max_calls=1``: CUDA and JAX bind a process
-to the GPU it first used, and Ray sets ``CUDA_VISIBLE_DEVICES`` per task, so a
-reused worker would keep running on the GPU of its first call. Ray only
-disables reuse automatically for GPUs requested in the decorator, not through
-``.options()``, hence the separate definition. CPU calls reuse worker
-processes.
+**Tasks.** Calls without GPUs of ephemeral protocols, and of maps without
+resources, run as Ray tasks of ``_run_map_call``, which serves the pipeline's
+parameters in the worker process, records the call for the profiler, and
+calls the function. Ray queues them on the cluster's CPUs and reuses the
+worker processes.
 
-**Long-running calls** run on a pool of ``RayComputeExecutor``\ s, threaded
-actors that hold the group's resources. The ``RayComputeGroup`` coordinator
-keeps up to ``replicas`` of them and hands them out as *leases*: a map leases
-an executor it does not hold yet, preferably one nobody leases, else a new one
-while the pool is not full, else the one with the fewest leases. An executor
-is handed out once it holds its resources and has built the protocol's
-process-scope resources (``prepare``): the protocol's ``_prepare_process``
-travels in the ``ComputeAssignment`` to the function table, by compute group,
-and not with the routes, which every stage receives. When the pipeline is
-compiled, every coordinator starts its whole pool (``start``), in parallel to
-creating the stages; a failed warm-up kills the executor and surfaces on the
-first lease, which prepares again. On the map's side,
-``_LeasedExecutors`` sends a call to an idle leased executor, else leases
-another, else to the least busy one with fewer than two calls in flight, else
-waits. Every map has at most two calls in flight on an executor, but a
-per-map lock runs its function one call at a time; Ray deserializes the
-argument of the next call and serializes the result of the previous one
-meanwhile. At FLUSH, every map returns its leases, and the coordinator kills
-the pool once all maps of the group have; items arriving after a flush create
-new executors. Results return in order through the forward tasks of the
-stage, as for tasks.
+**Pools.** Calls of long-running protocols, and calls claiming GPUs, run on a
+pool of ``RayComputeExecutor``\ s, threaded actors that hold the claim of the
+protocol for their lifetime; Ray pins each to its GPU. Calls claiming GPUs
+cannot run as tasks: CUDA and JAX bind a process to the GPU it first used, so
+a worker reused by tasks would keep running on the GPU of its first call.
+There is one pool per protocol (compute group), created by ``_compute_groups``
+of the top-level pipeline over the maps of the pipeline and of the children of
+its ``group_by``\ s (``_all_maps``). The router of a ``group_by`` passes the
+pools to its children's backend (``RayBackend(pools=...)``), so the children
+run on them instead of starting executors of their own, and
+``group_by(workers=)`` only partitions the keys.
 
-``_check_pools_fit`` rejects, at compile time, long-running pools that do not
-fit the cluster at once: their executors hold their resources until FLUSH, so
-an executor that fits only after another pool released its GPUs would wait
-forever.
+An executor runs one call of a map *of the protocol* at a time: calls are
+locked by the map's ``stage_fp``, which the copies of a map in the children of
+a ``group_by`` share. So an executor runs at most as many calls at once as the
+protocol has maps, however many children share it, and every map has at most
+two calls in flight on an executor; Ray deserializes the argument of the next
+call and serializes the result of the previous one meanwhile. Results return
+in order through the forward tasks of the stage, as for tasks.
+
+**Leases.** The ``RayComputeGroup`` coordinator keeps up to ``replicas``
+executors and hands them out as leases. A map leases an executor it does not
+hold yet: one nobody leases, else, while the pool is not full, a new one, for
+which the lease waits, else the one with the fewest leases. Waiting for a new
+executor rather than sharing a leased one matters because of the lock per
+map: children sharing one executor while another starts would queue their
+calls behind each other. On the map's side, ``_LeasedExecutors`` sends a call
+to an idle leased executor, else to the least busy one with room, and leases
+another one in the background while it has fewer than ``replicas``.
+
+No lock is held while an executor starts: it may wait for GPUs another pool
+holds, which that pool releases only if its maps can return their leases
+meanwhile. Holding the lock while waiting deadlocked two pools that each held
+one GPU and waited for the other's. For the same reason, a map leases in the
+background (``_LeasedExecutors._grow``) and keeps calling the executors it
+has while the lease waits.
+
+**Warm-up.** An executor is handed out once it holds its resources and has
+built the protocol's process-scope resources (``prepare``): the protocol's
+``_prepare_process`` travels in the ``ComputeAssignment`` to the function
+table, by compute group, and not with the routes, which every stage receives.
+When the pipeline is compiled, the coordinators of long-running protocols
+start their whole pools (``start``), in parallel to creating the stages; a
+failed warm-up kills the executor and surfaces on the first lease.
+
+**Release.** The top-level pipeline owns the pools. After its FLUSH has passed
+every stage, the children of ``group_by`` included, ``flush`` releases them
+(``release_all``): their executors are killed, and items arriving after a
+flush start new ones. Maps return their leases at FLUSH. A lease that
+outlives a FLUSH returns ``None``, and an executor that finishes starting
+after its pool was released is killed (a generation counter). Ephemeral pools
+also kill executors that have had no lease for ``ephemeral_idle_s``; their
+maps return their leases after ``_LEASE_LINGER_S`` without calls, also when
+a lease arrives late. ``describe`` reports the state of a pool without taking
+its lock.
+
+**Fit.** ``_check_pools_fit`` rejects, at compile time, long-running pools
+that do not fit the cluster at once: their executors hold their resources
+until FLUSH, so an executor that fits only after another pool released its
+GPUs would wait forever. Ephemeral pools share, by default, the GPUs the
+long-running pools leave in equal parts (``_pool_replicas``).
 
 Function tables
 ^^^^^^^^^^^^^^^

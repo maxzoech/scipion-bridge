@@ -122,6 +122,11 @@ class _Apply:
     group: Optional[Any]
     # Executors in the pool of the group.
     replicas: int
+    # Whether the map returns its leases when it has no calls in flight, so
+    # that the pool can release idle executors (ephemeral protocols).
+    returns_idle_leases: bool
+    # Fingerprint of the map, which runs one call at a time on an executor.
+    stage: str
     routes: List[_Route]
 
 
@@ -561,12 +566,12 @@ class _PipelinedStage(abc.ABC):
                 return await self._route(routes, result)
 
 
-def _cancel(routing: Optional[asyncio.Task[List[_Delivery]]]) -> None:
-    match routing:
+def _cancel(task: Optional[asyncio.Task[Any]]) -> None:
+    match task:
         case None:
             pass
         case _:
-            routing.cancel()
+            task.cancel()
 
 
 def _walk_routes(routes: List[_Route]) -> List[_Route]:
@@ -688,9 +693,8 @@ def _run_map_call(functions: Ref, label: str, item: Any) -> Any:
     """Run one call of a map ``label``, holding the resources of the task.
 
     The function comes from the pipeline's function table, unpacked once per
-    process. The worker process runs other calls afterwards or exits (see
-    ``_run_in_gpu_task``), so the profiling events of the call are sent
-    before it returns.
+    process. Ray may reuse the worker process for other calls or end it, so
+    the profiling events of the call are sent before it returns.
     """
     table = table_of(functions)
     _serve_parameters(table.parameters)
@@ -702,15 +706,11 @@ def _run_map_call(functions: Ref, label: str, item: Any) -> Any:
         recorder.flush_sync()
 
 
-# Ray reuses the worker processes of CPU calls.
+# Calls without GPUs; Ray reuses their worker processes. Calls claiming GPUs
+# run on the executors of a pool instead: CUDA (and JAX) bind a process to the
+# GPU it first used, so a worker reused by tasks would keep running on the GPU
+# of its first call, while an executor keeps its GPU for its lifetime.
 _run_in_task = ray.remote(_run_map_call)
-
-# A GPU call runs in a process of its own. Ray sets CUDA_VISIBLE_DEVICES for
-# every task, but CUDA (and JAX) binds a process to its GPU once: a reused
-# worker would keep running on the GPU of its first call, holding the memory
-# it preallocated there. Ray only disables reuse by itself for GPUs claimed
-# in the decorator, not through ``.options()``.
-_run_in_gpu_task = ray.remote(max_calls=1)(_run_map_call)
 
 
 @cache
@@ -835,6 +835,14 @@ def _unused_share(
     )
 
 
+# Seconds an executor of an ephemeral protocol stays alive without calls,
+# unless the backend sets it otherwise.
+DEFAULT_EPHEMERAL_IDLE_S = 10.0
+
+# Time a map of an ephemeral protocol keeps its leases without calls in
+# flight, so that a short gap between items does not release the executors.
+_LEASE_LINGER_S = 1.0
+
 # Calls of a long-running map in flight at once: one computes while the
 # argument of the next is transferred and deserialized, and the result of the
 # previous one serialized.
@@ -867,11 +875,17 @@ class RayComputeExecutor:
         self._recorder = make_recorder(profile, f"executor({group})")
         self._recorder.instant("start", "executor", gpus=ray.get_gpu_ids())
 
-    def call(self, functions: Ref, label: str, item: Any) -> Any:
-        """Run the function of the map ``label`` from ``functions`` on ``item``."""
+    def call(self, functions: Ref, label: str, stage: str, item: Any) -> Any:
+        """Run the function of the map ``label`` from ``functions`` on ``item``.
+
+        The calls of a map of the protocol (``stage``, its fingerprint) run
+        one at a time; the copies of a map in the children of a ``group_by``
+        are the same map. So an executor runs as many calls at once as the
+        protocol has maps, however many children share it.
+        """
         func = table_of(functions).functions[label]
         lane = f"map:{label}"
-        lock = self._locks.setdefault(label, threading.Lock())
+        lock = self._locks.setdefault(stage, threading.Lock())
         with self._recorder.span("lock_wait", lane, overlapping=True):
             lock.acquire()
         try:
@@ -896,18 +910,29 @@ class RayComputeExecutor:
 
 @ray.remote
 class RayComputeGroup:
-    """Coordinator of the pool of executors of a long-running group of maps.
+    """Coordinator of the pool of executors of a group of maps.
 
-    The pool holds up to ``replicas`` executors. The maps of the group lease
-    executors to send their calls to: an executor nobody leases is preferred,
-    then a new one while the pool is not full, then the one with the fewest
-    leases. An executor is handed out once it holds its resources.
+    The pool holds up to ``replicas`` executors, each building the
+    process-scope resources of the protocol before it takes calls. The maps
+    of the group lease executors to send their calls to: a ready executor
+    nobody leases is preferred, else the ready one with the fewest leases
+    that the map does not hold yet. While the pool is not full, a lease that
+    finds no unleased executor starts a new one in the background.
 
-    Every executor builds the process-scope resources of the protocol before
-    it is handed out; ``start`` creates the whole pool at once, when the
-    pipeline is compiled. The executors are killed, releasing their
-    resources, once every map of the group has passed FLUSH. Items arriving
-    after a flush create new ones.
+    No lock is held while an executor starts: it may wait for GPUs that
+    another pool holds, which that pool releases only if its maps can return
+    their leases meanwhile. ``lease`` waits only if no executor is ready for
+    the map. ``start`` creates the whole pool when the pipeline is compiled.
+
+    The pool is shared by every pipeline running maps of the group, the
+    children of ``group_by`` included. The pipeline owning the pool releases
+    it once its FLUSH has passed every stage (``release_all``), killing the
+    executors; executors still starting then are killed once they are ready.
+    Items arriving after a flush create new ones. With
+    ``idle_s`` (ephemeral protocols), an executor nobody leased for
+    ``idle_s`` seconds is killed as well, so that other protocols can take
+    its GPUs while the stream pauses. Maps return their leases when they have
+    no calls in flight for a moment (``return_leases``).
     """
 
     def __init__(
@@ -919,85 +944,203 @@ class RayComputeGroup:
         parameters: Mapping[str, Any],
         group: str,
         profile: Optional[ProfileConfig],
+        idle_s: Optional[float] = None,
     ) -> None:
         self._options = options
         self._members = members
         self._replicas = replicas
         self._functions = functions
+        self._idle_s = idle_s
         self._parameters = parameters
         self._group = group
         self._profile = profile
         self._recorder = make_recorder(profile, f"group({group})")
         self._executors: Dict[int, Any] = {}
-        # Leases of every executor, by its id.
+        # Leases of every ready executor, by its id.
         self._leases: Dict[int, int] = {}
+        # Since when executors without leases are idle, by id.
+        self._idle_since: Dict[int, float] = {}
+        # Executors being started, and the background tasks starting them.
+        self._starting = 0
+        self._tasks: Set[asyncio.Task[None]] = set()
+        # Incremented when the pool is released, so that executors started
+        # before are killed once ready.
+        self._generation = 0
+        # Error of the last executor that failed to start, raised to a lease
+        # that has no executor to fall back on.
+        self._failure: Optional[Exception] = None
+        self._reaper: Optional[asyncio.Task[None]] = None
         self._next_id = 0
-        self._released = 0
-        self._lock = asyncio.Lock()
+        self._changed = asyncio.Condition()
 
-    async def lease(self, held: Sequence[int]) -> Tuple[int, Any]:
+    async def lease(self, held: Sequence[int]) -> Optional[Tuple[int, Any]]:
         """Lease an executor of the pool that the map does not hold yet.
 
-        Creates one if necessary. A map holds fewer executors than the pool
-        has replicas, so one is always left to lease.
+        An executor nobody leases is preferred. Else, while the pool is not
+        full, the lease waits for a new executor rather than sharing a leased
+        one: an executor runs one call of a map at a time, so maps sharing it
+        while another one starts would queue their calls behind each other.
+        The lock is released while waiting, and the map goes on with the
+        executors it has. A full pool shares the executor with the fewest
+        leases.
+
+        Returns ``None`` if the pool was released at FLUSH while the lease
+        waited for an executor.
+
+        Raises:
+            Exception: The error of an executor that failed to start.
         """
-        async with self._lock:
-            others = {i: n for i, n in self._leases.items() if i not in held}
-            unleased = [i for i, leases in others.items() if leases == 0]
-            match (unleased, len(self._executors) < self._replicas):
-                case ([first, *_], _):
-                    executor_id = first
-                case ([], True):
-                    executor_id = await self._create()
-                case _:
-                    executor_id = min(others, key=others.__getitem__)
-            self._leases[executor_id] += 1
-            return executor_id, self._executors[executor_id]
+        async with self._changed:
+            generation = self._generation
+            while True:
+                match generation == self._generation:
+                    case True:
+                        pass
+                    case False:
+                        return None
+                others = {i: n for i, n in self._leases.items() if i not in held}
+                unleased = [i for i, leases in others.items() if leases == 0]
+                missing = self._replicas - len(self._executors) - self._starting
+                match (unleased, self._failure, missing > 0, self._starting > 0):
+                    case ([executor_id, *_], _, _, _):
+                        return self._hand_out(executor_id)
+                    case ([], Exception() as failure, _, _):
+                        self._failure = None
+                        raise failure
+                    case ([], None, True, _):
+                        self._start_one()
+                        await self._changed.wait()
+                    case ([], None, False, True):
+                        await self._changed.wait()
+                    case _ if others:
+                        return self._hand_out(min(others, key=others.__getitem__))
+                    case _:
+                        await self._changed.wait()
+
+    def _hand_out(self, executor_id: int) -> Tuple[int, Any]:
+        """Lease the executor ``executor_id``; call with the lock held."""
+        self._leases[executor_id] += 1
+        self._idle_since.pop(executor_id, None)
+        return executor_id, self._executors[executor_id]
 
     async def start(self) -> None:
-        """Create the executors of the pool missing, preparing them at once."""
-        async with self._lock:
-            missing = self._replicas - len(self._executors)
-            await asyncio.gather(*(self._create() for _ in range(missing)))
+        """Start the missing executors of the pool and wait until they are ready.
 
-    async def _create(self) -> int:
-        executor_id = self._next_id
-        self._next_id += 1
-        self._recorder.instant("executor_create", "group", executor=executor_id)
+        Raises:
+            Exception: The error of an executor that failed to start.
+        """
+        async with self._changed:
+            missing = self._replicas - len(self._executors) - self._starting
+            for _ in range(missing):
+                self._start_one()
+            await self._changed.wait_for(
+                lambda: len(self._executors) >= self._replicas
+                or self._failure is not None,
+            )
+            match self._failure:
+                case None:
+                    pass
+                case failure:
+                    self._failure = None
+                    raise failure
+
+    def _start_one(self) -> None:
+        """Start an executor in the background; call with the lock held."""
+        self._starting += 1
+        task = asyncio.create_task(self._start_executor(self._generation))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _start_executor(self, generation: int) -> None:
+        self._recorder.instant("executor_create", "group")
         executor: Any = RayComputeExecutor.options(
             max_concurrency=self._members * _EXECUTOR_CALLS_IN_FLIGHT,
             **self._options,
         ).remote(self._parameters, self._group, self._profile)
         try:
             await executor.prepare.remote(self._functions)
-        except Exception:
+        except Exception as error:
             ray.kill(executor)
-            raise
-        self._executors[executor_id] = executor
-        self._leases[executor_id] = 0
-        return executor_id
+            async with self._changed:
+                self._starting -= 1
+                self._failure = error
+                self._changed.notify_all()
+        else:
+            async with self._changed:
+                self._starting -= 1
+                match generation == self._generation:
+                    case True:
+                        self._executors[self._next_id] = executor
+                        self._leases[self._next_id] = 0
+                        self._next_id += 1
+                    case False:
+                        # The pool was released while the executor started.
+                        ray.kill(executor)
+                self._changed.notify_all()
+
+    async def return_leases(self, executor_ids: Sequence[int]) -> None:
+        """Return the leases of a map without calls in flight."""
+        async with self._changed:
+            self._return(executor_ids)
+
+    def _return(self, executor_ids: Sequence[int]) -> None:
+        # Leases of executors released meanwhile are gone.
+        executor_ids = [i for i in executor_ids if i in self._leases]
+        for executor_id in executor_ids:
+            self._leases[executor_id] -= 1
+        match self._idle_s:
+            case None:
+                pass
+            case idle_s:
+                now = time.monotonic()
+                for executor_id in executor_ids:
+                    if self._leases[executor_id] == 0:
+                        self._idle_since[executor_id] = now
+                if self._reaper is None:
+                    self._reaper = asyncio.create_task(self._reap(idle_s))
+
+    async def _reap(self, idle_s: float) -> None:
+        """Kill the executors that have been idle for ``idle_s`` seconds."""
+        while True:
+            await asyncio.sleep(idle_s / 2)
+            async with self._changed:
+                now = time.monotonic()
+                expired = [
+                    executor_id
+                    for executor_id, since in self._idle_since.items()
+                    if now - since >= idle_s
+                ]
+                await self._kill(expired)
 
     async def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of the group."""
         await self._recorder.flush()
 
-    async def release(self, executor_ids: Sequence[int]) -> None:
-        """Return the leases of a flushed map; kill the pool once all are flushed."""
-        async with self._lock:
-            for executor_id in executor_ids:
-                self._leases[executor_id] -= 1
-            self._released += 1
-            match self._released < self._members:
-                case True:
-                    pass
-                case False:
-                    self._released = 0
-                    await self._kill_all()
+    async def describe(self) -> Dict[str, Any]:
+        """The state of the pool, read without waiting for its lock."""
+        return {
+            "group": self._group,
+            "locked": self._changed.locked(),
+            "replicas": self._replicas,
+            "executors": sorted(self._executors),
+            "starting": self._starting,
+            "leases": dict(self._leases),
+            "idle": sorted(self._idle_since),
+        }
 
-    async def _kill_all(self) -> None:
-        executors = list(self._executors.values())
-        self._executors.clear()
-        self._leases.clear()
+    async def release_all(self) -> None:
+        """Kill the executors of the pool once its pipeline has flushed."""
+        async with self._changed:
+            self._generation += 1
+            self._changed.notify_all()
+            await self._kill(list(self._executors))
+
+    async def _kill(self, executor_ids: Sequence[int]) -> None:
+        """Kill the executors ``executor_ids``, releasing their resources."""
+        executors = [self._executors.pop(executor_id) for executor_id in executor_ids]
+        for executor_id in executor_ids:
+            del self._leases[executor_id]
+            self._idle_since.pop(executor_id, None)
         # Killing an executor discards the events it holds.
         await asyncio.gather(*(e.flush_profile.remote() for e in executors))
         for executor in executors:
@@ -1013,22 +1156,36 @@ class RayComputeGroup:
 class _LeasedExecutors:
     """The executors a map leased from its pool, and its calls on each.
 
-    A call goes to the leased executor with the fewest calls in flight, each
-    taking at most ``capacity``. When all are full, the map leases another
-    executor, up to ``replicas``, or waits for a call to finish.
+    A call goes to an idle leased executor, else to the least busy one with
+    fewer than ``capacity`` calls in flight, else it waits. When no leased
+    executor is idle and the map holds fewer than ``replicas``, it leases
+    another in the background, one at a time. The lease may wait for an
+    executor to start, which may wait for GPUs another pool holds; meanwhile
+    the map keeps using the executors it has, and finishing calls free their
+    slots, so that the other pool can go on and eventually release its GPUs.
+
+    ``on_idle`` is called whenever the map becomes idle: after its last call
+    in flight, and after a lease that arrives when no call needs it anymore.
     """
 
     def __init__(
         self,
-        lease: Callable[[Sequence[int]], Awaitable[Tuple[int, Any]]],
+        lease: Callable[[Sequence[int]], Awaitable[Optional[Tuple[int, Any]]]],
         replicas: int,
         capacity: int,
+        on_idle: Callable[[], None],
     ) -> None:
         self._lease = lease
+        self._on_idle = on_idle
         self._replicas = replicas
         self._capacity = capacity
         self._executors: Dict[int, Any] = {}
         self._in_flight: Dict[int, int] = {}
+        self._leasing: Optional[asyncio.Task[None]] = None
+        # Error of a failed lease, raised to a call with no executor to use.
+        self._failure: Optional[Exception] = None
+        # Calls waiting for a slot.
+        self._waiting = 0
         self._changed = asyncio.Condition()
 
     @property
@@ -1036,10 +1193,25 @@ class _LeasedExecutors:
         """The ids of the leased executors."""
         return list(self._executors)
 
+    @property
+    def idle(self) -> bool:
+        """Whether the map holds leases but has no call in flight or waiting."""
+        return (
+            bool(self._executors)
+            and not any(self._in_flight.values())
+            and self._waiting == 0
+        )
+
     def clear(self) -> None:
-        """Forget the leases, which the map returns on FLUSH."""
+        """Forget the leases, which the map returns."""
         self._executors.clear()
         self._in_flight.clear()
+
+    def stop(self) -> None:
+        """Forget the leases on FLUSH, and the lease in progress."""
+        _cancel(self._leasing)
+        self._leasing = None
+        self.clear()
 
     @contextlib.asynccontextmanager
     async def slot(self) -> AsyncGenerator[Any]:
@@ -1051,42 +1223,86 @@ class _LeasedExecutors:
             async with self._changed:
                 self._in_flight[executor_id] -= 1
                 self._changed.notify_all()
+            self._report_idle()
+
+    def _report_idle(self) -> None:
+        match self.idle:
+            case True:
+                self._on_idle()
+            case False:
+                pass
 
     async def _acquire(self) -> int:
-        """An idle executor, else a new lease, else the least busy with room."""
+        """An idle executor, else the least busy with room, else wait."""
         async with self._changed:
-            while True:
-                idle = [i for i, calls in self._in_flight.items() if calls == 0]
-                free = [
-                    i for i, calls in self._in_flight.items() if calls < self._capacity
-                ]
-                match (idle, len(self._executors) < self._replicas, free):
-                    case ([executor_id, *_], _, _):
-                        self._in_flight[executor_id] += 1
-                        return executor_id
-                    case ([], True, _):
-                        executor_id, executor = await self._lease(self.ids)
+            self._waiting += 1
+            try:
+                while True:
+                    idle = [i for i, calls in self._in_flight.items() if calls == 0]
+                    free = [
+                        i
+                        for i, calls in self._in_flight.items()
+                        if calls < self._capacity
+                    ]
+                    can_lease = (
+                        len(self._executors) < self._replicas and self._leasing is None
+                    )
+                    match (idle, can_lease):
+                        case ([], True):
+                            self._leasing = asyncio.create_task(self._grow())
+                        case _:
+                            pass
+                    match (idle, free, self._failure):
+                        case ([executor_id, *_], _, _):
+                            self._in_flight[executor_id] += 1
+                            return executor_id
+                        case ([], [_, *_], _):
+                            executor_id = min(free, key=self._in_flight.__getitem__)
+                            self._in_flight[executor_id] += 1
+                            return executor_id
+                        case (_, _, Exception() as failure):
+                            self._failure = None
+                            raise failure
+                        case _:
+                            await self._changed.wait()
+            finally:
+                self._waiting -= 1
+
+    async def _grow(self) -> None:
+        """Lease another executor, without holding the lock while waiting."""
+        try:
+            leased = await self._lease(self.ids)
+        except Exception as error:
+            async with self._changed:
+                self._failure = error
+                self._leasing = None
+                self._changed.notify_all()
+        else:
+            async with self._changed:
+                match leased:
+                    case None:
+                        # The pool was released while the lease waited.
+                        pass
+                    case (executor_id, executor):
                         self._executors[executor_id] = executor
                         self._in_flight.setdefault(executor_id, 0)
-                    case ([], False, [_, *_]):
-                        executor_id = min(free, key=self._in_flight.__getitem__)
-                        self._in_flight[executor_id] += 1
-                        return executor_id
-                    case _:
-                        await self._changed.wait()
+                self._leasing = None
+                self._changed.notify_all()
+            self._report_idle()
 
 
 class _MapRunner:
     """Runs the calls of a map on a route, with the map's compute resources.
 
-    - Ephemeral resources (and maps without resources) are taken by a Ray
-      task per call, so Ray queues the calls of all maps on the resources. A
-      call claiming GPUs runs in a process of its own (see
-      ``_run_in_gpu_task``).
-    - Long-running resources are held by the pool of executors of the map's
-      group. A call goes to the least busy executor the map leased; in each,
+    - Calls without GPUs of ephemeral protocols (and of maps without
+      resources) are Ray tasks, so Ray queues them on the resources.
+    - Calls of long-running protocols, and calls claiming GPUs, run on the
+      pool of executors of the map's group. A call goes to an idle executor
+      the map leased, else a newly leased one, else the least busy; in each,
       the map's calls run one at a time, as in a stage of its own, while the
-      next call is already being transferred to the executor.
+      next call is already being transferred to the executor. A map of an
+      ephemeral protocol returns its leases once it had no call in flight for
+      ``_LEASE_LINGER_S``, so that the pool can release idle executors.
     """
 
     def __init__(
@@ -1098,14 +1314,11 @@ class _MapRunner:
         self._label = route.label
         self._functions = route.functions
         self._completions = completions
-        self._compute = route.compute
         self._options = route.options
-        match route.options["num_gpus"]:
-            case num_gpus if num_gpus > 0:
-                self._task = _run_in_gpu_task
-            case _:
-                self._task = _run_in_task
+        self._stage = route.stage
         self._group = route.group
+        self._returns_idle_leases = route.returns_idle_leases
+        self._linger: Optional[asyncio.Task[None]] = None
         self._recorder = recorder
         self.stats = StageStats()
         # The executors stay alive until this map released them on FLUSH.
@@ -1113,6 +1326,7 @@ class _MapRunner:
             self._lease,
             replicas=route.replicas,
             capacity=_EXECUTOR_CALLS_IN_FLIGHT,
+            on_idle=self._schedule_linger,
         )
 
     async def run(self, item: Any) -> ray.ObjectRef:
@@ -1136,35 +1350,61 @@ class _MapRunner:
         return result
 
     async def _call(self, item: Any) -> ray.ObjectRef:
-        match self._compute:
-            case ComputeAssignment(
-                resources=ComputeResources(task=TaskType.LONG_RUNNING),
-            ):
+        match self._group:
+            case None:
+                return await self._completions.done(self._submit(item))
+            case _:
+                _cancel(self._linger)
                 async with self._executors.slot() as executor:
                     return await self._completions.done(
-                        executor.call.remote(self._functions, self._label, item),
+                        executor.call.remote(
+                            self._functions,
+                            self._label,
+                            self._stage,
+                            item,
+                        ),
                     )
-            case _:
-                return await self._completions.done(self._submit(item))
+
+    def _schedule_linger(self) -> None:
+        """Return the leases soon, if the map is idle (ephemeral protocols)."""
+        match self._returns_idle_leases:
+            case True:
+                _cancel(self._linger)
+                self._linger = asyncio.create_task(self._return_idle_leases())
+            case False:
+                pass
+
+    async def _return_idle_leases(self) -> None:
+        """Return the leases once the map had no call in flight for a moment."""
+        await asyncio.sleep(_LEASE_LINGER_S)
+        match self._executors.idle:
+            case True:
+                leases = self._executors.ids
+                self._executors.clear()
+                assert self._group is not None
+                await self._group.return_leases.remote(leases)
+            case False:
+                pass
 
     async def release(self) -> None:
-        """Release the long-running resources of the map on FLUSH."""
+        """Release the resources of the map's pool on FLUSH."""
+        _cancel(self._linger)
         match self._group:
             case None:
                 pass
             case group:
                 leases = self._executors.ids
-                self._executors.clear()
-                await group.release.remote(leases)
+                self._executors.stop()
+                await group.return_leases.remote(leases)
 
     def _submit(self, item: Any) -> ray.ObjectRef:
-        return self._task.options(**self._options).remote(
+        return _run_in_task.options(**self._options).remote(
             self._functions,
             self._label,
             item,
         )
 
-    async def _lease(self, held: Sequence[int]) -> Tuple[int, Any]:
+    async def _lease(self, held: Sequence[int]) -> Optional[Tuple[int, Any]]:
         assert self._group is not None, "Long-running map has no compute group."
         return await self._group.lease.remote(held)
 
@@ -1389,6 +1629,8 @@ class RayDemuxActor(_PipelinedStage):
         spill: Optional[SpillPolicy],
         label: str,
         parameters: Mapping[str, Any],
+        ephemeral_idle_s: float,
+        pools: Mapping[str, "_Pool"],
         gpu_memory: Optional[Tuple[float, ...]] = None,
     ):
         """
@@ -1410,6 +1652,8 @@ class RayDemuxActor(_PipelinedStage):
         self.workers = workers
         self.outer_keyed = outer_keyed
         self.group_by_workers = group_by_workers
+        self.ephemeral_idle_s = ephemeral_idle_s
+        self.pools = pools
         self.prefix = prefix
         self.config = config
         self.parameters = parameters
@@ -1532,6 +1776,8 @@ class RayDemuxActor(_PipelinedStage):
             gpu_memory=self.gpu_memory,
             profile=self.config.profile,
             group_by_workers=self.group_by_workers,
+            ephemeral_idle_s=self.ephemeral_idle_s,
+            pools=self.pools,
         )
         start = backend.compile_async(
             [sink],
@@ -1570,8 +1816,9 @@ class RayCompiledPipeline(CompiledPipeline):
                 its own actor, or for a map the actor submitting its calls.
             demuxes: The ``group_by`` routers among the stages, whose child
                 pipelines are reported by ``stats``.
-            groups: Coordinators of the long-running compute groups, whose
-                executors terminate with them.
+            groups: Coordinators of the pools the pipeline owns: it releases
+                them after every flush, and their executors terminate with
+                them on ``close``.
             spill_root: Temporary directory of the spilled items, owned by
                 the pipeline and removed on ``close``.
             profile: Profiling of the pipeline, if it is profiled.
@@ -1620,9 +1867,14 @@ class RayCompiledPipeline(CompiledPipeline):
             ray.get(handle.push.remote(_transport(value)))
 
     def flush(self) -> None:
-        """Flush all sources in parallel and wait for pipeline completion."""
+        """Flush all sources in parallel and wait for pipeline completion.
+
+        Then release the pools of executors: FLUSH has passed every stage,
+        the children of ``group_by`` included, so no calls are left.
+        """
         with self._recorder.span("flush", "driver", level=logging.INFO):
             ray.get([src.push.remote(FLUSH) for src in self._sources.values()])
+        ray.get([group.release_all.remote() for group in self._groups])
         self._recorder.flush_sync()
 
     def flush_profile(self) -> None:
@@ -1720,6 +1972,8 @@ class RayBackend(StreamingBackendProvider):
         profile: Union[None, bool, str, Path, ProfileConfig] = None,
         profile_log_level: int = logging.INFO,
         group_by_workers: Optional[int] = DEFAULT_GROUP_BY_WORKERS,
+        ephemeral_idle_s: float = DEFAULT_EPHEMERAL_IDLE_S,
+        pools: Optional[Mapping[str, "_Pool"]] = None,
     ):
         """
         Args:
@@ -1760,6 +2014,12 @@ class RayBackend(StreamingBackendProvider):
                 its keys, unless the ``group_by`` sets ``workers`` itself.
                 Every child starts the stages (processes) of the pipeline;
                 ``None`` starts a child per key.
+            ephemeral_idle_s: Seconds an executor of an ephemeral protocol
+                stays alive without calls before it releases its GPUs
+                (default ``DEFAULT_EPHEMERAL_IDLE_S``).
+            pools: The pools of executors of the parent pipeline, by compute
+                group; ``group_by`` children run their maps on them instead of
+                pools of their own.
         """
         if queue_size <= 0:
             raise ValueError(f"Queue size must be positive, got {queue_size}.")
@@ -1768,6 +2028,7 @@ class RayBackend(StreamingBackendProvider):
             "buffer_size": buffer_size,
             "spill_threshold": spill_threshold,
             "group_by_workers": group_by_workers,
+            "ephemeral_idle_s": ephemeral_idle_s,
         }.items():
             if value is not None and value <= 0:
                 raise ValueError(f"{option} must be positive, got {value}.")
@@ -1786,6 +2047,8 @@ class RayBackend(StreamingBackendProvider):
         self.profile = Path(profile) if isinstance(profile, str) else profile
         self.profile_log_level = profile_log_level
         self.group_by_workers = group_by_workers
+        self.ephemeral_idle_s = ephemeral_idle_s
+        self.pools = pools
         # The driver imported NumPy before; the workers get the environment.
         configure_numpy_hugepages()
 
@@ -1904,11 +2167,10 @@ class RayBackend(StreamingBackendProvider):
             node: f"{name}{index}:{_describe(node)}"
             for index, node in enumerate(all_nodes)
         }
-        claims = {
-            node.compute: self._claim(node.compute)
-            for node in all_nodes
-            if isinstance(node, IRMap)
-        }
+        # The maps of the children of group_by share the pools of this
+        # pipeline, so the claims cover them too.
+        maps = _all_maps(all_nodes)
+        claims = {node.compute: self._claim(node.compute) for node in maps}
         profile, owns_profile = self._profile_config(pipeline_id)
         # Map calls and the warm-up of executors find their functions in the
         # function table of the pipeline, put in the object store once.
@@ -1923,25 +2185,28 @@ class RayBackend(StreamingBackendProvider):
                 profile=profile,
                 preparers={
                     compute.group: compute.prepare
-                    for node in all_nodes
-                    if isinstance(node, IRMap)
-                    and isinstance(compute := node.compute, ComputeAssignment)
+                    for node in maps
+                    if isinstance(compute := node.compute, ComputeAssignment)
                     and compute.prepare is not None
                 },
             ),
         )
-        groups = self._compute_groups(all_nodes, claims, Ref(functions), profile)
+        owns_pools = self.pools is None
+        pools = (
+            self._compute_groups(maps, claims, Ref(functions), profile)
+            if self.pools is None
+            else self.pools
+        )
         spill, spill_root = self._spill_config()
         # Every executor of a pool takes calls of a map at once; the items on
-        # the routes of a stage must cover them all.
+        # the routes of a stage must cover the replicas a protocol declared.
         pooled_calls = max(
             (
-                _replicas(compute) * _EXECUTOR_CALLS_IN_FLIGHT
+                replicas * _EXECUTOR_CALLS_IN_FLIGHT
                 for node in all_nodes
                 if isinstance(node, IRMap)
                 and isinstance(compute := node.compute, ComputeAssignment)
-                and compute.resources.task == TaskType.LONG_RUNNING
-                and _replicas(compute) > 1
+                and (replicas := _declared_replicas(compute.resources)) > 1
             ),
             default=0,
         )
@@ -1960,7 +2225,7 @@ class RayBackend(StreamingBackendProvider):
             for node in all_nodes
             if not _is_hosted(node)
             for actor_cls, kwargs in [
-                self._stage_actor(node, name, labels[node], config),
+                self._stage_actor(node, name, labels[node], config, pools),
             ]
         }
 
@@ -1974,7 +2239,7 @@ class RayBackend(StreamingBackendProvider):
         # position among the upstream stages of the downstream stage; maps in
         # between are applied on the way. A failing stage aborts the sources
         # and the further abort targets.
-        builder = _RouteBuilder(actor_map, labels, groups, claims, Ref(functions))
+        builder = _RouteBuilder(actor_map, labels, pools, claims, Ref(functions))
         abort_handles = [*compiled_sources.values(), *abort_targets]
         connected = [
             actor.connect.remote(
@@ -1994,7 +2259,10 @@ class RayBackend(StreamingBackendProvider):
             demuxes=[
                 actor_map[node] for node in all_nodes if isinstance(node, IRDemux)
             ],
-            groups=list(groups.values()),
+            # The pools of children of a group_by belong to their parent.
+            groups=(
+                [pool.coordinator for pool in pools.values()] if owns_pools else []
+            ),
             spill_root=spill_root,
             profile=profile,
             owns_profile=owns_profile,
@@ -2038,8 +2306,13 @@ class RayBackend(StreamingBackendProvider):
         name: str,
         label: str,
         config: _StageConfig,
+        pools: Mapping[str, "_Pool"],
     ) -> Tuple[Any, Dict[str, Any]]:
-        """The actor class of a stage, with its constructor arguments."""
+        """The actor class of a stage, with its constructor arguments.
+
+        The router of a ``group_by`` gets the pools of the pipeline, which its
+        children share.
+        """
         spill = None if config.spill is None else config.spill.policy(label)
         match node:
             case IRMap():
@@ -2095,6 +2368,8 @@ class RayBackend(StreamingBackendProvider):
                     "workers": self._group_by_workers(workers),
                     "outer_keyed": outer_keyed,
                     "group_by_workers": self.group_by_workers,
+                    "ephemeral_idle_s": self.ephemeral_idle_s,
+                    "pools": pools,
                     "prefix": name,
                     "config": config,
                     "spill": spill,
@@ -2148,54 +2423,166 @@ class RayBackend(StreamingBackendProvider):
 
     def _compute_groups(
         self,
-        nodes: Sequence[IROp],
+        nodes: Sequence[IRMap],
         claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]],
         functions: Ref,
         profile: Optional[ProfileConfig],
-    ) -> Dict[str, Any]:
-        """Create a coordinator for every long-running group among ``nodes``.
+    ) -> Dict[str, "_Pool"]:
+        """Create the pool of every group of ``nodes`` that runs on executors.
 
-        The coordinators start their pools, preparing the executors, while
-        the rest of the pipeline is created.
+        Long-running pools start, preparing their executors, while the rest
+        of the pipeline is created. Ephemeral pools start executors on
+        demand; by default they share the GPUs the long-running pools leave
+        in equal parts.
 
         Raises:
-            ValueError: If the pools of the groups do not fit the cluster at
+            ValueError: If the long-running pools do not fit the cluster at
                 once.
         """
-        members: Dict[str, int] = {}
-        pools: Dict[str, Tuple[Dict[str, Any], int]] = {}
+        # The maps of a group, once each: their copies in the children of a
+        # group_by keep the fingerprint.
+        stages: Dict[str, Set[Optional[str]]] = {}
+        claims_of: Dict[str, Tuple[Dict[str, Any], ComputeResources]] = {}
         for node in nodes:
             match node:
                 case IRMap(
                     compute=ComputeAssignment(
-                        resources=ComputeResources(task=TaskType.LONG_RUNNING),
-                        group=group,
+                        group=group, resources=resources
                     ) as compute,
-                ):
-                    members[group] = members.get(group, 0) + 1
-                    pools[group] = (claims[compute], _replicas(compute))
+                ) if _pooled(compute, claims[compute]):
+                    stages.setdefault(group, set()).add(node.stage_fp)
+                    claims_of[group] = (claims[compute], resources)
                 case _:
                     pass
 
-        _check_pools_fit(pools, ray.cluster_resources())
-        groups: Dict[str, Any] = {
-            group: RayComputeGroup.options(
-                runtime_env={"env_vars": numpy_hugepage_env()},
-            ).remote(
-                pools[group][0],
-                count,
-                pools[group][1],
-                functions,
-                self.parameters,
-                group,
-                profile,
+        cluster = ray.cluster_resources()
+        long_running = {
+            group: (options, _declared_replicas(resources))
+            for group, (options, resources) in claims_of.items()
+            if resources.task == TaskType.LONG_RUNNING
+        }
+        _check_pools_fit(long_running, cluster)
+        held_gpus = sum(
+            options["num_gpus"] * replicas
+            for options, replicas in long_running.values()
+        )
+        pools = {
+            group: _Pool(
+                coordinator=RayComputeGroup.options(
+                    runtime_env={"env_vars": numpy_hugepage_env()},
+                ).remote(
+                    options,
+                    len(stages[group]),
+                    replicas,
+                    functions,
+                    self.parameters,
+                    group,
+                    profile,
+                    idle_s=None if group in long_running else self.ephemeral_idle_s,
+                ),
+                replicas=replicas,
+                ephemeral=group not in long_running,
             )
-            for group, count in members.items()
+            for group, (options, resources) in claims_of.items()
+            for replicas in [
+                _pool_replicas(
+                    options,
+                    resources,
+                    cluster.get("GPU", 0),
+                    held_gpus,
+                    ephemeral_pools=len(claims_of) - len(long_running),
+                ),
+            ]
         }
         # A failed warm-up surfaces on the first lease, which prepares again.
-        for coordinator in groups.values():
-            coordinator.start.remote()
-        return groups
+        for group in long_running:
+            pools[group].coordinator.start.remote()
+        return pools
+
+
+def _all_maps(nodes: Sequence[IROp]) -> List[IRMap]:
+    """The maps among ``nodes`` and in the children of their ``group_by`` nodes."""
+    maps: List[IRMap] = []
+    seen: Set[IROp] = set()
+    stack: List[IROp] = list(nodes)
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        match node:
+            case IRMap():
+                maps.append(node)
+            case IRDemux(template=IROp() as template):
+                stack.append(template)
+            case _:
+                pass
+        stack.extend(node.upstream)
+    return maps
+
+
+@dataclass(frozen=True)
+class _Pool:
+    """The pool of executors of a compute group."""
+
+    coordinator: Any
+    replicas: int
+    # Whether the pool releases idle executors (ephemeral protocols).
+    ephemeral: bool
+
+
+def _pooled(
+    compute: Optional[ComputeAssignment],
+    options: Mapping[str, Any],
+) -> bool:
+    """Whether the calls of a map run on the executors of a pool.
+
+    Long-running protocols hold their executors; calls claiming GPUs need
+    processes that keep their GPU. The ``cpu_only`` maps of a protocol share
+    its group id, but claim no GPUs and run as tasks.
+    """
+    match compute:
+        case None:
+            return False
+        case ComputeAssignment(
+            resources=ComputeResources(task=TaskType.LONG_RUNNING),
+        ):
+            return True
+        case ComputeAssignment():
+            return options["num_gpus"] > 0
+
+
+def _declared_replicas(resources: ComputeResources) -> int:
+    """The replicas a protocol declared, or one."""
+    match resources.replicas:
+        case None:
+            return 1
+        case replicas:
+            return replicas
+
+
+def _pool_replicas(
+    options: Mapping[str, Any],
+    resources: ComputeResources,
+    cluster_gpus: float,
+    held_gpus: float,
+    ephemeral_pools: int,
+) -> int:
+    """Executors of a pool: declared, or the default of its task type.
+
+    The ephemeral pools of a pipeline share the GPUs that the long-running
+    pools (``held_gpus``) leave, in equal parts, so that they do not compete
+    for the same GPUs; each may start as many executors as its part fits, at
+    least one.
+    """
+    match (resources.task, resources.replicas):
+        case (_, int(replicas)):
+            return replicas
+        case (TaskType.LONG_RUNNING, None):
+            return 1
+        case _:
+            share = (cluster_gpus - held_gpus) / ephemeral_pools
+            return max(1, math.floor(share / options["num_gpus"]))
 
 
 def _without_prepare(
@@ -2213,35 +2600,27 @@ def _without_prepare(
             return dataclasses.replace(compute, prepare=None)
 
 
-def _replicas(compute: Optional[ComputeAssignment]) -> int:
-    """Executors in the pool of a map's group: one unless declared otherwise."""
-    match compute:
-        case ComputeAssignment(
-            resources=ComputeResources(
-                task=TaskType.LONG_RUNNING,
-                replicas=int(replicas),
-            ),
-        ):
-            return replicas
-        case _:
-            return 1
+def _stage_of(node: IRMap, label: str) -> str:
+    """The fingerprint of a map of a protocol, or its label outside of protocols.
 
-
-def _group_of(
-    groups: Mapping[str, Any],
-    compute: Optional[ComputeAssignment],
-) -> Optional[Any]:
-    """The coordinator of the long-running group of a map, if any.
-
-    The ``cpu_only`` maps of a long-running protocol share its group id but
-    run outside of its executor.
+    Only maps of protocols run on executors, which lock by it.
     """
-    match compute:
-        case ComputeAssignment(
-            resources=ComputeResources(task=TaskType.LONG_RUNNING),
-            group=group,
-        ):
-            return groups[group]
+    match node.stage_fp:
+        case None:
+            return label
+        case stage_fp:
+            return stage_fp
+
+
+def _pool_of(
+    pools: Mapping[str, _Pool],
+    compute: Optional[ComputeAssignment],
+    options: Mapping[str, Any],
+) -> Optional[_Pool]:
+    """The pool running the calls of a map, if they run on executors."""
+    match (compute, _pooled(compute, options)):
+        case (ComputeAssignment(group=group), True):
+            return pools[group]
         case _:
             return None
 
@@ -2252,7 +2631,7 @@ class _RouteBuilder:
 
     actor_map: Mapping[IROp, Any]
     labels: Mapping[IROp, str]
-    groups: Mapping[str, Any]
+    pools: Mapping[str, _Pool]
     claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]]
     functions: Ref
 
@@ -2268,13 +2647,22 @@ class _RouteBuilder:
                 return self._routes(node)
 
     def _apply(self, node: IRMap) -> _Apply:
+        options = self.claims[node.compute]
+        match _pool_of(self.pools, node.compute, options):
+            case None:
+                group, replicas, returns_idle_leases = None, 1, False
+            case _Pool() as pool:
+                group, replicas = pool.coordinator, pool.replicas
+                returns_idle_leases = pool.ephemeral
         return _Apply(
             label=self.labels[node],
             functions=self.functions,
             compute=_without_prepare(node.compute),
-            options=self.claims[node.compute],
-            group=_group_of(self.groups, node.compute),
-            replicas=_replicas(node.compute),
+            options=options,
+            group=group,
+            replicas=replicas,
+            returns_idle_leases=returns_idle_leases,
+            stage=_stage_of(node, self.labels[node]),
             routes=self._routes(node),
         )
 

@@ -96,10 +96,15 @@ def _max_overlap(calls):
     return peak
 
 
-def _compile(protocol, collector, parameters=None):
+def _compile(protocol, collector, parameters=None, **backend_options):
     writer = CallbackSinkWriter(lambda item: ray.get(collector.append.remote(item)))
     (sink,) = lower([protocol.get_pipeline().write_to(writer)])
-    return RayBackend(init_ray=False, parameters=parameters or {}).compile([sink])
+    backend = RayBackend(
+        init_ray=False,
+        parameters=parameters or {},
+        **backend_options,
+    )
+    return backend.compile([sink])
 
 
 def _wait_for_free_gpus():
@@ -690,15 +695,163 @@ def _processes_of_consecutive_calls(protocol, calls=4):
         pipeline.close()
 
 
-@pytest.mark.parametrize("gpus", [1, 0.5])
-def test_every_gpu_call_runs_in_a_process_of_its_own(gpus):
-    # CUDA binds a process to its first GPU; a reused worker would keep it.
-    results = _processes_of_consecutive_calls(_reports_process(gpus=gpus))
+def _processes_of_a_stream(protocol, calls=12):
+    collector = Collector.remote()
+    pipeline = _compile(protocol, collector)
 
-    assert len({result["pid"] for result in results}) == len(results)
+    try:
+        for item in range(calls):
+            pipeline.send("items", item)
+        pipeline.flush()
+
+        return [result["out"] for result in ray.get(collector.get.remote())]
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize("gpus", [1, 0.5])
+def test_gpu_calls_reuse_processes_that_keep_their_gpu(gpus):
+    # CUDA binds a process to its first GPU: an executor of the pool keeps the
+    # GPU it was created on, so its process can be reused.
+    results = _processes_of_a_stream(_reports_process(gpus=gpus))
+
+    processes = {result["pid"] for result in results}
+    assert len(processes) <= CLUSTER_GPUS / gpus < len(results)
     assert all(
         result["cuda"] == ",".join(map(str, result["gpus"])) for result in results
     )
+    gpus_of = {(result["pid"], tuple(result["gpus"])) for result in results}
+    assert len(gpus_of) == len(processes)
+
+
+def _slow_identity(item):
+    time.sleep(0.3)
+    return item
+
+
+# Each of the two pools wants both GPUs.
+@B.resources(gpus=1, replicas=CLUSTER_GPUS)
+class GreedyFirst(B.Protocol):
+    items: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(self._step)
+
+    def _step(self, item):
+        return {"out": _slow_identity(item)}
+
+
+@B.resources(gpus=1, replicas=CLUSTER_GPUS)
+class GreedySecond(B.Protocol):
+    others: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.others.map(self._step)
+
+    def _step(self, item):
+        return {"out": _slow_identity(item)}
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+class PerKeyInference(B.Protocol):
+    items: B.Input[int] = B.Input()
+    model: B.Resource[int] = B.Resource(builder=_build_model)
+    recorder: Any
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return (
+            self.items.group_by(_key, lambda stream: stream.map(self._forward))
+            .unkey()
+            .map(self._output)
+        )
+
+    def _forward(self, item):
+        _record(self.recorder, "forward", seconds=0.2)
+        return item + self.model
+
+    def _output(self, keyed):
+        return {"out": keyed.value}
+
+
+def test_group_by_children_share_the_pool_of_their_protocol():
+    protocol = PerKeyInference()
+    protocol.recorder = Recorder.remote()
+    collector = Collector.remote()
+    pipeline = _compile(protocol, collector)
+
+    try:
+        for item in range(12):
+            pipeline.send("items", item)
+        pipeline.flush()
+
+        calls = ray.get(protocol.recorder.get_calls.remote())
+        # Every child of the 6 keys runs on the one executor of the protocol,
+        # one call of the map at a time, and the model is built once.
+        assert len({call["pid"] for call in calls}) == 1
+        assert _max_overlap(calls) == 1
+        assert ray.get(protocol.recorder.get_builds.remote()) == 1
+        results = ray.get(collector.get.remote())
+        assert sorted(result["out"] for result in results) == list(range(10, 22))
+        assert _wait_for_free_gpus() == CLUSTER_GPUS
+    finally:
+        pipeline.close()
+
+
+def test_pools_competing_for_the_gpus_do_not_deadlock():
+    # Each pool holds one GPU and starts a second executor, which waits for
+    # the GPU of the other pool; both go on with the executor they have.
+    collector = Collector.remote()
+    writer = CallbackSinkWriter(lambda item: ray.get(collector.append.remote(item)))
+    first, second = GreedyFirst(), GreedySecond()
+    sinks = lower(
+        [
+            first.get_pipeline().write_to(writer),
+            second.get_pipeline().write_to(writer),
+        ],
+    )
+    pipeline = RayBackend(init_ray=False).compile(sinks)
+
+    try:
+        for item in range(4):
+            pipeline.send("items", item)
+            pipeline.send("others", item)
+        pipeline.flush()
+
+        assert len(ray.get(collector.get.remote())) == 8
+        assert _wait_for_free_gpus() == CLUSTER_GPUS
+    finally:
+        pipeline.close()
+
+
+def test_idle_ephemeral_executors_release_their_gpus():
+    collector = Collector.remote()
+    pipeline = _compile(
+        _reports_process(gpus=1),
+        collector,
+        ephemeral_idle_s=0.5,
+    )
+
+    try:
+        for item in range(4):
+            pipeline.send("items", item)
+        deadline = time.monotonic() + 30
+        while len(ray.get(collector.get.remote())) < 4 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert ray.available_resources().get("GPU", 0) < CLUSTER_GPUS
+
+        # Without a flush: the executors are released once idle.
+        assert _wait_for_free_gpus() == CLUSTER_GPUS
+    finally:
+        pipeline.close()
 
 
 def test_cpu_calls_reuse_worker_processes():

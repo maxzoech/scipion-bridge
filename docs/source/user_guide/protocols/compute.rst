@@ -62,11 +62,12 @@ Options
    described below.
 
 ``replicas``
-   The number of executor processes of a long-running protocol, each holding
-   the resources (default 1). The calls of the protocol's maps are spread over
-   them, in order: ``@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING,
-   replicas=2)`` runs a model on two GPUs, without partitioning the stream in
-   the protocol.
+   The number of executor processes of the protocol, each holding the
+   resources. The calls of the protocol's maps are spread over them, in order:
+   ``@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=2)`` runs a
+   model on two GPUs, without partitioning the stream in the protocol. The
+   default is 1 for long-running protocols; ephemeral protocols with GPUs
+   share the GPUs that long-running protocols leave in equal parts.
 
 A protocol whose declaration exceeds the cluster (more GPUs or CPUs per call
 than the cluster has) fails when the pipeline is compiled. So do long-running
@@ -80,15 +81,15 @@ Ephemeral and long-running tasks
 The task type decides how resources are held, and with it in which process a
 call runs.
 
-**Ephemeral.** Every call acquires the resources for its own duration, as a
-Ray task. Many calls can interleave on few resources, and calls of different
-maps queue for the same GPUs. A call that claims a GPU runs in a **fresh
-worker process**: CUDA and JAX bind a process to the GPU it first used, so a
-reused process would keep running on the GPU of its first call. As a
-consequence, process-scope resources are built again for every GPU call. This
-fits external programs, which hold the GPU only while they run; it does not
-fit in-process models, which would be loaded for every batch. CPU calls run
-in reused worker processes, which keep their resources.
+**Ephemeral.** Resources are held only while calls need them. Calls without
+GPUs run as Ray tasks, which queue for the CPUs and reuse worker processes.
+Calls that claim GPUs run on a pool of executor processes, each keeping the
+GPU it was started on (CUDA and JAX bind a process to the GPU it first used):
+executors start when calls need them, build the protocol's process-scope
+resources once, and are stopped after ``RayBackend(ephemeral_idle_s=...)``
+seconds without calls (10 by default), so that other protocols can use the
+GPUs while the stream pauses. This fits external programs and models that
+are only needed now and then.
 
 **Long-running.** A pool of ``replicas`` dedicated executor processes holds
 the resources from the moment the pipeline is compiled until the stream is

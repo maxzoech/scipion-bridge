@@ -6,7 +6,12 @@ from numpy._core.multiarray import (
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.backend.ray.backend import _check_pools_fit, _ray_options
+from scipion_bridge.backend.ray.backend import (
+    _check_pools_fit,
+    _pool_replicas,
+    _pooled,
+    _ray_options,
+)
 from scipion_bridge.core.environment.compute import (
     NUMPY_HUGEPAGE_ENV_VAR,
     ComputeAssignment,
@@ -403,3 +408,38 @@ def test_the_assignment_carries_the_warm_up_outside_its_equality():
         Refine.compute_resources,
         group=protocol.protocol_id,
     )
+
+
+@pytest.mark.parametrize(
+    "resources, gpus, held, pools, replicas",
+    [
+        (B.ComputeResources(gpus=1), 1, 0, 1, 2),
+        (B.ComputeResources(gpus=0.5), 0.5, 0, 1, 4),
+        (B.ComputeResources(gpus=1), 1, 1, 1, 1),  # a long-running pool holds one
+        (B.ComputeResources(gpus=1), 1, 2, 1, 1),  # at least one, it waits its turn
+        (B.ComputeResources(gpus=1), 1, 0, 2, 1),  # two ephemeral pools share
+        (B.ComputeResources(gpus=0.5), 0.5, 0, 3, 1),
+        (B.ComputeResources(gpus=1, replicas=3), 1, 0, 2, 3),
+        (B.ComputeResources(gpus=1, task=B.TaskType.LONG_RUNNING), 1, 0, 1, 1),
+    ],
+)
+def test_the_replicas_of_a_pool(resources, gpus, held, pools, replicas):
+    options = {"num_gpus": gpus, "num_cpus": 0}
+
+    assert _pool_replicas(options, resources, 2, held, pools) == replicas
+
+
+@pytest.mark.parametrize(
+    "task, gpus, pooled",
+    [
+        (B.TaskType.LONG_RUNNING, 0, True),
+        (B.TaskType.LONG_RUNNING, 1, True),
+        (B.TaskType.EPHEMERAL, 1, True),
+        (B.TaskType.EPHEMERAL, 0, False),  # also the cpu_only maps of a protocol
+    ],
+)
+def test_maps_run_on_a_pool_if_long_running_or_with_gpus(task, gpus, pooled):
+    compute = ComputeAssignment(B.ComputeResources(gpus=gpus, task=task), group="g")
+
+    assert _pooled(compute, {"num_gpus": gpus, "num_cpus": 0}) == pooled
+    assert not _pooled(None, {"num_gpus": 0, "num_cpus": 0})

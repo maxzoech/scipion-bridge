@@ -59,8 +59,9 @@ class TableCache:
             return self._tables[functions.ref]
 
 
-# The function tables of the pipelines whose maps ran in this process.
-_CACHED_TABLES = 4
+# The function tables of the pipelines whose maps ran in this process: an
+# executor shared by the children of a group_by gets the table of each.
+_CACHED_TABLES = 16
 _TABLES = TableCache(ray.get, size=_CACHED_TABLES)
 
 

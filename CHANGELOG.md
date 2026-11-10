@@ -43,6 +43,16 @@
 - The executors of long-running protocols start when the pipeline is compiled
   and build the protocols' process-scope resources (e.g. load models) before
   the first item.
+- Calls of ephemeral protocols that claim GPUs run on a pool of executors
+  instead of a new process per call, so models are loaded once per executor.
+  Executors start on demand and stop after `RayBackend(ephemeral_idle_s=...)`
+  seconds without calls; by default the ephemeral pools of a pipeline share
+  the free GPUs in equal parts.
+- The children of a `group_by` run on the pools of their protocols instead of
+  starting executors of their own: `group_by(workers=n)` only partitions the
+  keys, and the number of GPU processes is the protocol's `replicas`. An
+  executor runs one call of each map of its protocol at a time, however many
+  children share it. The pipeline releases its pools after a flush.
 - Map calls on Ray no longer carry their function: a pipeline puts the
   functions of its maps, its parameters and its profiling setup in the object
   store once, and every worker process unpacks them once. A protocol's map

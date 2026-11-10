@@ -90,9 +90,11 @@ sub-pipeline, the **workers**:
 * Within a worker, every stateful operation keeps a separate state per key,
   created with the key's first item, and the stateless ``map`` and
   ``map_element`` carry the key along with each item.
-* A long-running protocol inside the sub-pipeline loads its process-scope
-  resources (such as a model) once per worker, and the keys of the worker
-  share them.
+* The maps of a protocol run on the protocol's pool of executors, which all
+  workers share (see :doc:`/user_guide/protocols/compute`): the number of
+  GPU processes is the protocol's ``replicas``, not the number of workers,
+  and process-scope resources (such as a model) are loaded once per
+  executor.
 * Each map call still runs as a call of its own, so external programs and
   their temporary files stay separate for each call.
 
@@ -101,7 +103,8 @@ backend decides: ``RayBackend(group_by_workers=4)`` unless configured
 otherwise. ``workers=None`` gives every key a sub-pipeline of its own.
 
 The trade-off is isolation against startup cost. Keys of one worker share its
-queues, so a slow key delays the other keys of its worker. On an 8-CPU node,
+queues, so a slow key delays the other keys of its worker. To spread a model
+over several GPUs, raise the protocol's ``replicas`` rather than the workers. On an 8-CPU node,
 a 3-stage sub-pipeline with 20 keys started 15 processes instead of 63 with 4
 workers, and reached its first flush in 3.9 s instead of 9.9 s; throughput
 once running was the same.
