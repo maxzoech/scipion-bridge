@@ -28,8 +28,8 @@ import tempfile
 import threading
 import time
 import uuid
-import ray
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+import ray  # type: ignore
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy  # type: ignore
 
 from scipion_bridge.core.environment.compute import (
     CPUS_ENV_VAR,
@@ -65,6 +65,7 @@ from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
 from scipion_bridge.core.streaming.spill import SpillStoreFactory, pickle_spill_store
 
+from .function_table import FunctionTable, table_of
 from .mailbox import Mailbox, Ref, SpillPolicy
 from .profiling import ProfileConfig, Recorder, make_recorder, start_profile
 
@@ -108,14 +109,13 @@ class _Apply:
     """
 
     label: str
-    func: Callable[[Any], Any]
+    # The function table of the pipeline, holding the function of the map.
+    functions: Ref
     compute: Optional[ComputeAssignment]
     # Ray options of the task of every call (resources, runtime env).
     options: Dict[str, Any]
     # Coordinator of the executor of a long-running compute group.
     group: Optional[Any]
-    parameters: Mapping[str, Any]
-    profile: Optional[ProfileConfig]
     routes: List[_Route]
 
 
@@ -678,24 +678,20 @@ def _serve_parameters(parameters: Mapping[str, Any]) -> None:
             _served_parameters = dict(parameters)
 
 
-def _run_map_call(
-    func: Callable[[Any], Any],
-    parameters: Mapping[str, Any],
-    label: str,
-    profile: Optional[ProfileConfig],
-    item: Any,
-) -> Any:
+def _run_map_call(functions: Ref, label: str, item: Any) -> Any:
     """Run one call of a map ``label``, holding the resources of the task.
 
-    The worker process runs other calls afterwards or exits (see
+    The function comes from the pipeline's function table, unpacked once per
+    process. The worker process runs other calls afterwards or exits (see
     ``_run_in_gpu_task``), so the profiling events of the call are sent
     before it returns.
     """
-    _serve_parameters(parameters)
-    recorder = make_recorder(profile, "task worker")
+    table = table_of(functions)
+    _serve_parameters(table.parameters)
+    recorder = make_recorder(table.profile, "task worker")
     try:
         with recorder.span("execute", f"map:{label}", gpus=ray.get_gpu_ids()):
-            return func(item)
+            return table.functions[label](item)
     finally:
         recorder.flush_sync()
 
@@ -787,7 +783,7 @@ def _probe_cluster_gpu_memory() -> Tuple[float, ...]:
         if node["Alive"] and node["Resources"].get("GPU", 0) > 0
     ]
     probes = [
-        _node_gpu_memory.options(
+        _node_gpu_memory.options(  # type: ignore
             scheduling_strategy=NodeAffinitySchedulingStrategy(node, soft=False),
             runtime_env={"env_vars": numpy_hugepage_env()},
         ).remote()
@@ -864,8 +860,9 @@ class RayComputeExecutor:
         self._recorder = make_recorder(profile, f"executor({group})")
         self._recorder.instant("start", "executor", gpus=ray.get_gpu_ids())
 
-    def call(self, label: str, func: Callable[[Any], Any], item: Any) -> Any:
-        """Run ``func`` of the map ``label`` on ``item``."""
+    def call(self, functions: Ref, label: str, item: Any) -> Any:
+        """Run the function of the map ``label`` from ``functions`` on ``item``."""
+        func = table_of(functions).functions[label]
         lane = f"map:{label}"
         lock = self._locks.setdefault(label, threading.Lock())
         with self._recorder.span("lock_wait", lane, overlapping=True):
@@ -961,7 +958,7 @@ class _MapRunner:
         recorder: Recorder,
     ) -> None:
         self._label = route.label
-        self._func = route.func
+        self._functions = route.functions
         self._completions = completions
         self._compute = route.compute
         self._options = route.options
@@ -971,8 +968,6 @@ class _MapRunner:
             case _:
                 self._task = _run_in_task
         self._group = route.group
-        self._parameters = route.parameters
-        self._profile = route.profile
         self._recorder = recorder
         self.stats = StageStats()
         self._executor_calls = asyncio.Semaphore(_EXECUTOR_CALLS_IN_FLIGHT)
@@ -1007,7 +1002,7 @@ class _MapRunner:
                 async with self._executor_calls:
                     executor = await self._acquire()
                     return await self._completions.done(
-                        executor.call.remote(self._label, self._func, item),
+                        executor.call.remote(self._functions, self._label, item),
                     )
             case _:
                 return await self._completions.done(self._submit(item))
@@ -1023,10 +1018,8 @@ class _MapRunner:
 
     def _submit(self, item: Any) -> ray.ObjectRef:
         return self._task.options(**self._options).remote(
-            self._func,
-            self._parameters,
+            self._functions,
             self._label,
-            self._profile,
             item,
         )
 
@@ -1428,6 +1421,7 @@ class RayCompiledPipeline(CompiledPipeline):
         spill_root: Optional[Path] = None,
         profile: Optional[ProfileConfig] = None,
         owns_profile: bool = False,
+        functions: Optional[ray.ObjectRef] = None,
     ):
         """
         Args:
@@ -1445,6 +1439,8 @@ class RayCompiledPipeline(CompiledPipeline):
             owns_profile: Whether the pipeline completes the trace on
                 ``close``; a nested pipeline writes into the trace of its
                 parent.
+            functions: The function table of the pipeline's maps, kept in
+                the object store while the pipeline runs.
         """
         self._sources = sources
         self._stages = stages
@@ -1453,6 +1449,7 @@ class RayCompiledPipeline(CompiledPipeline):
         self._spill_root = spill_root
         self._profile = profile
         self._owns_profile = owns_profile
+        self._functions = functions
         self._recorder = make_recorder(profile, "driver")
 
     @property
@@ -1553,6 +1550,9 @@ class RayCompiledPipeline(CompiledPipeline):
             case root:
                 # ``close`` may run more than once.
                 shutil.rmtree(root, ignore_errors=True)
+
+        # Without a reference, Ray frees the function table.
+        self._functions = None
 
     def _close_profile(self, profile: ProfileConfig) -> None:
         """Write the remaining events and complete the trace file."""
@@ -1801,15 +1801,21 @@ class RayBackend(StreamingBackendProvider):
         # loops. Every stage feeds a downstream stage on the port given by its
         # position among the upstream stages of the downstream stage; maps in
         # between are applied on the way. A failing stage aborts the sources
-        # and the further abort targets.
-        builder = _RouteBuilder(
-            actor_map,
-            labels,
-            groups,
-            claims,
-            self.parameters,
-            profile,
+        # and the further abort targets. Map calls carry a reference to the
+        # function table of the pipeline, which is put in the object store
+        # once.
+        functions = ray.put(
+            FunctionTable(
+                functions={
+                    labels[node]: node.func
+                    for node in all_nodes
+                    if isinstance(node, IRMap)
+                },
+                parameters=self.parameters,
+                profile=profile,
+            ),
         )
+        builder = _RouteBuilder(actor_map, labels, groups, claims, Ref(functions))
         abort_handles = [*compiled_sources.values(), *abort_targets]
         connected = [
             actor.connect.remote(
@@ -1833,6 +1839,7 @@ class RayBackend(StreamingBackendProvider):
             spill_root=spill_root,
             profile=profile,
             owns_profile=owns_profile,
+            functions=functions,
         )
         return pipeline, connected
 
@@ -2037,8 +2044,7 @@ class _RouteBuilder:
     labels: Mapping[IROp, str]
     groups: Mapping[str, Any]
     claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]]
-    parameters: Mapping[str, Any]
-    profile: Optional[ProfileConfig]
+    functions: Ref
 
     def stage_routes(self, node: IROp) -> List[_Route]:
         """Routes out of the actor of ``node``.
@@ -2054,12 +2060,10 @@ class _RouteBuilder:
     def _apply(self, node: IRMap) -> _Apply:
         return _Apply(
             label=self.labels[node],
-            func=node.func,
+            functions=self.functions,
             compute=node.compute,
             options=self.claims[node.compute],
             group=_group_of(self.groups, node.compute),
-            parameters=self.parameters,
-            profile=self.profile,
             routes=self._routes(node),
         )
 

@@ -36,6 +36,11 @@
   and the alias `configure_ray_container`.
 
 ### Streaming
+- Map calls on Ray no longer carry their function: a pipeline puts the
+  functions of its maps, its parameters and its profiling setup in the object
+  store once, and every worker process unpacks them once. A protocol's map
+  methods no longer ship the protocol with every call (1 MB of state was 1 MB
+  per call).
 - Leaving the `with` block of a `Pipeline` closes it after the flush, and
   `RayPipelineRunner.run()` closes its pipeline: their Ray actors were never
   terminated, since the stages hold references to each other, and a test

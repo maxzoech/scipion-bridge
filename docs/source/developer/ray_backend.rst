@@ -138,6 +138,31 @@ two calls in flight on the executor, but a per-map lock runs its function one
 call at a time; Ray deserializes the argument of the next call and serializes
 the result of the previous one meanwhile.
 
+Function tables
+^^^^^^^^^^^^^^^
+
+A call carries neither its function nor the pipeline's parameters. Ray
+pickles the arguments of every call, and a protocol's map function is a bound
+method: as an argument it would carry the whole protocol on every call, and
+for a class defined in ``__main__`` the class itself.
+
+Instead, compiling a pipeline puts one ``FunctionTable``
+(``backend/ray/function_table.py``) in the object store: the functions of all
+its maps by label, its parameters and its profiling setup. A call carries a
+``Ref`` to the table, its label and its item; wrapped in ``Ref``, Ray does not
+resolve the table for every call. ``_run_map_call`` and
+``RayComputeExecutor.call`` look the table up in the process's
+``TableCache``, which unpacks it once and keeps the tables of the last few
+pipelines, since task workers are pooled and outlive pipelines. Pickle stores
+an object once per payload, so the methods of a protocol in one table share
+one instance of it. ``RayCompiledPipeline`` holds the table while it runs and
+drops it on ``close``.
+
+A copy of the functions per process instead of per call is correct only
+because protocols are sealed once their pipeline is built (see
+:doc:`/user_guide/protocols/declarations`). A GPU call runs in a process of
+its own and therefore unpacks the table every time.
+
 Task options
 ^^^^^^^^^^^^
 
