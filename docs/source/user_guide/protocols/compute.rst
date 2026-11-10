@@ -91,8 +91,11 @@ fit in-process models, which would be loaded for every batch. CPU calls run
 in reused worker processes, which keep their resources.
 
 **Long-running.** A pool of ``replicas`` dedicated executor processes holds
-the resources from the first call until the stream is flushed, then releases
-them; items that arrive after a flush start new executors. All maps of the
+the resources from the moment the pipeline is compiled until the stream is
+flushed, then releases them; items that arrive after a flush start new
+executors. Every executor builds the protocol's ``ResourceScope.PROCESS``
+resources (for example, loads its model) before it takes its first call, so
+the first items do not wait for it. All maps of the
 protocol (except ``cpu_only`` ones) run on the pool, so process-scope
 resources such as a model are built once per executor. A call goes to an idle
 executor if there is one; each map runs one call at a time on an executor,

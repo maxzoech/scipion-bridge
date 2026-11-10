@@ -1,10 +1,10 @@
 """Compute resources (GPUs, CPUs) that the stages of a protocol require."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import logging
 import os
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 # ``numpy._core`` is the module in NumPy 2; NumPy 1.26 re-exports
 # ``numpy.core`` under it. NumPy's stubs omit the function.
@@ -187,7 +187,13 @@ class ComputeAssignment:
 
     Stages of the same protocol form a group; a long-running group holds its
     resources once for all of its stages.
+
+    Attributes:
+        prepare: Builds the process-scope resources of the protocol in the
+            calling process (e.g. loads a model), so that an executor can do
+            it before its first call. Not part of the equality of claims.
     """
 
     resources: ComputeResources
     group: str
+    prepare: Optional[Callable[[], None]] = field(default=None, compare=False)

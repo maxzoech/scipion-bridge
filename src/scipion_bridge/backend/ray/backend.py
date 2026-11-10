@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import (
     Any,
     AsyncGenerator,
-    AsyncIterator,
     Awaitable,
     Callable,
     Coroutine,
@@ -22,6 +21,7 @@ from typing import (
 import abc
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import math
 import os
@@ -862,6 +862,7 @@ class RayComputeExecutor:
         profile: Optional[ProfileConfig],
     ) -> None:
         _serve_parameters(parameters)
+        self._group = group
         self._locks: Dict[str, threading.Lock] = {}
         self._recorder = make_recorder(profile, f"executor({group})")
         self._recorder.instant("start", "executor", gpus=ray.get_gpu_ids())
@@ -879,8 +880,14 @@ class RayComputeExecutor:
         finally:
             lock.release()
 
-    def ready(self) -> None:
-        """Return once the executor holds its resources and runs."""
+    def prepare(self, functions: Ref) -> None:
+        """Build the process-scope resources of the group before the first call.
+
+        Returns once the executor holds its resources, runs, and e.g. has
+        loaded the model of its protocol.
+        """
+        with self._recorder.span("prepare", "executor", level=logging.INFO):
+            table_of(functions).preparers[self._group]()
 
     def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of the executor."""
@@ -896,8 +903,11 @@ class RayComputeGroup:
     then a new one while the pool is not full, then the one with the fewest
     leases. An executor is handed out once it holds its resources.
 
-    The executors are killed, releasing their resources, once every map of
-    the group has passed FLUSH. Items arriving after a flush create new ones.
+    Every executor builds the process-scope resources of the protocol before
+    it is handed out; ``start`` creates the whole pool at once, when the
+    pipeline is compiled. The executors are killed, releasing their
+    resources, once every map of the group has passed FLUSH. Items arriving
+    after a flush create new ones.
     """
 
     def __init__(
@@ -905,6 +915,7 @@ class RayComputeGroup:
         options: Dict[str, Any],
         members: int,
         replicas: int,
+        functions: Ref,
         parameters: Mapping[str, Any],
         group: str,
         profile: Optional[ProfileConfig],
@@ -912,6 +923,7 @@ class RayComputeGroup:
         self._options = options
         self._members = members
         self._replicas = replicas
+        self._functions = functions
         self._parameters = parameters
         self._group = group
         self._profile = profile
@@ -942,6 +954,12 @@ class RayComputeGroup:
             self._leases[executor_id] += 1
             return executor_id, self._executors[executor_id]
 
+    async def start(self) -> None:
+        """Create the executors of the pool missing, preparing them at once."""
+        async with self._lock:
+            missing = self._replicas - len(self._executors)
+            await asyncio.gather(*(self._create() for _ in range(missing)))
+
     async def _create(self) -> int:
         executor_id = self._next_id
         self._next_id += 1
@@ -950,7 +968,11 @@ class RayComputeGroup:
             max_concurrency=self._members * _EXECUTOR_CALLS_IN_FLIGHT,
             **self._options,
         ).remote(self._parameters, self._group, self._profile)
-        await executor.ready.remote()
+        try:
+            await executor.prepare.remote(self._functions)
+        except Exception:
+            ray.kill(executor)
+            raise
         self._executors[executor_id] = executor
         self._leases[executor_id] = 0
         return executor_id
@@ -1888,7 +1910,27 @@ class RayBackend(StreamingBackendProvider):
             if isinstance(node, IRMap)
         }
         profile, owns_profile = self._profile_config(pipeline_id)
-        groups = self._compute_groups(all_nodes, claims, profile)
+        # Map calls and the warm-up of executors find their functions in the
+        # function table of the pipeline, put in the object store once.
+        functions = ray.put(
+            FunctionTable(
+                functions={
+                    labels[node]: node.func
+                    for node in all_nodes
+                    if isinstance(node, IRMap)
+                },
+                parameters=self.parameters,
+                profile=profile,
+                preparers={
+                    compute.group: compute.prepare
+                    for node in all_nodes
+                    if isinstance(node, IRMap)
+                    and isinstance(compute := node.compute, ComputeAssignment)
+                    and compute.prepare is not None
+                },
+            ),
+        )
+        groups = self._compute_groups(all_nodes, claims, Ref(functions), profile)
         spill, spill_root = self._spill_config()
         # Every executor of a pool takes calls of a map at once; the items on
         # the routes of a stage must cover them all.
@@ -1931,20 +1973,7 @@ class RayBackend(StreamingBackendProvider):
         # loops. Every stage feeds a downstream stage on the port given by its
         # position among the upstream stages of the downstream stage; maps in
         # between are applied on the way. A failing stage aborts the sources
-        # and the further abort targets. Map calls carry a reference to the
-        # function table of the pipeline, which is put in the object store
-        # once.
-        functions = ray.put(
-            FunctionTable(
-                functions={
-                    labels[node]: node.func
-                    for node in all_nodes
-                    if isinstance(node, IRMap)
-                },
-                parameters=self.parameters,
-                profile=profile,
-            ),
-        )
+        # and the further abort targets.
         builder = _RouteBuilder(actor_map, labels, groups, claims, Ref(functions))
         abort_handles = [*compiled_sources.values(), *abort_targets]
         connected = [
@@ -2121,9 +2150,13 @@ class RayBackend(StreamingBackendProvider):
         self,
         nodes: Sequence[IROp],
         claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]],
+        functions: Ref,
         profile: Optional[ProfileConfig],
     ) -> Dict[str, Any]:
         """Create a coordinator for every long-running group among ``nodes``.
+
+        The coordinators start their pools, preparing the executors, while
+        the rest of the pipeline is created.
 
         Raises:
             ValueError: If the pools of the groups do not fit the cluster at
@@ -2145,19 +2178,39 @@ class RayBackend(StreamingBackendProvider):
                     pass
 
         _check_pools_fit(pools, ray.cluster_resources())
-        return {
+        groups: Dict[str, Any] = {
             group: RayComputeGroup.options(
                 runtime_env={"env_vars": numpy_hugepage_env()},
             ).remote(
                 pools[group][0],
                 count,
                 pools[group][1],
+                functions,
                 self.parameters,
                 group,
                 profile,
             )
             for group, count in members.items()
         }
+        # A failed warm-up surfaces on the first lease, which prepares again.
+        for coordinator in groups.values():
+            coordinator.start.remote()
+        return groups
+
+
+def _without_prepare(
+    compute: Optional[ComputeAssignment],
+) -> Optional[ComputeAssignment]:
+    """The claim without its warm-up, which holds the protocol.
+
+    Routes are sent to every stage; the warm-up reaches the executors through
+    the function table instead.
+    """
+    match compute:
+        case None:
+            return None
+        case ComputeAssignment():
+            return dataclasses.replace(compute, prepare=None)
 
 
 def _replicas(compute: Optional[ComputeAssignment]) -> int:
@@ -2218,7 +2271,7 @@ class _RouteBuilder:
         return _Apply(
             label=self.labels[node],
             functions=self.functions,
-            compute=node.compute,
+            compute=_without_prepare(node.compute),
             options=self.claims[node.compute],
             group=_group_of(self.groups, node.compute),
             replicas=_replicas(node.compute),

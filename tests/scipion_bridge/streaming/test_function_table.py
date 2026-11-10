@@ -30,7 +30,12 @@ class Loader:
 
 
 def _table(name: str) -> FunctionTable:
-    return FunctionTable(functions={name: str}, parameters={}, profile=None)
+    return FunctionTable(
+        functions={name: str},
+        parameters={},
+        profile=None,
+        preparers={},
+    )
 
 
 def test_a_table_is_loaded_once():
@@ -87,6 +92,7 @@ def test_the_methods_of_one_object_share_it_after_unpickling():
         functions={"0:first": model.first, "1:second": model.second},
         parameters={},
         profile=None,
+        preparers={},
     )
 
     restored = cloudpickle.loads(cloudpickle.dumps(table))

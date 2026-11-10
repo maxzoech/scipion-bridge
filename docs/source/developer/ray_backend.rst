@@ -135,7 +135,13 @@ actors that hold the group's resources. The ``RayComputeGroup`` coordinator
 keeps up to ``replicas`` of them and hands them out as *leases*: a map leases
 an executor it does not hold yet, preferably one nobody leases, else a new one
 while the pool is not full, else the one with the fewest leases. An executor
-is handed out once it holds its resources (``ready``). On the map's side,
+is handed out once it holds its resources and has built the protocol's
+process-scope resources (``prepare``): the protocol's ``_prepare_process``
+travels in the ``ComputeAssignment`` to the function table, by compute group,
+and not with the routes, which every stage receives. When the pipeline is
+compiled, every coordinator starts its whole pool (``start``), in parallel to
+creating the stages; a failed warm-up kills the executor and surfaces on the
+first lease, which prepares again. On the map's side,
 ``_LeasedExecutors`` sends a call to an idle leased executor, else leases
 another, else to the least busy one with fewer than two calls in flight, else
 waits. Every map has at most two calls in flight on an executor, but a

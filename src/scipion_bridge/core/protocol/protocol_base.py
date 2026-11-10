@@ -25,6 +25,7 @@ from typing import (
 import numpy as np
 
 from ..environment.compute import ComputeAssignment, ComputeResources, TaskType
+from ..environment.resource_provider import ResourceScope
 from ..streaming.ops import MapElementOp, MapOp, Op, lineage
 from .chain_utils import (
     merge_inputs,
@@ -277,7 +278,11 @@ class Protocol(metaclass=abc.ABCMeta):
             case None:
                 pass
             case resources:
-                assignment = ComputeAssignment(resources, group=self.protocol_id)
+                assignment = ComputeAssignment(
+                    resources,
+                    group=self.protocol_id,
+                    prepare=self._prepare_process,
+                )
                 # cpu_only stages run without GPUs and outside the
                 # long-running executor of the protocol.
                 cpu_assignment = ComputeAssignment(
@@ -290,6 +295,19 @@ class Protocol(metaclass=abc.ABCMeta):
                             node.compute = (
                                 cpu_assignment if node.cpu_only else assignment
                             )
+
+    def _prepare_process(self) -> None:
+        """Build the process-scope resources of the protocol in this process.
+
+        Executors run it before their first call, so that e.g. a model is
+        loaded before the first item arrives.
+        """
+        for name, resource in self.configuration.resources.items():
+            match resource.scope:
+                case ResourceScope.PROCESS:
+                    getattr(self, name)
+                case _:
+                    pass
 
     def _tag_stages(self, exit_: Op) -> None:
         """Set the fingerprint of every stage of ``exit_`` that has none yet.

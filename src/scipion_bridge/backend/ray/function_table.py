@@ -31,6 +31,8 @@ class FunctionTable:
     # Values served to Field.value in the process running a call.
     parameters: Mapping[str, Any]
     profile: Optional[ProfileConfig]
+    # Builds the process-scope resources of a protocol, by its compute group.
+    preparers: Mapping[str, Callable[[], None]]
 
 
 class TableCache:

@@ -295,6 +295,59 @@ def test_a_pool_spreads_the_calls_over_its_executors_in_order():
         pipeline.close()
 
 
+def test_executors_build_their_resources_before_the_first_item():
+    protocol = PooledInference()
+    protocol.recorder = Recorder.remote()
+    pipeline = _compile(protocol, Collector.remote())
+
+    try:
+        deadline = time.monotonic() + 30
+        while (
+            ray.get(protocol.recorder.get_builds.remote()) < CLUSTER_GPUS
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.1)
+        assert ray.get(protocol.recorder.get_builds.remote()) == CLUSTER_GPUS
+
+        for item in range(4):
+            pipeline.send("items", item)
+        pipeline.flush()
+        assert ray.get(protocol.recorder.get_builds.remote()) == CLUSTER_GPUS
+    finally:
+        pipeline.close()
+
+
+def _fail_to_load(protocol):
+    raise RuntimeError("model file missing")
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+class BrokenModel(B.Protocol):
+    items: B.Input[int] = B.Input()
+    model: B.Resource[int] = B.Resource(builder=_fail_to_load)
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(self._forward)
+
+    def _forward(self, item):
+        return {"out": item + self.model}
+
+
+def test_a_failed_warm_up_surfaces_on_the_first_item():
+    pipeline = _compile(BrokenModel(), Collector.remote())
+
+    try:
+        with pytest.raises(Exception, match="model file missing"):
+            pipeline.send("items", 1)
+            pipeline.flush()
+        assert _wait_for_free_gpus() == CLUSTER_GPUS
+    finally:
+        pipeline.close()
+
+
 @B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=CLUSTER_GPUS + 1)
 class OversizedPool(B.Protocol):
     items: B.Input[int] = B.Input()

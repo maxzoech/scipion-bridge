@@ -367,3 +367,39 @@ def test_ray_options_turn_numpy_hugepages_off_next_to_the_other_variables(
         "TF_FORCE_GPU_ALLOW_GROWTH": "true",
         "SCIPION_BRIDGE_GPU_FRACTION": "0.5",
     }
+
+
+def test_preparing_builds_the_process_resources_only():
+    built = []
+
+    class WithResources(B.Protocol):
+        items: B.Input[int] = B.Input()
+        local: B.Resource[str] = B.Resource(
+            builder=lambda protocol: built.append("local") or "local",
+        )
+        shared: B.Resource[str] = B.Resource(
+            builder=lambda protocol: built.append("shared") or "shared",
+            scope=B.ResourceScope.SHARED,
+        )
+
+        def outputs(self):
+            return {}
+
+        def steps(self):
+            return self.items
+
+    WithResources()._prepare_process()
+
+    assert built == ["local"]
+
+
+def test_the_assignment_carries_the_warm_up_outside_its_equality():
+    protocol = Refine()
+
+    forward, *_ = _maps(protocol._tagged_steps())
+
+    assert forward.compute.prepare == protocol._prepare_process
+    assert forward.compute == ComputeAssignment(
+        Refine.compute_resources,
+        group=protocol.protocol_id,
+    )
