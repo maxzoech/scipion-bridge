@@ -1,8 +1,11 @@
 """group_by / unkey: routing items into a pipeline per key."""
 
 import asyncio
+import json
 import threading
 import time
+from pathlib import Path
+from typing import List, Tuple
 
 import numpy as np
 import pytest
@@ -313,33 +316,38 @@ def test_flush_drains_children_before_forwarding():
         pipeline.close()
 
 
-def _time_new_keys(keys):
-    """Time from sending one item per new key until the flush has drained."""
+def _child_starts(trace: Path) -> List[Tuple[int, int]]:
+    """The (begin, end) in microseconds of every child start in a profile."""
+    records = json.loads(trace.read_text())
+    spans = [r for r in records if r["name"] == "start_child"]
+    begins = {r["id"]: r["ts"] for r in spans if r["ph"] == "b"}
+    ends = {r["id"]: r["ts"] for r in spans if r["ph"] == "e"}
+    return [(begins[span_id], ends[span_id]) for span_id in begins]
+
+
+def test_children_of_new_keys_start_in_parallel(tmp_path):
+    # Starting a child waits for its actors' processes; the router starts the
+    # children of a burst of new keys at once instead of one after another, so
+    # their starts overlap. How long the starts take depends on the cores of
+    # the machine, so the test asserts the overlap, not a duration.
+    trace = tmp_path / "trace.json"
     pipeline = _compile(
         Source("x")
         .group_by(0, lambda stream: stream.map(_second))
         .unkey()
         .sink(lambda item: None),
+        profile=trace,
     )
     try:
-        t_start = time.perf_counter()
-        for key in keys:
-            pipeline.send("x", (key, _make_set([1])))
+        for index in range(4):
+            pipeline.send("x", (f"parallel-{index}", _make_set([1])))
         pipeline.flush()
-        return time.perf_counter() - t_start
     finally:
         pipeline.close()
 
-
-def test_children_of_new_keys_start_in_parallel():
-    # Starting a child waits for its actors' processes; the router starts the
-    # children of a burst of new keys at once instead of one after another.
-    # The first pipeline also waits for Ray to start its worker pool.
-    _time_new_keys(["parallel-warm-up"])
-    one = _time_new_keys(["parallel-0"])
-    four = _time_new_keys([f"parallel-{index}" for index in range(1, 5)])
-
-    assert four < 3 * one
+    starts = _child_starts(trace)
+    assert len(starts) == 4
+    assert max(begin for begin, _ in starts) < min(end for _, end in starts)
 
 
 def test_items_of_starting_children_keep_their_order():
