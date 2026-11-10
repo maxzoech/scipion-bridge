@@ -1,3 +1,4 @@
+import contextlib
 from typing import Dict, Type
 
 import numpy as np
@@ -210,10 +211,11 @@ def test_flush_of_failed_two_input_stage_raises():
     )
 
     backend = RayBackend(init_ray=False)
-    pipeline = Pipeline.from_sink(sink_node, backend=backend)
-    with pytest.raises(ray.exceptions.RayTaskError, match="left failed"):
-        pipeline.send(left=1)
-        pipeline.flush()
+    # Closed without the flush of the context manager, which would raise again.
+    with contextlib.closing(Pipeline.from_sink(sink_node, backend=backend)) as pipeline:
+        with pytest.raises(ray.exceptions.RayTaskError, match="left failed"):
+            pipeline.send(left=1)
+            pipeline.flush()
 
 
 # -- Chained protocols -------------------------------------------------------

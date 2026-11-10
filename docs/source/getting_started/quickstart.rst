@@ -116,15 +116,15 @@ it records a graph. ``Source`` names an input of the graph:
     )
 
 Compile the graph into a ``Pipeline`` and push data into it. Leaving the
-``with`` block *flushes* the pipeline. A flush pushes out partial chunks, drains
-in-flight work, and finalizes the sinks:
+``with`` block *flushes* and closes the pipeline. A flush pushes out partial
+chunks, drains in-flight work, and finalizes the sinks; closing releases the
+backend's resources, such as Ray actors:
 
 .. code-block:: python
 
     with Pipeline.from_sink(out) as pipeline:
         pipeline.send(particles=particles[:600])
         pipeline.send(particles=particles[600:])
-    pipeline.close()
 
 Each ``map`` is a separate stage, and consecutive stages work on different
 batches at the same time. Splitting work into several maps therefore overlaps

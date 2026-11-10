@@ -1,4 +1,5 @@
 import os
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, List, Tuple
@@ -178,6 +179,23 @@ def test_ray_pipeline_runner_executes_pipeline_with_custom_sink(tmp_path, monkey
 
     results = ray.get(collector.get_items.remote())
     assert results == [4, 4]
+
+
+def test_run_terminates_the_actors_it_started(tmp_path):
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    before = set(ray.util.list_named_actors())
+    runner = RayPipelineRunner(StreamingParticleProtocol())
+
+    runner.run(particles=star_path)
+
+    # ray.kill returns before the cluster has removed the actors.
+    deadline = time.monotonic() + 10.0
+    while (
+        left := set(ray.util.list_named_actors()) - before
+    ) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert left == set()
+    assert runner.pipeline.stats()
 
 
 class DualInputProtocol(Protocol):

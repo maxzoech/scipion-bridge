@@ -1,3 +1,5 @@
+import time
+
 import pytest
 import ray
 from scipion_bridge.core.streaming import Source
@@ -70,9 +72,38 @@ def test_ray_unknown_source_raises():
     sink_node = source.write_to(writer)
 
     backend = RayBackend(init_ray=False)
-    pipeline = Pipeline.from_sink(sink_node, backend=backend)
+    with Pipeline.from_sink(sink_node, backend=backend) as pipeline:
+        with pytest.raises(KeyError, match="not registered"):
+            pipeline.send(unregistered_source=123)
 
-    with pytest.raises(KeyError, match="not registered"):
-        pipeline.send(unregistered_source=123)
 
-    pipeline.flush()
+def _live_named_actors() -> set[str]:
+    return set(ray.util.list_named_actors())
+
+
+def _wait_until_terminated(names: set[str], timeout: float = 10.0) -> set[str]:
+    """The actors among ``names`` still alive after ``timeout`` seconds.
+
+    ``ray.kill`` returns before the cluster has removed the actor.
+    """
+    deadline = time.monotonic() + timeout
+    while (alive := names & _live_named_actors()) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    return alive
+
+
+def test_leaving_the_context_terminates_the_actors():
+    before = _live_named_actors()
+    sink_node = (
+        Source("numbers")
+        .map_batch(lambda x: x * 2)
+        .scan(lambda a, b: a + b)
+        .sink(print)
+    )
+
+    with Pipeline.from_sink(sink_node, backend=RayBackend(init_ray=False)) as pipeline:
+        pipeline.send(numbers=5)
+        started = _live_named_actors() - before
+
+    assert started
+    assert _wait_until_terminated(started) == set()

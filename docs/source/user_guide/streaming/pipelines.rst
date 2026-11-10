@@ -46,14 +46,20 @@ Life cycle
        every stage: stateful operations have emitted what they hold, all
        in-flight work has finished, and every sink has been finalized.
    * - ``stats()``
-     - Per-stage ``StageStats``.
+     - Per-stage ``StageStats``. After ``close()``, the stats the stages had
+       when the pipeline was closed.
    * - ``close()``
-     - Release the backend's resources (on Ray, kill the actors).
+     - Release the backend's resources (on Ray, kill the actors). Closing a
+       closed pipeline does nothing; ``send()`` and ``flush()`` on it raise
+       ``RuntimeError``.
 
-A pipeline is a context manager. Leaving the ``with`` block without an
-exception calls ``flush()``. On an exception, the pipeline is not flushed,
-since flushing a failed pipeline would only raise again and hide the original
-error. Leaving the block does not close the pipeline:
+Close every pipeline: on Ray, its actors stay alive until it is closed, also
+after it is no longer referenced, since the stages hold references to each
+other. A pipeline is a context manager that does it. Leaving the ``with``
+block without an exception calls ``flush()`` and then ``close()``. On an
+exception, the pipeline is only released: flushing a failed pipeline would
+only raise again and hide the original error, and its stats are not
+available.
 
 .. code-block:: python
 
@@ -61,7 +67,9 @@ error. Leaving the block does not close the pipeline:
         for batch in batches:
             pipeline.send(particles=batch)
     print(pipeline.stats())
-    pipeline.close()
+
+``RayPipelineRunner.run()`` closes its pipeline the same way, so a runner
+runs once.
 
 Statistics
 ----------
@@ -120,8 +128,8 @@ When a stage fails, its exception is stored and re-raised by the next
 ``send()`` or ``flush()`` on the driver. The failing stage also aborts the
 sources of the pipeline, so the failure surfaces on the next ``send``
 instead of only at the end of the stream, even if the failed stage would never
-receive another item. After a failure, close the pipeline and compile a new
-one.
+receive another item. After a failure, close the pipeline (or leave its
+``with`` block) and compile a new one.
 
 Requirements on backends
 ------------------------

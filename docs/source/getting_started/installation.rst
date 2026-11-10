@@ -112,7 +112,6 @@ To check that the Ray backend can start, compile and run a trivial pipeline:
     out = Source("numbers").map(lambda x: x * 2).sink(print)
     with Pipeline.from_sink(out, backend=RayBackend()) as pipeline:
         pipeline.send(numbers=21)       # prints 42
-    pipeline.close()
 
 ``RayBackend`` starts a local Ray instance on first use. Ray needs local
 networking for its processes to find each other; in a sandbox or container

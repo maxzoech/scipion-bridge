@@ -1,3 +1,4 @@
+import contextlib
 import pytest
 import numpy as np
 import ray
@@ -49,19 +50,18 @@ def test_basic_stream():
     source = Source("particles")
     sink_node = source.sink(lambda x: ray.get(collector.append.remote(x)))
 
-    stream = Pipeline.from_sink(sink_node)
+    with contextlib.closing(Pipeline.from_sink(sink_node)) as stream:
+        for batch_idx in range(2):
+            particle_set = B.Set[Particle](capacity=batch_size)
+            for element_idx in range(batch_size):
+                pixels = np.zeros([256, 256], dtype=np.float32) + element_idx
+                particle_set[element_idx] = Particle(
+                    pixels=pixels, metadata=Metadata(foo=batch_idx)
+                )
 
-    for batch_idx in range(2):
-        particle_set = B.Set[Particle](capacity=batch_size)
-        for element_idx in range(batch_size):
-            pixels = np.zeros([256, 256], dtype=np.float32) + element_idx
-            particle_set[element_idx] = Particle(
-                pixels=pixels, metadata=Metadata(foo=batch_idx)
-            )
+            stream.send(particles=particle_set)
 
-        stream.send(particles=particle_set)
-
-    stream.flush()
+        stream.flush()
     received = ray.get(collector.get_items.remote())
     assert len(received) == 2
 

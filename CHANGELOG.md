@@ -35,6 +35,13 @@
   `backend.ray` no longer exports its actor classes, `RayResourceCoordinator`
   and the alias `configure_ray_container`.
 
+### Streaming
+- Leaving the `with` block of a `Pipeline` closes it after the flush, and
+  `RayPipelineRunner.run()` closes its pipeline: their Ray actors were never
+  terminated, since the stages hold references to each other, and a test
+  session accumulated over a hundred live actors. `stats()` remains available
+  after closing; `send()` and `flush()` on a closed pipeline raise.
+
 ### Tooling
 - Static tensor columns are read from their Arrow storage, so null cells of a
   sparse `Collection` load with pyarrow 26, whose `to_numpy_ndarray` rejects

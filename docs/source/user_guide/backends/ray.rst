@@ -430,7 +430,6 @@ The Ray backend also runs plain streaming graphs, without a protocol:
     backend = RayBackend(queue_size=4, buffer_size=8, profile=True)
     with Pipeline.from_sink(sink, backend=backend) as pipeline:
         pipeline.send(particles=batch)
-    pipeline.close()
 
 ``RayBackend`` accepts the buffering and profiling options of the runner, plus
 ``parameters`` (values served to ``Field.value`` in the workers),
