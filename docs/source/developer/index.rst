@@ -92,6 +92,8 @@ Where to start for a change
      - :doc:`typed_internals`
    * - Support for a new Scipion object type
      - :doc:`pyworkflow_backend`
+   * - Scheduling, provenance or checkpointing
+     - :doc:`roadmap`
    * - Tests and CI
      - :doc:`testing`
    * - Code style and submitting changes
@@ -116,4 +118,6 @@ Articles in this guide
   it streams data.
 * :doc:`testing`: the test suite, the Ray test cluster, and how to write fast
   tests.
+* :doc:`roadmap`: the plan for automatic scheduling, data provenance and
+  checkpointing: what is done, the design of the open steps, and their order.
 * :doc:`contributing`: conventions and the checklist for changes.

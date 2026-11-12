@@ -176,6 +176,7 @@ Which path to take
    developer/typed_internals
    developer/pyworkflow_backend
    developer/testing
+   developer/roadmap
    developer/contributing
 
 .. toctree::
