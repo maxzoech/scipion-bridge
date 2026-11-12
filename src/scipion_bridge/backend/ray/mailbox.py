@@ -146,6 +146,14 @@ class Mailbox:
         self._stats.fetch_s += time.perf_counter() - t_start
         return value
 
+    def close(self) -> None:
+        """Free the storage of the spill store, once the stage has stopped."""
+        match self._spill:
+            case None:
+                pass
+            case SpillPolicy(store=store):
+                store.close()
+
     def _has_room(self) -> bool:
         return self._buffer_size is None or len(self._entries) < self._buffer_size
 

@@ -3,6 +3,7 @@
 import asyncio
 import random
 import tempfile
+from pathlib import Path
 import threading
 import time
 
@@ -415,8 +416,18 @@ def test_items_overflowing_a_blocked_stage_are_spilled(tmp_path):
     pipeline.close()
 
 
-def test_close_removes_the_default_spill_directory(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+@ray.remote
+def _worker_tempdir():
+    return tempfile.gettempdir()
+
+
+def _spill_directories(pipeline):
+    """The spill directory of ``pipeline`` in the temporary directory of the workers."""
+    name = pipeline.compiled._spill_root.name
+    return list(Path(ray.get(_worker_tempdir.remote())).glob(f"{name}*"))
+
+
+def test_close_removes_the_default_spill_directory():
     collector = Collector.remote()
     gate = Gate.remote()
 
@@ -430,11 +441,12 @@ def test_close_removes_the_default_spill_directory(tmp_path, monkeypatch):
     ray.get(gate.open.remote())
     pipeline.flush()
     assert _stage(pipeline.stats(), "sink(CallbackSinkWriter)").spilled > 0
-    assert [path.name[:21] for path in tmp_path.iterdir()] == ["scipion_bridge_spill_"]
+    # Every stage spills into the temporary directory of its own node.
+    assert len(_spill_directories(pipeline)) == 1
 
     pipeline.close()
 
-    assert list(tmp_path.iterdir()) == []
+    assert _spill_directories(pipeline) == []
 
 
 def _timed_identity(x):

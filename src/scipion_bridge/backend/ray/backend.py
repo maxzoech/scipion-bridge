@@ -10,6 +10,7 @@ from typing import (
     Callable,
     Coroutine,
     Dict,
+    FrozenSet,
     List,
     Mapping,
     Optional,
@@ -280,6 +281,7 @@ class _PipelinedStage(abc.ABC):
             label: Label of the stage in stats and the profile.
         """
         self._stats = StageStats()
+        self._label = label
         self._recorder = make_recorder(config.profile, label)
         self._mailbox = Mailbox(
             self._stats,
@@ -300,6 +302,8 @@ class _PipelinedStage(abc.ABC):
         self._routes: List[_Route] = []
         self._maps: Dict[str, _MapRunner] = {}
         self._abort_targets: List[Any] = []
+        # The pools the stage runs maps of, told when FLUSH passes the stage.
+        self._releases: List[Any] = []
         self._num_inputs = 1
         self._pending_flushes: List[_Barrier] = []
         self._error: Optional[BaseException] = None
@@ -310,6 +314,7 @@ class _PipelinedStage(abc.ABC):
         routes: List[_Route],
         abort_targets: List[Any],
         num_inputs: int,
+        releases: Sequence[Any] = (),
     ) -> None:
         """Configure the stage and start its loops.
 
@@ -320,8 +325,12 @@ class _PipelinedStage(abc.ABC):
                 sources of the pipeline and, for a nested pipeline, the
                 sources of its parent.
             num_inputs: Number of upstream stages, each sending one FLUSH.
+            releases: Coordinators of the pools the stage runs maps of
+                (for a ``group_by``, also in its children), told when FLUSH
+                has passed the stage (``RayComputeGroup.flushed``).
         """
         self._routes = routes
+        self._releases = list(releases)
         completions = _Completions()
         self._maps = {
             route.label: _MapRunner(route, completions, self._recorder)
@@ -354,6 +363,10 @@ class _PipelinedStage(abc.ABC):
     async def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of this stage."""
         await self._recorder.flush()
+
+    async def close_spill(self) -> None:
+        """Remove the spilled items of the stage from the disk of its node."""
+        await asyncio.to_thread(self._mailbox.close)
 
     async def abort(self, failure: _Failure) -> None:
         """Fail this stage with an error raised elsewhere in the pipeline."""
@@ -557,6 +570,11 @@ class _PipelinedStage(abc.ABC):
         match routing:
             case None:
                 await asyncio.gather(*(m.release() for m in self._maps.values()))
+                # The calls of this stage are done: a pool whose other stages
+                # are done too releases its GPUs for the next phase.
+                await asyncio.gather(
+                    *(group.flushed.remote(self._label) for group in self._releases),
+                )
                 return [
                     (route.handle, route.port, FLUSH)
                     for route in _walk_routes(self._routes)
@@ -851,6 +869,9 @@ def _unused_share(
     )
 
 
+# Seconds ``close`` waits for the stages to remove their spilled items.
+_CLOSE_SPILL_TIMEOUT_S = 10.0
+
 # Seconds an executor of an ephemeral protocol stays alive without calls,
 # unless the backend sets it otherwise.
 DEFAULT_EPHEMERAL_IDLE_S = 10.0
@@ -961,9 +982,24 @@ class RayComputeGroup:
         group: str,
         profile: Optional[ProfileConfig],
         idle_s: Optional[float] = None,
+        blockers: Sequence[Any] = (),
     ) -> None:
+        """
+        Args:
+            members: The maps of the group, each running one call at a time
+                on an executor.
+            blockers: The coordinators of the pools of earlier phases: an
+                executor starts once they have released their GPUs.
+        """
         self._options = options
         self._members = members
+        self._blockers = list(blockers)
+        # The stages that run maps of the group, which release the pool once
+        # all of them have passed FLUSH; and those that have, this stream.
+        self._hosts: FrozenSet[str] = frozenset()
+        self._flushed: Set[str] = set()
+        # Set once the pool released its executors in the current stream.
+        self._released = asyncio.Event()
         self._replicas = replicas
         self._functions = functions
         self._idle_s = idle_s
@@ -1068,6 +1104,12 @@ class RayComputeGroup:
         task.add_done_callback(self._tasks.discard)
 
     async def _start_executor(self, generation: int) -> None:
+        # A pool of a later phase waits for the GPUs of the earlier ones.
+        if self._blockers:
+            with self._recorder.span("wait_for_phase", "group", level=logging.INFO):
+                await asyncio.gather(
+                    *(b.wait_released.remote() for b in self._blockers)
+                )
         self._recorder.instant("executor_create", "group")
         executor: Any = RayComputeExecutor.options(
             max_concurrency=self._members * _EXECUTOR_CALLS_IN_FLIGHT,
@@ -1144,8 +1186,36 @@ class RayComputeGroup:
             "idle": sorted(self._idle_since),
         }
 
+    async def set_hosts(self, labels: Sequence[str]) -> None:
+        """Set the stages running maps of the group (see ``flushed``)."""
+        self._hosts = frozenset(labels)
+
+    async def flushed(self, label: str) -> None:
+        """Note that FLUSH has passed the stage ``label``, after its last call.
+
+        Once it has passed every stage running maps of the group, the pool
+        releases its executors, so that the pools of a later phase can take
+        the GPUs while the stream drains downstream.
+        """
+        self._flushed.add(label)
+        if self._hosts <= self._flushed and not self._released.is_set():
+            await self._release()
+            self._released.set()
+
+    async def wait_released(self) -> None:
+        """Return once the pool released its executors in the current stream."""
+        await self._released.wait()
+
     async def release_all(self) -> None:
-        """Kill the executors of the pool once its pipeline has flushed."""
+        """Kill the executors of the pool once its pipeline has flushed.
+
+        Ends the stream for the gates: the next one starts with phase 0.
+        """
+        await self._release()
+        self._flushed.clear()
+        self._released.clear()
+
+    async def _release(self) -> None:
         async with self._changed:
             self._generation += 1
             self._changed.notify_all()
@@ -1718,6 +1788,13 @@ class RayDemuxActor(_PipelinedStage):
         )
         return {label: stage for child in stats for label, stage in child.items()}
 
+    async def close_spill(self) -> None:
+        """Remove the spilled items of the router and of its children."""
+        await asyncio.gather(
+            super().close_spill(),
+            *(ref for child in self._started() for ref in child.close_spill()),
+        )
+
     async def flush_profile(self) -> None:
         """Wait until the collector wrote the events of the router and its children."""
         await asyncio.gather(
@@ -1824,6 +1901,7 @@ class RayCompiledPipeline(CompiledPipeline):
         owns_profile: bool = False,
         functions: Optional[ray.ObjectRef] = None,
         placement: Optional[_Placement] = None,
+        own_actor_maps: FrozenSet[str] = frozenset(),
     ):
         """
         Args:
@@ -1846,6 +1924,9 @@ class RayCompiledPipeline(CompiledPipeline):
                 the object store while the pipeline runs.
             placement: The plan of the pools the pipeline owns, for its
                 report.
+            own_actor_maps: The labels of the maps that run on an actor of
+                their own (merging maps, maps behind a phase boundary), whose
+                stats include the buffering of the actor.
         """
         self._sources = sources
         self._stages = stages
@@ -1856,6 +1937,7 @@ class RayCompiledPipeline(CompiledPipeline):
         self._owns_profile = owns_profile
         self._functions = functions
         self._placement = placement
+        self._own_actor_maps = own_actor_maps
         self._recorder = make_recorder(profile, "driver")
 
     def layers(self, report: PipelineReport) -> Tuple[Layer, ...]:
@@ -1937,7 +2019,11 @@ class RayCompiledPipeline(CompiledPipeline):
         children = ray.get([demux.children_stats.remote() for demux in self._demuxes])
         return {
             **{
-                label: map_stats[label] if label in map_stats else stage_stats[host]
+                label: _stats_of(
+                    map_stats.get(label),
+                    stage_stats[host],
+                    own_actor=label in self._own_actor_maps,
+                )
                 for label, (host, _) in self._stages.items()
             },
             **{label: stage for child in children for label, stage in child.items()},
@@ -1948,13 +2034,20 @@ class RayCompiledPipeline(CompiledPipeline):
 
         The children of ``group_by`` routers terminate with their router, and
         the executors of compute groups with their coordinator. A profiled
-        pipeline completes its trace first.
+        pipeline completes its trace first, and every stage removes its
+        spilled items from the disk of its node.
         """
         match (self._profile, self._owns_profile):
             case (ProfileConfig() as profile, True):
                 self._close_profile(profile)
             case _:
                 pass
+
+        try:
+            ray.get(self.close_spill(), timeout=_CLOSE_SPILL_TIMEOUT_S)
+        except Exception:
+            # A failed stage may be gone; its node removes its temporary files.
+            pass
 
         hosts = {node: actor for node, actor in self._stages.values()}
         for actor in [*hosts.values(), *self._groups]:
@@ -1972,6 +2065,11 @@ class RayCompiledPipeline(CompiledPipeline):
 
         # Without a reference, Ray frees the function table.
         self._functions = None
+
+    def close_spill(self) -> List[ray.ObjectRef]:
+        """Make every stage remove its spilled items; the calls to await."""
+        hosts = {actor for _, actor in self._stages.values()}
+        return [actor.close_spill.remote() for actor in hosts]
 
     def _close_profile(self, profile: ProfileConfig) -> None:
         """Write the remaining events and complete the trace file."""
@@ -2236,15 +2334,40 @@ class RayBackend(StreamingBackendProvider):
             spill=spill,
             profile=profile,
         )
+        # The stages behind a phase boundary have an actor of their own, whose
+        # mailbox takes the backlog of the earlier phases without bound: the
+        # stages before it never wait for it, so FLUSH reaches their pools.
+        boundaries = _boundary_targets(all_nodes, labels, placement)
+        match (bool(boundaries), spill):
+            case (False, _) | (_, _SpillConfig()):
+                boundary_spill = spill
+            case _:
+                logger.warning(
+                    "Spilling is off, but the stages %s wait for an earlier "
+                    "phase: they spill their backlog anyway.",
+                    sorted(labels[node] for node in boundaries),
+                )
+                boundary_spill, spill_root = _default_spill(DEFAULT_SPILL_THRESHOLD)
+        boundary_config = dataclasses.replace(
+            config,
+            buffer_size=None,
+            spill=boundary_spill,
+        )
         actor_map: Dict[IROp, Any] = {
             node: actor_cls.options(
                 name=f"{pipeline_id}:{labels[node]}",
                 runtime_env={"env_vars": numpy_hugepage_env()},
             ).remote(**kwargs)
             for node in all_nodes
-            if not _is_hosted(node)
+            if not _is_hosted(node, boundaries)
             for actor_cls, kwargs in [
-                self._stage_actor(node, name, labels[node], config, pools),
+                self._stage_actor(
+                    node,
+                    name,
+                    labels[node],
+                    boundary_config if node in boundaries else config,
+                    pools,
+                ),
             ]
         }
 
@@ -2258,21 +2381,40 @@ class RayBackend(StreamingBackendProvider):
         # position among the upstream stages of the downstream stage; maps in
         # between are applied on the way. A failing stage aborts the sources
         # and the further abort targets.
-        builder = _RouteBuilder(actor_map, labels, pools, claims, Ref(functions))
+        builder = _RouteBuilder(
+            actor_map, labels, pools, claims, Ref(functions), boundaries
+        )
         abort_handles = [*compiled_sources.values(), *abort_targets]
+        # The stages running maps of a pool tell it when FLUSH has passed
+        # them; the children of a group_by count as their router.
+        hosts = _pool_hosts(all_nodes, labels, claims, boundaries) if owns_pools else {}
         connected = [
-            actor.connect.remote(
-                builder.stage_routes(node),
-                abort_handles,
-                max(1, len(node.upstream)),
-            )
-            for node, actor in actor_map.items()
+            *(
+                actor.connect.remote(
+                    builder.stage_routes(node),
+                    abort_handles,
+                    max(1, len(node.upstream)),
+                    [
+                        pools[group].coordinator
+                        for group, stages in hosts.items()
+                        if labels[node] in stages
+                    ],
+                )
+                for node, actor in actor_map.items()
+            ),
+            *(
+                pools[group].coordinator.set_hosts.remote(sorted(stages))
+                for group, stages in hosts.items()
+            ),
         ]
 
         pipeline = RayCompiledPipeline(
             sources=compiled_sources,
             stages={
-                labels[node]: (_host_of(node), actor_map[_host_of(node)])
+                labels[node]: (
+                    _host_of(node, boundaries),
+                    actor_map[_host_of(node, boundaries)],
+                )
                 for node in all_nodes
             },
             demuxes=[
@@ -2287,6 +2429,9 @@ class RayBackend(StreamingBackendProvider):
             owns_profile=owns_profile,
             functions=functions,
             placement=placement,
+            own_actor_maps=frozenset(
+                labels[node] for node in actor_map if isinstance(node, IRMap)
+            ),
         )
         return pipeline, connected
 
@@ -2312,11 +2457,8 @@ class RayBackend(StreamingBackendProvider):
             case (None, _):
                 return None, None
             case (threshold, None):
-                # Created by the first spilled item: most pipelines never spill.
-                root = Path(tempfile.gettempdir()) / (
-                    f"scipion_bridge_spill_{uuid.uuid4().hex}"
-                )
-                return _SpillConfig(threshold, pickle_spill_store(root)), root
+                spill, root = _default_spill(threshold)
+                return spill, root
             case (threshold, store):
                 return _SpillConfig(threshold, store), None
 
@@ -2481,31 +2623,42 @@ class RayBackend(StreamingBackendProvider):
             _cluster_node_gpus(),
             ray.cluster_resources().get("CPU", 0),
         )
-        _check_one_phase(plan, demands)
-        pools = {
-            group: _Pool(
-                coordinator=RayComputeGroup.options(
-                    runtime_env={"env_vars": numpy_hugepage_env()},
-                ).remote(
-                    options,
-                    len(stages[group]),
-                    plan.groups[group].replicas,
-                    functions,
-                    self.parameters,
-                    group,
-                    profile,
-                    idle_s=None if demands[group].holds else self.ephemeral_idle_s,
-                ),
-                replicas=plan.groups[group].replicas,
-                ephemeral=not demands[group].holds,
-                declared=demands[group].replicas is not None,
+        # The pools of a phase start executors once the pools of the earlier
+        # phases have released their GPUs.
+        pools: Dict[str, _Pool] = {}
+        for phase in plan.phases:
+            blockers = [pool.coordinator for pool in pools.values()]
+            pools.update(
+                {
+                    group: _Pool(
+                        coordinator=RayComputeGroup.options(
+                            runtime_env={"env_vars": numpy_hugepage_env()},
+                        ).remote(
+                            options_of[group],
+                            len(stages[group]),
+                            plan.groups[group].replicas,
+                            functions,
+                            self.parameters,
+                            group,
+                            profile,
+                            idle_s=(
+                                None if demands[group].holds else self.ephemeral_idle_s
+                            ),
+                            blockers=blockers,
+                        ),
+                        replicas=plan.groups[group].replicas,
+                        ephemeral=not demands[group].holds,
+                        declared=demands[group].replicas is not None,
+                    )
+                    for group in phase
+                },
             )
-            for group, options in options_of.items()
-        }
+        # Long-running pools of the first phase prepare their executors while
+        # the pipeline is created; those of later phases on their first call.
         # A failed warm-up surfaces on the first lease, which prepares again.
-        for group, pool in pools.items():
+        for group in plan.phases[0] if plan.phases else ():
             if demands[group].holds:
-                pool.coordinator.start.remote()
+                pools[group].coordinator.start.remote()
         return pools, _Placement(graph, plan, demands)
 
 
@@ -2526,21 +2679,6 @@ def _cluster_node_gpus() -> List[int]:
     return [
         int(node["Resources"].get("GPU", 0)) for node in ray.nodes() if node["Alive"]
     ]
-
-
-def _check_one_phase(plan: Plan, demands: Mapping[str, GroupDemand]) -> None:
-    """Raise if the pools need phases, which the backend cannot run yet."""
-    match plan.phases:
-        case () | (_,):
-            pass
-        case phases:
-            later = sorted({demands[g].name for phase in phases[1:] for g in phase})
-            raise ValueError(
-                "The protocols do not fit the cluster at once: the "
-                f"long-running protocols hold their GPUs, so {', '.join(later)} "
-                "would have to wait for them to flush, which this backend "
-                "cannot run yet. Reduce their replicas or claims.",
-            )
 
 
 @dataclass(frozen=True)
@@ -2616,6 +2754,8 @@ class _RouteBuilder:
     pools: Mapping[str, _Pool]
     claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]]
     functions: Ref
+    # The maps with an actor of their own, though they have a single input.
+    own_actors: FrozenSet[IROp] = frozenset()
 
     def stage_routes(self, node: IROp) -> List[_Route]:
         """Routes out of the actor of ``node``.
@@ -2655,7 +2795,7 @@ class _RouteBuilder:
         # Every stage feeds a downstream stage on the port given by its
         # position among the upstream stages of the downstream stage.
         match downstream:
-            case IRMap() if _is_hosted(downstream):
+            case IRMap() if _is_hosted(downstream, self.own_actors):
                 return self._apply(downstream)
             case _:
                 return _Push(
@@ -2664,26 +2804,127 @@ class _RouteBuilder:
                 )
 
 
-def _is_hosted(node: IROp) -> bool:
-    """Whether ``node`` runs on the actor of another stage (a single-input map)."""
+def _stats_of(
+    map_stats: Optional[StageStats],
+    stage_stats: StageStats,
+    own_actor: bool,
+) -> StageStats:
+    """The stats of a stage: of its actor, or of the calls of a map.
+
+    A map on an actor of its own also reports how items waited for the
+    actor (buffering and spilling), which its calls do not see.
+    """
+    match (map_stats, own_actor):
+        case (None, _):
+            return stage_stats
+        case (StageStats() as calls, False):
+            return calls
+        case (StageStats() as calls, True):
+            return dataclasses.replace(
+                calls,
+                buffered_peak=stage_stats.buffered_peak,
+                spilled=stage_stats.spilled,
+                spill_s=stage_stats.spill_s,
+                fetch_s=stage_stats.fetch_s,
+            )
+
+
+def _is_hosted(node: IROp, own_actors: FrozenSet[IROp]) -> bool:
+    """Whether ``node`` runs on the actor of another stage.
+
+    Maps with a single input do, unless they have an actor of their own
+    (``own_actors``, the stages behind a phase boundary).
+    """
     match node:
-        case IRMap(upstream=[_]):
+        case IRMap(upstream=[_]) if node not in own_actors:
             return True
         case _:
             return False
 
 
-def _host_of(node: IROp) -> IROp:
+def _host_of(node: IROp, own_actors: FrozenSet[IROp]) -> IROp:
     """The stage whose actor runs ``node``.
 
     A map with a single input runs on the actor of the nearest upstream
-    stage; a map merging several inputs has an actor of its own.
+    stage; a map merging several inputs, or in ``own_actors``, has an actor
+    of its own.
     """
     match node:
-        case IRMap(upstream=[upstream]):
-            return _host_of(upstream)
+        case IRMap(upstream=[upstream]) if node not in own_actors:
+            return _host_of(upstream, own_actors)
         case _:
             return node
+
+
+def _default_spill(threshold: int) -> Tuple[_SpillConfig, Path]:
+    """Spilling into the temporary directory of the node of every stage, with
+    the directory of the driver's node, removed by the pipeline.
+
+    Every stage removes its directory when it closes; most pipelines never
+    spill, and the directories are created by the first spilled item.
+    """
+    root = Path(f"scipion_bridge_spill_{uuid.uuid4().hex}")
+    return (
+        _SpillConfig(threshold, pickle_spill_store(root)),
+        Path(tempfile.gettempdir()) / root,
+    )
+
+
+def _boundary_targets(
+    nodes: Sequence[IROp],
+    labels: Mapping[IROp, str],
+    placement: Optional[_Placement],
+) -> FrozenSet[IROp]:
+    """The stages that the plan puts behind a phase boundary."""
+    match placement:
+        case None:
+            return frozenset()
+        case _Placement(plan=plan):
+            targets = {target for _, target in plan.boundaries}
+            return frozenset(node for node in nodes if labels[node] in targets)
+
+
+def _pooled_group(
+    node: IRMap,
+    claims: Mapping[Optional[ComputeAssignment], Mapping[str, Any]],
+) -> Optional[str]:
+    """The group of a map whose calls run on a pool, else None."""
+    match node.compute:
+        case ComputeAssignment(group=group) as compute if _pooled(
+            compute, claims[compute]
+        ):
+            return group
+        case _:
+            return None
+
+
+def _pool_hosts(
+    nodes: Sequence[IROp],
+    labels: Mapping[IROp, str],
+    claims: Mapping[Optional[ComputeAssignment], Mapping[str, Any]],
+    own_actors: FrozenSet[IROp],
+) -> Dict[str, Set[str]]:
+    """The labels of the stage actors running maps of every pool.
+
+    A map runs on its host (``_host_of``); the maps in the template of a
+    ``group_by`` run in its children, which flush before their router.
+    """
+    hosts: Dict[str, Set[str]] = {}
+    for node in nodes:
+        match node:
+            case IRMap():
+                stages = [(node, labels[_host_of(node, own_actors)])]
+            case IRDemux(template=IROp() as template):
+                stages = [(inner, labels[node]) for inner in all_maps([template])]
+            case _:
+                stages = []
+        for inner, stage in stages:
+            match _pooled_group(inner, claims):
+                case None:
+                    pass
+                case group:
+                    hosts.setdefault(group, set()).add(stage)
+    return hosts
 
 
 def _needs_gpu_memory(node: IROp) -> bool:

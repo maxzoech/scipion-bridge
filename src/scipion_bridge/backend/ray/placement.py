@@ -812,9 +812,12 @@ def placement_layer(
             case _:
                 pass
 
+    for source, target in plan.boundaries:
+        nodes[target]["waits_for"] = f"the FLUSH of phase {plan.node_phases[source]}"
     waits = tuple(
-        f"{target} waits for the FLUSH of the stages before it (phase "
-        f"{plan.node_phases[source]}); its items wait on disk until then."
+        f"{target} starts once the stages of phase {plan.node_phases[source]} "
+        "have flushed, at the end of the stream; its items wait on disk until "
+        "then."
         for source, target in sorted(plan.boundaries)
     )
     return Layer(

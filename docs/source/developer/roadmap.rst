@@ -91,7 +91,7 @@ Status
      - 1, 1b
    * - 3
      - Placement planner and placement groups
-     - In progress: planner and reports done; phases and placement groups open
+     - In progress: planner, reports and phases done; placement groups open
      - 2
    * - 4
      - Provenance: key paths, ``.astype``, ``.apply``, storage domains
@@ -172,12 +172,15 @@ Placement planner (step 3)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 **Done:** the planner (``plan_placement``) and its ``placement`` layer in
-pipeline reports (``--explain``, ``--explain-gpus``). Pools get the replicas
-it plans; anti-affinity is planned but not enforced yet, and pipelines whose
-long-running protocols need several phases do not compile yet. Open, in this
-order: phases (per-pool release at FLUSH, gated starts of later phases,
-unbounded spilling at phase boundaries), then placement groups that enforce
-the plan.
+pipeline reports (``--explain``, ``--explain-gpus``); pools get the replicas
+it plans. Phases run: pools release their GPUs when FLUSH has passed their
+own stages, later phases wait for the earlier ones (gates), and the stage
+behind a boundary spills without bound. Phase boundaries are where
+checkpointing will put its barriers (step 6), and what provenance makes
+cheap to spill (step 4). Open: placement groups that enforce the plan
+(anti-affinity is planned but Ray still places the processes), which also
+lets the gates wait only for pools on the same GPUs; phases inside a
+``group_by`` template.
 
 
 A module ``backend/ray/placement.py`` of pure functions, testable in-process.

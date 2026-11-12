@@ -1,5 +1,8 @@
 """Tests for the spill stores of the streaming pipeline (in-process)."""
 
+import tempfile
+from pathlib import Path
+
 import numpy as np
 
 import scipion_bridge as B
@@ -54,3 +57,51 @@ def test_factory_creates_a_directory_per_stage(tmp_path):
         "0_source_x_",
         "1_map__lambda__",
     ]
+
+
+def test_close_removes_the_directory(tmp_path):
+    store = PickleSpillStore(tmp_path / "stage")
+    store.put(1)
+
+    store.close()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_closing_a_store_that_never_spilled_creates_nothing(tmp_path):
+    PickleSpillStore(tmp_path / "stage").close()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_relative_directory_lies_in_the_temporary_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    store = PickleSpillStore(Path("pipeline") / "stage")
+
+    store.put(1)
+
+    assert store.path == tmp_path / "pipeline" / "stage"
+    assert len(list(store.path.iterdir())) == 1
+
+
+def test_the_last_store_of_a_pipeline_removes_its_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    factory = pickle_spill_store(Path("pipeline"))
+    first, second = factory("0:source(x)"), factory("1:sink(y)")
+    first.put(1)
+    second.put(2)
+
+    first.close()
+    assert [path.name for path in tmp_path.iterdir()] == ["pipeline"]
+
+    second.close()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_absolute_directory_keeps_its_parent(tmp_path):
+    store = pickle_spill_store(tmp_path)("0:source(x)")
+    store.put(1)
+
+    store.close()
+
+    assert tmp_path.is_dir()

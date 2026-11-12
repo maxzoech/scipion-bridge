@@ -166,14 +166,21 @@ has while the lease waits.
 built the protocol's process-scope resources (``prepare``): the protocol's
 ``_prepare_process`` travels in the ``ComputeAssignment`` to the function
 table, by compute group, and not with the routes, which every stage receives.
-When the pipeline is compiled, the coordinators of long-running protocols
-start their whole pools (``start``), in parallel to creating the stages; a
-failed warm-up kills the executor and surfaces on the first lease.
+When the pipeline is compiled, the coordinators of the long-running protocols
+of the first phase start their whole pools (``start``), in parallel to
+creating the stages; a failed warm-up kills the executor and surfaces on the
+first lease. Pools of later phases start executors on their first lease.
 
-**Release.** The top-level pipeline owns the pools. After its FLUSH has passed
-every stage, the children of ``group_by`` included, ``flush`` releases them
-(``release_all``): their executors are killed, and items arriving after a
-flush start new ones. Maps return their leases at FLUSH. A lease that
+**Release.** The top-level pipeline owns the pools. Every pool knows its
+*hosts* (``set_hosts``): the top-level stage actors running its maps, and the
+``group_by`` routers whose template does. When FLUSH passes a host, the host
+returns the leases of its maps and tells the pool (``flushed``) before it
+forwards FLUSH; once all hosts have, the pool kills its executors and sets
+``_released``. A pool thus frees its GPUs while the stream still drains
+downstream, which the phases below need. After its FLUSH has passed every
+stage, ``flush`` releases all pools again (``release_all``, a no-op for those
+already released), which also resets them for the next stream; items arriving
+after a flush start new executors. Maps return their leases at FLUSH. A lease that
 outlives a FLUSH returns ``None``, and an executor that finishes starting
 after its pool was released is killed (a generation counter). Ephemeral pools
 also kill executors that have had no lease for ``ephemeral_idle_s``; their
@@ -181,11 +188,29 @@ maps return their leases after ``_LEASE_LINGER_S`` without calls, also when
 a lease arrives late. ``describe`` reports the state of a pool without taking
 its lock.
 
-**Fit.** ``_check_pools_fit`` rejects, at compile time, long-running pools
-that do not fit the cluster at once: their executors hold their resources
-until FLUSH, so an executor that fits only after another pool released its
-GPUs would wait forever. Ephemeral pools share, by default, the GPUs the
-long-running pools leave in equal parts (``_pool_replicas``).
+**Placement.** The placement planner (``placement.py``, pure functions)
+decides the replicas of every pool and its phase; see
+:doc:`/user_guide/protocols/compute`. ``_compute_groups`` creates the pools
+from the plan, phase by phase.
+
+**Phases.** Long-running pools hold their GPUs until FLUSH, so pools that do
+not fit the cluster at once run one after another. Three mechanisms make a
+later phase wait instead of deadlocking:
+
+* *Release per pool*, above: an earlier pool frees its GPUs when FLUSH has
+  passed its own stages, not the whole pipeline.
+* *Gates*: the coordinator of a later pool has the coordinators of all
+  earlier phases as ``blockers``. ``_start_executor`` waits for their
+  ``wait_released`` before it creates an executor, so a later pool never
+  takes a GPU an earlier one still needs, e.g. to restart an executor after
+  an idle release.
+* *Boundaries*: the stage behind an edge into a later phase
+  (``Plan.boundaries``) has an actor of its own, even a single-input map
+  (``_is_hosted``, ``_host_of``), and a mailbox without bound that spills
+  (``boundary_config`` in ``_instantiate``). The stages of the earlier
+  phase never wait for it, so the driver can send FLUSH. Within a phase,
+  backpressure stays bounded. A ``group_by`` template is never split into
+  phases.
 
 Function tables
 ^^^^^^^^^^^^^^^

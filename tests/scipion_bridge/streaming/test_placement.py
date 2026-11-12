@@ -395,7 +395,8 @@ def test_the_layer_shows_phases_boundaries_and_gpus():
         "GPUs in phase 0: P0",
         "GPUs in phase 1: P2",
     ]
-    assert any("waits for the FLUSH" in warning for warning in report.warnings)
+    assert layer.nodes["3:m2"]["waits_for"] == "the FLUSH of phase 0"
+    assert any("wait on disk" in warning for warning in report.warnings)
 
 
 def test_explain_plans_without_ray():

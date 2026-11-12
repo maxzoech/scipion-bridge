@@ -15,9 +15,12 @@ out of the object store altogether.
 from __future__ import annotations
 
 import abc
+import contextlib
 import functools
 import pickle
 import re
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Generic, Hashable, TypeVar
@@ -47,6 +50,12 @@ class SpillStore(abc.ABC, Generic[H]):
         """Free the storage of a consumed item."""
         ...
 
+    def close(self) -> None:
+        """Free all storage of the store, once its stage has stopped.
+
+        Called in the process of the stage, on the node of its storage.
+        """
+
 
 # Creates the store of a stage from the label of the stage.
 SpillStoreFactory = Callable[[str], SpillStore[Any]]
@@ -55,29 +64,58 @@ SpillStoreFactory = Callable[[str], SpillStore[Any]]
 class PickleSpillStore(SpillStore[str]):
     """Pickles every item into a file of its own inside ``directory``.
 
-    The directory is created on the first item, on the node of the stage.
+    The directory is created on the first item, on the node of the stage. A
+    relative ``directory`` lies in the temporary directory of the process
+    using the store, so every stage spills on its own node; ``close``
+    removes it, and its first component once empty.
     """
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
+    @property
+    def path(self) -> Path:
+        """The directory, resolved in the calling process."""
+        match self.directory.is_absolute():
+            case True:
+                return self.directory
+            case False:
+                return Path(tempfile.gettempdir()) / self.directory
+
     def put(self, item: Any) -> str:
-        self.directory.mkdir(parents=True, exist_ok=True)
+        self.path.mkdir(parents=True, exist_ok=True)
         handle = f"{uuid.uuid4().hex}.pkl"
-        with (self.directory / handle).open("wb") as file:
+        with (self.path / handle).open("wb") as file:
             pickle.dump(item, file, protocol=pickle.HIGHEST_PROTOCOL)
         return handle
 
     def get(self, handle: str) -> Any:
-        with (self.directory / handle).open("rb") as file:
+        with (self.path / handle).open("rb") as file:
             return pickle.load(file)
 
     def discard(self, handle: str) -> None:
-        (self.directory / handle).unlink()
+        (self.path / handle).unlink()
+
+    def close(self) -> None:
+        # A store that never spilled has no directory.
+        shutil.rmtree(self.path, ignore_errors=True)
+        match self.directory.is_absolute():
+            case True:
+                pass
+            case False:
+                # The directory of the pipeline on this node, shared by its
+                # stages: the last one to close removes it.
+                root = Path(tempfile.gettempdir()) / self.directory.parts[0]
+                with contextlib.suppress(OSError):
+                    root.rmdir()
 
 
 def pickle_spill_store(root: Path) -> SpillStoreFactory:
-    """Factory of ``PickleSpillStore``s writing into a directory per stage under ``root``."""
+    """Factory of ``PickleSpillStore``s writing into a directory per stage under ``root``.
+
+    A relative ``root`` lies in the temporary directory of every stage's
+    process, on its own node.
+    """
     return functools.partial(_pickle_store_in, root)
 
 

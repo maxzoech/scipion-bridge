@@ -412,20 +412,182 @@ def test_the_report_of_a_pipeline_shows_the_placement_of_its_pools():
 
     pools = report.layer("placement").groups
     # Long-running protocols get GPUs of their own.
-    assert sorted(pool["gpus"] for pool in pools.values()) == [
+    assert {pool["gpus"] for pool in pools.values()} == {
         ("node 0 GPU 0",),
         ("node 0 GPU 1",),
-    ]
+    }
 
 
-def test_protocols_that_need_phases_do_not_compile_yet():
-    writer = CallbackSinkWriter(lambda item: None)
-    (sink,) = lower(
-        [(AllGpusFirst() | AllGpusSecond()).get_pipeline().write_to(writer)]
+def _group_events(trace, protocol):
+    """The (time, name) of the events of the pool of ``protocol`` in ``trace``."""
+    records = json.loads(trace.read_text())
+    processes = {
+        r["pid"]: r["args"]["name"]
+        for r in records
+        if r["ph"] == "M" and r["name"] == "process_name"
+    }
+    label = f"group({protocol.protocol_id})"
+    return sorted(
+        (r["ts"], r["name"])
+        for r in records
+        if r["ph"] != "M" and processes[r["pid"]].startswith(label)
     )
 
-    with pytest.raises(ValueError, match="AllGpusSecond would have to wait"):
-        RayBackend(init_ray=False).compile([sink])
+
+def _phased(first, second, **backend_options):
+    """The pipeline of ``first | second`` and the list its results go to."""
+    collector = Collector.remote()
+    writer = CallbackSinkWriter(lambda item: ray.get(collector.append.remote(item)))
+    sink = (first | second).get_pipeline().write_to(writer)
+    backend = RayBackend(init_ray=False, **backend_options)
+    return Pipeline.from_sink(sink, backend=backend), collector
+
+
+def test_protocols_that_do_not_fit_at_once_run_in_phases(tmp_path):
+    first, second = AllGpusFirst(), AllGpusSecond()
+    trace = tmp_path / "trace.json"
+    # Few items in flight, so that the backlog reaches the mailbox and spills.
+    pipeline, collector = _phased(
+        first, second, buffer_size=2, max_in_flight=2, profile=trace
+    )
+
+    with pipeline:
+        for item in range(20):
+            pipeline.send(items=item)
+    stats = pipeline.stats()
+    ((_, boundary),) = pipeline.report().layer("placement").edges
+
+    # The second protocol waited for the GPUs of the first, its items on disk.
+    results = ray.get(collector.get.remote())
+    assert [result["result"] for result in results] == list(range(20))
+    killed = [t for t, name in _group_events(trace, first) if name == "executor_kill"]
+    created = [
+        t for t, name in _group_events(trace, second) if name == "executor_create"
+    ]
+    assert killed and created and max(killed) <= min(created)
+    assert stats[boundary].spilled > 0
+    # The stages before it keep their bounded buffers (stats are in order).
+    order = list(stats)
+    assert all(
+        stats[label].buffered_peak <= 2 for label in order[: order.index(boundary)]
+    )
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
+def test_phases_start_over_with_every_stream():
+    pipeline, collector = _phased(AllGpusFirst(), AllGpusSecond())
+
+    with pipeline:
+        for stream in range(2):
+            for item in range(3):
+                pipeline.send(items=10 * stream + item)
+            pipeline.flush()
+
+    results = ray.get(collector.get.remote())
+    assert [result["result"] for result in results] == [0, 1, 2, 10, 11, 12]
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
+@B.resources(gpus=1)
+class EphemeralOneGpu(HalfGpuSecond):
+    pass
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=CLUSTER_GPUS)
+class AllReplicasSecond(HalfGpuSecond):
+    pass
+
+
+@B.resources(gpus=1)
+class EphemeralFirst(HalfGpuFirst):
+    pass
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        # The ephemeral protocol waits for the GPUs of the long-running one.
+        (AllGpusFirst, EphemeralOneGpu),
+        # The long-running protocol does not take the GPU of the ephemeral
+        # one feeding it: it waits for its FLUSH.
+        (EphemeralFirst, AllReplicasSecond),
+    ],
+)
+def test_ephemeral_protocols_run_in_phases(first, second):
+    pipeline, collector = _phased(first(), second())
+
+    with pipeline:
+        for item in range(4):
+            pipeline.send(items=item)
+
+    results = ray.get(collector.get.remote())
+    assert [result["result"] for result in results] == list(range(4))
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
+def _fail_on_two(item):
+    if item == 2:
+        raise RuntimeError("phase 1 failed")
+    return {"result": item}
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class FailingSecond(HalfGpuSecond):
+    def steps(self):
+        return self.out.map(_fail_on_two)
+
+
+def _group_parity(item):
+    return item % 2
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class PerKeySecond(B.Protocol):
+    out: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"result": int}
+
+    def steps(self):
+        return (
+            self.out.group_by(_group_parity, lambda stream: stream.map(_increment))
+            .unkey()
+            .map(_as_result)
+        )
+
+
+def _increment(item):
+    return item + 1
+
+
+def _as_result(keyed):
+    return {"result": keyed.value}
+
+
+def test_a_group_by_runs_in_a_later_phase():
+    pipeline, collector = _phased(AllGpusFirst(), PerKeySecond())
+
+    with pipeline:
+        for item in range(6):
+            pipeline.send(items=item)
+    report = pipeline.report()
+
+    results = ray.get(collector.get.remote())
+    assert sorted(result["result"] for result in results) == list(range(1, 7))
+    # The boundary is the edge into the group_by: its template has no phases.
+    ((_, boundary),) = report.layer("placement").edges
+    assert boundary.endswith(":group_by")
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
+def test_a_failure_in_a_later_phase_reaches_the_driver():
+    pipeline, _ = _phased(AllGpusFirst(), FailingSecond())
+
+    with pytest.raises(Exception, match="phase 1 failed"):
+        with pipeline:
+            for item in range(4):
+                pipeline.send(items=item)
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
 
 
 def _restore_slowly(value):

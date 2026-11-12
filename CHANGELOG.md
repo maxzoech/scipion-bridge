@@ -88,8 +88,18 @@
 - `@B.resources(..., replicas="auto")` sizes a long-running pool to the GPUs
   the other long-running protocols leave.
 - Compiling fails for claims no cluster state satisfies, now also for a claim
-  above one GPU that is not a whole number, and when an ephemeral protocol
-  with GPUs has none left beside the long-running ones (it waited forever).
+  above one GPU that is not a whole number.
+- Protocols that do not fit the cluster at once run in phases: a later phase
+  starts once the pools of the earlier ones have flushed, and its items wait
+  on disk in front of it, while backpressure stays bounded within a phase.
+  Long-running pools release their GPUs as soon as FLUSH has passed their
+  own stages. Before, such pipelines failed to compile, or hung when an
+  ephemeral protocol found no GPU beside the long-running ones.
+- A map behind a phase boundary runs on an actor of its own; the stats of
+  such maps (and of merging maps) include the buffering of their actor.
+- Every stage spills into the temporary directory of its own node and
+  removes it when the pipeline closes; before, spill directories on other
+  nodes than the driver's were left behind.
 
 ### Tooling
 - Static tensor columns are read from their Arrow storage, so null cells of a

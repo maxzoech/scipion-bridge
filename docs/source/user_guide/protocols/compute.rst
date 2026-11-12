@@ -91,13 +91,30 @@ every protocol run:
 * Then ephemeral protocols and ``replicas="auto"`` split the GPUs that are
   left, in equal parts.
 
-Long-running protocols that do not fit the cluster at once do not compile
-yet: an executor holds its resources until the stream is flushed, so one that
-fits only after another one released its GPUs would wait forever. Running
-them one after another, with the items for the later one waiting on disk, is
-planned. A declaration no cluster state satisfies fails as well: more GPUs or
-CPUs per executor than a node has, a claim above one GPU that is not a whole
-number, or more replicas of a long-running protocol than the cluster holds.
+Protocols that do not fit the cluster at once run in **phases**, one after
+another. For example, on one GPU, a long-running motion correction runs in
+phase 0 and a long-running 2D classification after it in phase 1:
+
+* A long-running protocol holds its GPUs until the stream is flushed. Its
+  pool then releases them as soon as FLUSH has passed its own stages, and
+  the pools of the next phase start.
+* The items for a later phase wait in front of its first stage, on disk
+  (in the temporary directory of that stage's node). Within a phase,
+  backpressure works as usual. The stage before the boundary therefore keeps
+  up with its upstream, and the disk holds everything that arrives during the
+  earlier phase: whole items, until provenance lets it keep only what
+  changed.
+* A later phase starts only after FLUSH, at the end of the stream. In a live
+  session, the stages of a later phase wait until the session is flushed.
+* A crash while items wait loses them; checkpointing will keep them.
+
+``--explain`` and the report show the phase of every stage, and which stages
+wait. Phases follow the graph: a protocol never waits for one it feeds.
+
+A declaration no cluster state satisfies fails when the pipeline is
+compiled: more GPUs or CPUs per executor than a node has, a claim above one
+GPU that is not a whole number, or more replicas of a long-running protocol
+than the cluster holds. The protocols of one ``group_by`` must fit together.
 
 ``--explain`` shows the plan without running the pipeline, for this machine or
 another cluster (``--explain-gpus 4,4`` for two nodes of four GPUs); see
