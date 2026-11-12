@@ -2,12 +2,16 @@ from __future__ import annotations
 from typing import (
     Any,
     Dict,
+    List,
     Optional,
+    Sequence,
 )
 from dependency_injector.wiring import Provide, inject
 
-from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
+from .backend import CompiledPipeline, StageStats, StreamingBackendProvider, stats_layer
+from .ir import IROp
 from .node import Node, lower
+from .report.model import PipelineReport, report_of
 
 
 class Pipeline:
@@ -15,8 +19,18 @@ class Pipeline:
     Compiled streaming engine backed by a StreamingBackendProvider (e.g. Ray).
     """
 
-    def __init__(self, compiled: CompiledPipeline):
+    def __init__(
+        self,
+        compiled: CompiledPipeline,
+        ir_sinks: Sequence[IROp] = (),
+    ):
+        """
+        Args:
+            compiled: The pipeline compiled by a backend.
+            ir_sinks: The IR the pipeline was compiled from, for its report.
+        """
         self._compiled = compiled
+        self._ir_sinks: List[IROp] = list(ir_sinks)
         self._closed = False
         # The stats of the stages when the pipeline was closed; None if it was
         # not closed yet, or released after a failure.
@@ -37,12 +51,20 @@ class Pipeline:
             raise ValueError("Pipeline.from_sink() requires at least one target Node.")
 
         # Lower the declarative DAG into IR ops
-        ir_sinks = lower(list(nodes))
+        return cls.from_ir(lower(list(nodes)), backend=backend)
 
-        # Compile with the backend
+    @classmethod
+    @inject
+    def from_ir(
+        cls,
+        ir_sinks: Sequence[IROp],
+        *,
+        backend: Optional[StreamingBackendProvider] = Provide["streaming_backend"],
+    ) -> Pipeline:
+        """Compile the IR ending in ``ir_sinks`` with the configured backend."""
         assert backend is not None, "Backend must not be None"
-        compiled = backend.compile(ir_sinks)
-        return cls(compiled=compiled)
+        compiled = backend.compile(list(ir_sinks))
+        return cls(compiled=compiled, ir_sinks=ir_sinks)
 
     @property
     def compiled(self) -> CompiledPipeline:
@@ -95,6 +117,15 @@ class Pipeline:
                 )
             case (True, stats):
                 return stats
+
+    def report(self) -> PipelineReport:
+        """The graph of the pipeline, annotated with the stats of its stages.
+
+        Render it with ``scipion_bridge.core.streaming.report``. Also available
+        after ``close()``, with the final stats.
+        """
+        report = report_of(self._ir_sinks)
+        return report.with_layer(stats_layer(report, self.stats()))
 
     def close(self) -> None:
         """Terminate the actors and other resources of the backend.

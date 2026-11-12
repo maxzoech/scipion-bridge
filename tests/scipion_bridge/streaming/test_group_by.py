@@ -86,7 +86,7 @@ def _by_key(results):
 
 
 def _child_labels(pipeline):
-    return [label for label in pipeline.stats() if label.startswith("group_by[")]
+    return [label for label in pipeline.stats() if "group_by[" in label]
 
 
 # -- Lowering ----------------------------------------------------------------
@@ -244,11 +244,11 @@ def test_children_are_created_lazily_per_key():
         pipeline.send("x", (3, _make_set([2])))
         pipeline.flush()
         assert _child_labels(pipeline) == [
-            "group_by[3]:0:source(group_by.input)",
-            "group_by[3]:1:map(_second)",
-            "group_by[3]:2:chunk(2)",
-            "group_by[3]:3:map(_ids)",
-            "group_by[3]:4:sink(_DemuxResultWriter)",
+            "1:group_by[3]/0:source(group_by.input)",
+            "1:group_by[3]/1:map(_second)",
+            "1:group_by[3]/2:chunk(2)",
+            "1:group_by[3]/3:map(_ids)",
+            "1:group_by[3]/4:sink(_DemuxResultWriter)",
         ]
 
         pipeline.send("x", (4, _make_set([3])))
@@ -271,8 +271,8 @@ def test_stats_count_items_of_children():
         stats = pipeline.stats()
         assert stats["1:group_by"].items_in == 3
         assert stats["1:group_by"].items_out == 2
-        assert stats["group_by[a]:2:chunk(2)"].items_in == 2
-        assert stats["group_by[b]:2:chunk(2)"].items_in == 1
+        assert stats["1:group_by[a]/2:chunk(2)"].items_in == 2
+        assert stats["1:group_by[b]/2:chunk(2)"].items_in == 1
     finally:
         pipeline.close()
 
@@ -413,7 +413,7 @@ def test_failing_child_after_collect_fails_the_next_send():
 
 def _named_child_actors(key):
     return [
-        name for name in ray.util.list_named_actors() if f"group_by[{key}]:" in name
+        name for name in ray.util.list_named_actors() if f"group_by[{key}]/" in name
     ]
 
 
@@ -437,10 +437,10 @@ def test_close_terminates_children():
 @pytest.mark.parametrize(
     ("group_by_workers", "chunk_label"),
     [
-        (None, "group_by[a]:group_by[0]:2:chunk(2)"),
+        (None, "1:group_by[a]/1:group_by[0]/2:chunk(2)"),
         # The outer key "a" shares the first worker; its inner keys 0 and 1
         # are assigned to the workers of the nested group_by in turn.
-        (2, "group_by[worker 0]:group_by[worker 1]:2:chunk(2)"),
+        (2, "1:group_by[worker 0]/1:group_by[worker 1]/2:chunk(2)"),
     ],
 )
 def test_tuple_keys_and_nested_group_by(group_by_workers, chunk_label):
@@ -503,7 +503,7 @@ def test_keys_share_workers(op_workers, backend_workers, children):
         assert _by_key(ray.get(collector.get.remote())) == {
             f"key-{key}": [[key, key + 6], [key + 12]] for key in range(6)
         }
-        labels = {label.split(":", 1)[0] for label in _child_labels(pipeline)}
+        labels = {label.split("/", 1)[0] for label in _child_labels(pipeline)}
         assert len(labels) == children
         created = set(ray.util.list_named_actors()) - existing
         # Source, group_by and sink of the pipeline, and source, chunk and sink

@@ -22,7 +22,7 @@ from .keyed import share_keys
 from .node import FLUSH, FlushSignal, LoweringContext, lower
 from .ops import Op, Source
 from .pipeline import Pipeline
-from .report import (
+from .report.model import (
     GpuMapPanel,
     GpuOccupant,
     GpuSlot,

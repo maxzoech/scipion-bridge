@@ -26,7 +26,11 @@ from ...core.environment.compute import numpy_hugepage_env
 from ...core.typed.resolve import ComposedResolver, find_resolver
 from ...core.protocol.protocol_base import Protocol
 from ...core.streaming.backend import StageStats
+from ...core.streaming.ir import IROp
+from ...core.streaming.node import lower
 from ...core.streaming.pipeline import Pipeline
+from ...core.streaming.report.model import PipelineReport, report_of
+from ...core.streaming.report.render import render_dot, render_html, render_text
 from ...core.streaming.sink import Sink
 from ...core.streaming.sink_writer import SinkWriter
 from ...core.streaming.spill import SpillStoreFactory, pickle_spill_store
@@ -207,6 +211,34 @@ def _parse_cli_value(dtype: Any, value: Any) -> Any:
             return value
 
 
+_DEFAULT_REPORT = "pipeline_report.html"
+
+
+def _explain_requested() -> bool:
+    """Whether the command line asks for ``--explain``, before it is parsed."""
+    peek = ArgumentParser(add_help=False)
+    peek.add_argument("--explain", nargs="?", const=True)
+    known, _ = peek.parse_known_args()
+    return known.explain is not None
+
+
+def _cli_parameters(config: Any, args: Any) -> Dict[str, Any]:
+    """The parameter values given on the command line."""
+    return {
+        name: _parse_cli_value(field.dtype, val)
+        for name, field in config.parameters.items()
+        if (val := getattr(args, name, None)) is not None
+    }
+
+
+def _write_report(report: PipelineReport, path: Path) -> None:
+    """Write ``report`` to ``path`` as HTML and next to it as DOT."""
+    path.write_text(render_html(report))
+    dot = path.with_suffix(".dot")
+    dot.write_text(render_dot(report))
+    print(f"Pipeline report: {path.resolve()} (graph: {dot.resolve()})")
+
+
 class RayPipelineRunner:
     """Ray pipeline runner for Scipion Bridge protocols.
 
@@ -297,6 +329,7 @@ class RayPipelineRunner:
         self.sink = sink
         self._input_resolvers: Dict[str, ComposedResolver] = {}
         self._pipeline: Optional[Pipeline] = None
+        self._ir_sinks: Optional[List[IROp]] = None
 
         self._precompute_resolvers()
 
@@ -332,23 +365,47 @@ class RayPipelineRunner:
             profile=self.profile,
             profile_log_level=self.profile_log_level,
         )
-        steps = self.protocol.get_pipeline()
+        return Pipeline.from_ir(self.ir_sinks, backend=backend)
 
-        sink_node = (
-            self.sink
-            if isinstance(self.sink, Sink)
-            else Sink(
-                self.sink or _default_sink_handler,
+    @property
+    def ir_sinks(self) -> List[IROp]:
+        """The IR of the protocol's pipeline and its sink, lowered once.
+
+        Builds the pipeline of the protocol, which seals it, without starting
+        Ray.
+        """
+        if self._ir_sinks is None:
+            configure_ray_env(parameters=self.parameters)
+            sink_node = (
+                self.sink
+                if isinstance(self.sink, Sink)
+                else Sink(
+                    self.sink or _default_sink_handler,
+                )
             )
-        )
-        steps.op(
-            sink_node,
-        )
+            self.protocol.get_pipeline().op(
+                sink_node,
+            )
+            self._ir_sinks = lower([sink_node])
 
-        return Pipeline.from_sink(
-            sink_node,
-            backend=backend,
-        )
+        return self._ir_sinks
+
+    def report(self) -> PipelineReport:
+        """The report of the pipeline: its graph, and the stats of its stages
+        once it was compiled. Render it with
+        ``scipion_bridge.core.streaming.report``."""
+        match self._pipeline:
+            case None:
+                return report_of(self.ir_sinks)
+            case pipeline:
+                return pipeline.report()
+
+    def explain(self, path: Path) -> None:
+        """Print the stages of the pipeline and write its report to ``path``
+        (HTML) and next to it (DOT), without running it."""
+        report = self.report()
+        print(render_text(report))
+        _write_report(report, path)
 
     @property
     def pipeline(self) -> Pipeline:
@@ -546,7 +603,12 @@ class RayPipelineRunner:
         self.close()
 
     def launch_as_terminal_application(self):
-        """CLI entry point for running the protocol from terminal arguments."""
+        """CLI entry point for running the protocol from terminal arguments.
+
+        ``--explain`` writes the report of the pipeline instead of running
+        it, so inputs and parameters are optional then.
+        """
+        explaining = _explain_requested()
         parser = ArgumentParser(description=self.protocol.__doc__)
         config = self.protocol.configuration
 
@@ -555,7 +617,8 @@ class RayPipelineRunner:
                 _convert_to_argname(name),
                 dest=name,
                 nargs="+",
-                required=(not field.optional) or field.default is not None,
+                required=not explaining
+                and ((not field.optional) or field.default is not None),
                 default=field.default,
                 help=field.help,
             )
@@ -582,10 +645,30 @@ class RayPipelineRunner:
             ),
         )
 
+        parser.add_argument(
+            "--explain",
+            nargs="?",
+            const=Path(_DEFAULT_REPORT),
+            type=Path,
+            help=(
+                "Do not run the pipeline: print its stages and write its "
+                "report to this path (HTML, default "
+                f"{_DEFAULT_REPORT}) and a DOT file next to it."
+            ),
+        )
+        parser.add_argument(
+            "--report",
+            type=Path,
+            help=(
+                "Write the report of the pipeline with the stats of its "
+                "stages to this path (HTML) after the run."
+            ),
+        )
+
         for name, field in config.parameters.items():
             dtype = field.dtype
             kwargs: dict[str, Any] = {
-                "required": not field.optional,
+                "required": not explaining and not field.optional,
                 "help": field.help,
                 "dest": name,
                 "default": field.default,
@@ -613,6 +696,10 @@ class RayPipelineRunner:
             )
 
         args = parser.parse_args()
+        if args.explain is not None:
+            self.set_parameters(_cli_parameters(config, args))
+            self.explain(args.explain)
+            return
         if args.profile is not None:
             self.set_profile(args.profile)
         if args.num_loaders is not None:
@@ -624,13 +711,9 @@ class RayPipelineRunner:
             if (val := getattr(args, name, None)) is not None
         }
 
-        self.set_parameters(
-            {
-                name: _parse_cli_value(field.dtype, val)
-                for name, field in config.parameters.items()
-                if (val := getattr(args, name, None)) is not None
-            },
-        )
+        self.set_parameters(_cli_parameters(config, args))
         self.run(
             inputs,
         )
+        if args.report is not None:
+            _write_report(self.report(), args.report)

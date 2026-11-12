@@ -3,7 +3,7 @@
 A report is pure data. ``report_of`` builds the graph of a pipeline from its
 IR; features of the library add what they know about it as a ``Layer``, such
 as where the stages run (placement) or what they measured (stats). Renderers
-(``scipion_bridge.visualize.pipeline``) draw any report without knowing the
+(``render.py``) draw any report without knowing the
 layers.
 
 The ids of the nodes are the stage labels the backends use in ``stats()`` and
@@ -15,11 +15,12 @@ since its children are compiled at runtime.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
-from ..environment.compute import ComputeAssignment
-from .ir import (
+from ...environment.compute import ComputeAssignment
+from ..ir import (
     IRAccumulate,
     IRDemux,
     IRMap,
@@ -47,6 +48,8 @@ class ReportNode:
         kind: The kind of IR node.
         title: Readable name, e.g. ``map(Protocol._forward)``.
         group: The compute group (protocol) of a map, if it has one.
+        group_name: The readable name of the group, e.g. the class of the
+            protocol; its id if it has none.
         parent: The id of the ``group_by`` whose template holds the node.
         stage_fp: The fingerprint of a stage of a protocol.
     """
@@ -55,6 +58,7 @@ class ReportNode:
     kind: NodeKind
     title: str
     group: Optional[str] = None
+    group_name: Optional[str] = None
     parent: Optional[str] = None
     stage_fp: Optional[str] = None
 
@@ -147,6 +151,22 @@ class PipelineReport:
         return tuple(
             dict.fromkeys(node.group for node in self.nodes if node.group is not None),
         )
+
+    @property
+    def group_labels(self) -> Mapping[str, str]:
+        """A readable label of every compute group: its name, with the start
+        of its id if several groups have that name (e.g. two instances of a
+        protocol)."""
+        names = {
+            node.group: node.group_name or node.group
+            for node in self.nodes
+            if node.group is not None
+        }
+        counts = Counter(names.values())
+        return {
+            group: name if counts[name] == 1 else f"{name} #{group[:6]}"
+            for group, name in names.items()
+        }
 
     @property
     def warnings(self) -> Tuple[str, ...]:
@@ -244,6 +264,7 @@ def _add_graph(
                 kind=_kind(node),
                 title=describe(node),
                 group=_group(node),
+                group_name=_group_name(node),
                 parent=parent,
                 stage_fp=node.stage_fp,
             ),
@@ -289,12 +310,23 @@ def _group(node: IROp) -> Optional[str]:
             return None
 
 
+def _group_name(node: IROp) -> Optional[str]:
+    match node:
+        case IRMap(compute=ComputeAssignment(group=group, name="")):
+            return group
+        case IRMap(compute=ComputeAssignment(name=name)):
+            return name
+        case _:
+            return None
+
+
 def _node_json(node: ReportNode) -> Dict[str, Any]:
     return {
         "id": node.id,
         "kind": node.kind,
         "title": node.title,
         "group": node.group,
+        "group_name": node.group_name,
         "parent": node.parent,
         "stage_fp": node.stage_fp,
     }

@@ -64,6 +64,20 @@
   session accumulated over a hundred live actors. `stats()` remains available
   after closing; `send()` and `flush()` on a closed pipeline raise.
 
+### Pipeline reports
+- `--explain [PATH]` on every protocol launched with `RayPipelineRunner`
+  prints the stages of its pipeline and writes an HTML report of its graph
+  (and the graph in DOT), without starting Ray; `--report PATH` writes it
+  after a run, with the stats of every stage. `Pipeline.report()` and
+  `RayPipelineRunner.report()` return the report.
+- Reports (`scipion_bridge.core.streaming.report`) are the graph of a
+  pipeline annotated by layers, rendered as text, DOT, SVG or a
+  self-contained HTML page; laid out with Graphviz if installed.
+- The stages of the children of a `group_by` are labelled under their
+  `group_by`: `1:group_by[a]/2:chunk(2)` instead of `group_by[a]:2:chunk(2)`,
+  also in the names of their actors.
+- `ComputeAssignment.name` names the protocol of a group.
+
 ### Tooling
 - Static tensor columns are read from their Arrow storage, so null cells of a
   sparse `Collection` load with pyarrow 26, whose `to_numpy_ndarray` rejects

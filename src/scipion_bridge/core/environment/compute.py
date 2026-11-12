@@ -189,6 +189,10 @@ class ComputeAssignment:
     resources once for all of its stages.
 
     Attributes:
+        group: The id of the group, unique per protocol instance.
+        name: A readable name of the group, such as the class of the
+            protocol, for reports and logs. Not part of the equality of
+            claims.
         prepare: Builds the process-scope resources of the protocol in the
             calling process (e.g. loads a model), so that an executor can do
             it before its first call. Not part of the equality of claims.
@@ -196,4 +200,5 @@ class ComputeAssignment:
 
     resources: ComputeResources
     group: str
+    name: str = field(default="", compare=False)
     prepare: Optional[Callable[[], None]] = field(default=None, compare=False)

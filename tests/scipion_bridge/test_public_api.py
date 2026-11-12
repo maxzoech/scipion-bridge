@@ -17,6 +17,7 @@ _PACKAGES = [
     "scipion_bridge.core.typed",
     "scipion_bridge.core.struct",
     "scipion_bridge.core.streaming",
+    "scipion_bridge.core.streaming.report",
     "scipion_bridge.core.protocol",
     "scipion_bridge.single_particle",
     "scipion_bridge.backend",

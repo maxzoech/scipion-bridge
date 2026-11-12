@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
-from typing import Any, Dict, List
+import re
+from dataclasses import dataclass, fields
+from typing import Any, Dict, List, Mapping
+
 from .ir import IROp
+from .report.model import Annotations, Layer, PipelineReport
 
 
 @dataclass
@@ -76,3 +79,48 @@ class StreamingBackendProvider(abc.ABC):
     ) -> CompiledPipeline:
         """Compile an IR DAG into a runnable CompiledPipeline."""
         ...
+
+
+# The child of a group_by in the label of one of its stages: the stages of
+# child ``a`` of ``2:group_by`` are labelled ``2:group_by[a]/<stage>``.
+_CHILD = re.compile(r"\[[^\]]*\](?=/)")
+
+
+def stats_layer(report: PipelineReport, stats: Mapping[str, StageStats]) -> Layer:
+    """The stats of a pipeline as a layer of its report.
+
+    The stats of the children of a ``group_by`` are added up into the nodes
+    of its template; ``buffered_peak`` is the highest of the children, and
+    ``children`` their number. Stages of the backend without a node in the
+    report, such as the sinks of the children, are left out.
+    """
+    by_node: Dict[str, List[StageStats]] = {}
+    for label, stage in stats.items():
+        by_node.setdefault(_CHILD.sub("", label), []).append(stage)
+    return Layer(
+        name="stats",
+        title="Stats",
+        nodes={
+            node.id: _annotations(by_node[node.id], children=node.parent is not None)
+            for node in report.nodes
+            if node.id in by_node
+        },
+        metric="process_s",
+    )
+
+
+def _annotations(stages: List[StageStats], children: bool) -> Annotations:
+    """The stats of a stage, or the sum over the children of a group_by."""
+    values: Dict[str, Any] = {
+        field.name: (
+            max(getattr(stage, field.name) for stage in stages)
+            if field.name == "buffered_peak"
+            else sum(getattr(stage, field.name) for stage in stages)
+        )
+        for field in fields(StageStats)
+    }
+    match children:
+        case True:
+            return {**values, "children": len(stages)}
+        case False:
+            return values

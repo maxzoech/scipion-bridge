@@ -198,6 +198,18 @@ def test_run_terminates_the_actors_it_started(tmp_path):
     assert runner.pipeline.stats()
 
 
+def test_report_after_a_run_has_the_stats_of_every_stage(tmp_path):
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    runner = RayPipelineRunner(StreamingParticleProtocol())
+
+    runner.run(particles=star_path)
+
+    report = runner.report()
+    # The labels of the backend's stats are the ids of the report's nodes.
+    assert set(runner.pipeline.stats()) == {node.id for node in report.nodes}
+    assert set(report.layer("stats").nodes) == {node.id for node in report.nodes}
+
+
 class DualInputProtocol(Protocol):
     particles1: B.Input[B.Set[Particle]]
     particles2: B.Input[B.Set[Particle]]

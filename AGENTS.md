@@ -191,6 +191,9 @@ All imports should be kept at the top level of the module
   `core.typed`/`core.struct` → `core.streaming` → `core.protocol` →
   `single_particle` → `backend`. The core never imports a backend: inject
   services by name, `Provide["temp_file_provider"]`.
+- `scipion_bridge.visualize` visualizes results (data) for users. Debug
+  views of pipelines (reports of their graph) belong to
+  `core.streaming.report`.
 - Import-time registration (lifting resolvers, registering visualizers)
   happens in one marked block at the end of a package's `__init__.py`.
 - `tests/scipion_bridge/test_public_api.py` checks these namespaces.

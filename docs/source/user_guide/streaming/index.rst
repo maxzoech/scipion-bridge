@@ -110,6 +110,7 @@ Articles in this section
    group_by
    sinks
    pipelines
+   reports
 
 * :doc:`sources_and_maps` covers the entry points of a graph and the
   stateless operations ``map`` and ``map_element``.
@@ -122,3 +123,4 @@ Articles in this section
   a custom writer.
 * :doc:`pipelines` covers compilation, sending data, flushing, statistics,
   backpressure and error handling.
+* :doc:`reports` draws the graph of a pipeline, with the stats of a run.

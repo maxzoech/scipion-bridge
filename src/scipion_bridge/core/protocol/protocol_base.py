@@ -281,6 +281,7 @@ class Protocol(metaclass=abc.ABCMeta):
                 assignment = ComputeAssignment(
                     resources,
                     group=self.protocol_id,
+                    name=type(self).__qualname__,
                     prepare=self._prepare_process,
                 )
                 # cpu_only stages run without GPUs and outside the
@@ -288,6 +289,7 @@ class Protocol(metaclass=abc.ABCMeta):
                 cpu_assignment = ComputeAssignment(
                     ComputeResources(cpus=resources.cpus),
                     group=self.protocol_id,
+                    name=type(self).__qualname__,
                 )
                 for node in lineage(steps):
                     match node:

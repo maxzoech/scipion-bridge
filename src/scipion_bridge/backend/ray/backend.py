@@ -1626,7 +1626,6 @@ class RayDemuxActor(_PipelinedStage):
         workers: Optional[int],
         outer_keyed: bool,
         group_by_workers: Optional[int],
-        prefix: str,
         config: _StageConfig,
         spill: Optional[SpillPolicy],
         label: str,
@@ -1656,7 +1655,8 @@ class RayDemuxActor(_PipelinedStage):
         self.group_by_workers = group_by_workers
         self.ephemeral_idle_s = ephemeral_idle_s
         self.pools = pools
-        self.prefix = prefix
+        # The children are labelled under it, ``<label>[<child>]/``.
+        self.label = label
         self.config = config
         self.parameters = parameters
         # Children by key, or by index of a shared child.
@@ -1783,7 +1783,7 @@ class RayDemuxActor(_PipelinedStage):
         )
         start = backend.compile_async(
             [sink],
-            name=f"{self.prefix}group_by[{child}]:",
+            name=f"{self.label}[{child}]/",
             abort_targets=self._abort_targets,
         )
         return _Child(
@@ -2357,7 +2357,6 @@ class RayBackend(StreamingBackendProvider):
                     "group_by_workers": self.group_by_workers,
                     "ephemeral_idle_s": self.ephemeral_idle_s,
                     "pools": pools,
-                    "prefix": name,
                     "config": config,
                     "spill": spill,
                     "label": label,
