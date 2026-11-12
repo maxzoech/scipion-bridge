@@ -26,10 +26,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+)
 
-import ray
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+import ray  # type: ignore
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy  # type: ignore
 
 logger = logging.getLogger("scipion_bridge.profile")
 
@@ -90,7 +100,7 @@ class Recorder(abc.ABC):
         level: int = logging.DEBUG,
         overlapping: bool = False,
         **args: Any,
-    ) -> Iterator[Dict[str, Any]]:
+    ) -> Generator[Dict[str, Any]]:
         """Record the duration of the enclosed block, which may await.
 
         Yields the details of the event, to which the block may add. Spans
@@ -395,7 +405,7 @@ def start_profile(
     to it.
     """
     path = path.resolve()
-    collector = ProfileCollector.options(
+    collector = ProfileCollector.options(  # type: ignore
         scheduling_strategy=NodeAffinitySchedulingStrategy(
             ray.get_runtime_context().get_node_id(),
             soft=False,
