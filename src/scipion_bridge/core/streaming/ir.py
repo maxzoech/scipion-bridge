@@ -17,6 +17,7 @@ from typing import (
     NamedTuple,
     Optional,
     Sequence,
+    Set,
     Tuple,
     Union,
 )
@@ -151,6 +152,57 @@ class IRDemux(IROp):
     workers: GroupByWorkers = WorkersFrom.BACKEND
     outer_keyed: bool = False
     name: str = "group_by"
+
+
+def topological_order(sinks: Sequence[IROp]) -> List[IROp]:
+    """The nodes reachable upstream from ``sinks``, every node after its inputs.
+
+    Upstream nodes are visited in the order of their ports, so the order is
+    deterministic for a DAG; the templates of ``group_by`` nodes are not
+    included.
+    """
+    visited: Set[IROp] = set()
+    order: List[IROp] = []
+
+    def visit(node: IROp) -> None:
+        if node in visited:
+            return
+        visited.add(node)
+        for upstream in node.upstream:
+            visit(upstream)
+        order.append(node)
+
+    for sink in sinks:
+        visit(sink)
+    return order
+
+
+def describe(node: IROp) -> str:
+    """Readable title of an IR node, e.g. ``map(Protocol._forward)``."""
+    match node:
+        case IRSource(name=name):
+            return f"source({name})"
+        case IRMap(func=func, name=name):
+            return name or f"map({getattr(func, '__qualname__', type(func).__name__)})"
+        case IRAccumulate(name=name):
+            return name
+        case IRSink(writer=writer):
+            return f"sink({type(writer).__name__})"
+        case IRDemux(name=name):
+            return name
+        case _:
+            return type(node).__name__
+
+
+def stage_labels(nodes: Sequence[IROp], prefix: str = "") -> Dict[IROp, str]:
+    """Labels of ``nodes`` in topological order, as in stats and actor names.
+
+    A label is ``<prefix><position>:<title>``; the position keeps labels of
+    stages with the same title apart.
+    """
+    return {
+        node: f"{prefix}{index}:{describe(node)}" for index, node in enumerate(nodes)
+    }
 
 
 def _no_changes(node: IROp) -> Mapping[str, Any]:

@@ -63,6 +63,8 @@ from scipion_bridge.core.streaming.ir import (
     Tagged,
     WorkersFrom,
     clone_ir,
+    stage_labels,
+    topological_order,
 )
 from scipion_bridge.core.streaming.keyed import share_keys
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
@@ -2141,32 +2143,17 @@ class RayBackend(StreamingBackendProvider):
             raise ValueError("RayBackend.compile() requires at least one IRSink.")
 
         # 1. Discover all reachable IR nodes in topological order (upstream first)
-        visited: Set[IROp] = set()
-        all_nodes: List[IROp] = []
-        sources_map: Dict[str, IRSource] = {}
-
-        def _traverse(node: IROp) -> None:
-            if node in visited:
-                return
-            visited.add(node)
-            if isinstance(node, IRSource):
-                sources_map[node.name] = node
-            for up in node.upstream:
-                _traverse(up)
-            all_nodes.append(node)
-
-        for sink in ir_sinks:
-            _traverse(sink)
+        all_nodes = topological_order(ir_sinks)
+        sources_map: Dict[str, IRSource] = {
+            node.name: node for node in all_nodes if isinstance(node, IRSource)
+        }
 
         # 2. Instantiate a Ray actor for every IR node but the maps, which run
         # as Ray tasks submitted by the stage upstream of them. Actors are
         # named so that stages can be identified in the Ray dashboard; the
         # pipeline id keeps the names unique within the Ray namespace.
         pipeline_id = uuid.uuid4().hex[:8]
-        labels = {
-            node: f"{name}{index}:{_describe(node)}"
-            for index, node in enumerate(all_nodes)
-        }
+        labels = stage_labels(all_nodes, name)
         # The maps of the children of group_by share the pools of this
         # pipeline, so the claims cover them too.
         maps = _all_maps(all_nodes)
@@ -2758,20 +2745,3 @@ def _check_cluster_fits(assignment: ComputeAssignment, num_gpus: float) -> None:
             f"({num_gpus:g} GPUs), "
             f"but the Ray cluster has {gpus} GPUs and {cpus} CPUs.",
         )
-
-
-def _describe(node: IROp) -> str:
-    """Readable label of an IR node for metrics output."""
-    match node:
-        case IRSource(name=name):
-            return f"source({name})"
-        case IRMap(func=func, name=name):
-            return name or f"map({getattr(func, '__qualname__', type(func).__name__)})"
-        case IRAccumulate(name=name):
-            return name
-        case IRSink(writer=writer):
-            return f"sink({type(writer).__name__})"
-        case IRDemux(name=name):
-            return name
-        case _:
-            return type(node).__name__

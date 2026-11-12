@@ -15,11 +15,24 @@ from .ir import (
     Tagged,
     WorkersFrom,
     clone_ir,
+    stage_labels,
+    topological_order,
 )
 from .keyed import share_keys
 from .node import FLUSH, FlushSignal, LoweringContext, lower
 from .ops import Op, Source
 from .pipeline import Pipeline
+from .report import (
+    GpuMapPanel,
+    GpuOccupant,
+    GpuSlot,
+    Layer,
+    PipelineReport,
+    ReportEdge,
+    ReportNode,
+    TablePanel,
+    report_of,
+)
 from .sink import Sink
 from .sink_writer import CallbackSinkWriter, SinkWriter
 from .spill import PickleSpillStore, SpillStore, SpillStoreFactory, pickle_spill_store
@@ -41,6 +54,16 @@ __all__ = [
     "SpillStoreFactory",
     "PickleSpillStore",
     "pickle_spill_store",
+    # Reports
+    "PipelineReport",
+    "ReportNode",
+    "ReportEdge",
+    "Layer",
+    "TablePanel",
+    "GpuMapPanel",
+    "GpuSlot",
+    "GpuOccupant",
+    "report_of",
     # Backends: lowering and the IR
     "StreamingBackendProvider",
     "CompiledPipeline",
@@ -57,5 +80,7 @@ __all__ = [
     "GroupByWorkers",
     "DEFAULT_GROUP_BY_WORKERS",
     "clone_ir",
+    "topological_order",
+    "stage_labels",
     "share_keys",
 ]
