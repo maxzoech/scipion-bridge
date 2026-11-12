@@ -82,6 +82,17 @@ capture, including ``self`` for bound methods, are pickled with
 * read parameters through ``Field.value`` and expensive objects through
   ``B.Resource``, which work inside workers.
 
+**Methods of a protocol work on a sealed protocol.** A protocol is sealed once
+``get_pipeline()`` has built its pipeline: its attributes cannot change
+anymore. A map function that is a method of the protocol, such as
+``.map(self._forward)``, is pickled together with the protocol, and every
+worker process runs it on its own copy. Writing to ``self`` inside the
+function, for example ``self.count += 1``, would change only that copy, so
+the protocol raises ``B.SealedProtocolError`` instead. Keep state across items
+in a ``.scan`` stage, expensive objects in a ``B.Resource``, and set
+configuration in ``__init__()``, ``setup()`` or ``steps()``; see
+:ref:`where-state-belongs`.
+
 ``map_element()``
 -----------------
 

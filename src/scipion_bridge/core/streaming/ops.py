@@ -69,6 +69,13 @@ class Op(Node):
 
             particles.chunk(256).map(forward).map(build_metadata)
 
+        ``func`` runs in worker processes, in a copy of everything it
+        captures. A method of a protocol (``.map(self._forward)``) runs on a
+        sealed copy of the protocol: its attributes cannot change once the
+        pipeline is built, and writing to ``self`` raises
+        ``SealedProtocolError``. Keep state across items in ``scan``, and
+        expensive objects in a ``B.Resource``.
+
         Args:
             func: Function applied to each item.
             cpu_only: Run without the GPUs of the protocol's compute
@@ -78,7 +85,11 @@ class Op(Node):
         return self.op(MapOp(func, cpu_only=cpu_only))
 
     def map(self, func: Callable[[Any], Any], *, cpu_only: bool = False) -> MapOp:
-        """Alias for map_batch."""
+        """Alias for map_batch.
+
+        When ``func`` is a method of a protocol, it runs on a sealed copy of
+        the protocol and must not write to ``self`` (see ``map_batch``).
+        """
         return self.map_batch(func, cpu_only=cpu_only)
 
     def map_element(
