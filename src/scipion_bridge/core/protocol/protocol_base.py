@@ -24,7 +24,12 @@ from typing import (
 
 import numpy as np
 
-from ..environment.compute import ComputeAssignment, ComputeResources, TaskType
+from ..environment.compute import (
+    ComputeAssignment,
+    ComputeResources,
+    Replicas,
+    TaskType,
+)
 from ..environment.resource_provider import ResourceScope
 from ..streaming.ops import MapElementOp, MapOp, Op, lineage
 from .chain_utils import (
@@ -639,7 +644,7 @@ def resources(
     min_vram: Optional[float] = None,
     cpus: Optional[float] = None,
     task: TaskType = TaskType.EPHEMERAL,
-    replicas: Optional[int] = None,
+    replicas: Replicas = None,
 ) -> Callable[[ProtocolT], ProtocolT]:
     """Declare the compute resources of a protocol's stages.
 

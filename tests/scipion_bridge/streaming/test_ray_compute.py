@@ -28,6 +28,7 @@ from scipion_bridge.core.environment.compute import (
 from scipion_bridge.core.streaming import lower
 from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import CallbackSinkWriter
+from scipion_bridge.core.streaming import Pipeline
 
 # Timing assertions: run on one xdist worker, after one another.
 pytestmark = [
@@ -368,6 +369,63 @@ def test_a_pool_that_does_not_fit_at_once_raises():
     # Every executor fits on its own, but they hold their GPUs until FLUSH.
     with pytest.raises(ValueError, match="at once"):
         _compile(OversizedPool(), Collector.remote())
+
+
+@B.resources(gpus=0.5, task=B.TaskType.LONG_RUNNING)
+class HalfGpuFirst(B.Protocol):
+    items: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(lambda item: {"out": item})
+
+
+@B.resources(gpus=0.5, task=B.TaskType.LONG_RUNNING)
+class HalfGpuSecond(B.Protocol):
+    out: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"result": int}
+
+    def steps(self):
+        return self.out.map(lambda item: {"result": item})
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class AllGpusFirst(HalfGpuFirst):
+    pass
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class AllGpusSecond(HalfGpuSecond):
+    pass
+
+
+def test_the_report_of_a_pipeline_shows_the_placement_of_its_pools():
+    writer = CallbackSinkWriter(lambda item: None)
+    sink = (HalfGpuFirst() | HalfGpuSecond()).get_pipeline().write_to(writer)
+
+    with Pipeline.from_sink(sink, backend=RayBackend(init_ray=False)) as pipeline:
+        report = pipeline.report()
+
+    pools = report.layer("placement").groups
+    # Long-running protocols get GPUs of their own.
+    assert sorted(pool["gpus"] for pool in pools.values()) == [
+        ("node 0 GPU 0",),
+        ("node 0 GPU 1",),
+    ]
+
+
+def test_protocols_that_need_phases_do_not_compile_yet():
+    writer = CallbackSinkWriter(lambda item: None)
+    (sink,) = lower(
+        [(AllGpusFirst() | AllGpusSecond()).get_pipeline().write_to(writer)]
+    )
+
+    with pytest.raises(ValueError, match="AllGpusSecond would have to wait"):
+        RayBackend(init_ray=False).compile([sink])
 
 
 def _restore_slowly(value):
@@ -1076,7 +1134,7 @@ def _fake_nvidia_smi(output):
 def test_gpu_memory_is_read_from_nvidia_smi(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_nvidia_smi("15360\n24576\n"))
 
-    assert backend._read_gpu_memory() == [15.0, 24.0]
+    assert backend.read_gpu_memory() == [15.0, 24.0]
 
 
 def test_gpu_memory_is_empty_without_nvidia_smi(monkeypatch):
@@ -1085,14 +1143,14 @@ def test_gpu_memory_is_empty_without_nvidia_smi(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", missing)
 
-    assert backend._read_gpu_memory() == []
+    assert backend.read_gpu_memory() == []
 
 
 def test_cluster_probe_reports_the_gpus_of_every_node():
     # The test cluster is a single node: the probe sees its physical GPUs.
     probed = backend._probe_cluster_gpu_memory.__wrapped__()
 
-    assert probed == tuple(backend._read_gpu_memory())
+    assert probed == tuple(backend.read_gpu_memory())
 
 
 def test_claims_are_sized_for_the_smallest_gpu(caplog):

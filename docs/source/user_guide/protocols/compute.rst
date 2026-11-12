@@ -65,15 +65,43 @@ Options
    The number of executor processes of the protocol, each holding the
    resources. The calls of the protocol's maps are spread over them, in order:
    ``@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=2)`` runs a
-   model on two GPUs, without partitioning the stream in the protocol. The
-   default is 1 for long-running protocols; ephemeral protocols with GPUs
-   share the GPUs that long-running protocols leave in equal parts.
+   model on two GPUs, without partitioning the stream in the protocol.
+   ``replicas="auto"`` gives a long-running protocol one executor, plus as
+   many as the GPUs that the other protocols leave hold. The count is decided
+   when the pipeline is compiled. The default is
+   1 for long-running protocols; ephemeral protocols with GPUs share the GPUs
+   that long-running protocols leave in equal parts.
 
-A protocol whose declaration exceeds the cluster (more GPUs or CPUs per call
-than the cluster has) fails when the pipeline is compiled. So do long-running
-protocols whose executors, all replicas together, do not fit the cluster at
-once: an executor holds its resources until the stream is flushed, so one
-that fits only after another one released its GPUs would wait forever.
+Placement
+---------
+
+When a pipeline is compiled, the Ray backend plans where the executors of
+every protocol run:
+
+* Long-running protocols get GPUs of their own where the cluster has enough:
+  processes of different protocols on one GPU take turns on it, which can
+  make each of them several times slower. If they do not fit otherwise, they
+  share GPUs, with a warning.
+* The executors of one protocol fill a GPU before the next (two executors of
+  ``gpus=0.5`` share one GPU).
+* Protocols get their minimum in the order of the graph: their declared
+  ``replicas`` (one by default), or one executor for ephemeral protocols and
+  ``replicas="auto"``. A protocol never takes the minimum of one that feeds
+  it.
+* Then ephemeral protocols and ``replicas="auto"`` split the GPUs that are
+  left, in equal parts.
+
+Long-running protocols that do not fit the cluster at once do not compile
+yet: an executor holds its resources until the stream is flushed, so one that
+fits only after another one released its GPUs would wait forever. Running
+them one after another, with the items for the later one waiting on disk, is
+planned. A declaration no cluster state satisfies fails as well: more GPUs or
+CPUs per executor than a node has, a claim above one GPU that is not a whole
+number, or more replicas of a long-running protocol than the cluster holds.
+
+``--explain`` shows the plan without running the pipeline, for this machine or
+another cluster (``--explain-gpus 4,4`` for two nodes of four GPUs); see
+:doc:`/user_guide/streaming/reports`.
 
 Ephemeral and long-running tasks
 --------------------------------

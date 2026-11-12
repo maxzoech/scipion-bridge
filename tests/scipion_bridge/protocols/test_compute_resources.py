@@ -6,12 +6,7 @@ from numpy._core.multiarray import (
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.backend.ray.backend import (
-    _check_pools_fit,
-    _pool_replicas,
-    _pooled,
-    _ray_options,
-)
+from scipion_bridge.backend.ray.backend import _pooled, _ray_options
 from scipion_bridge.core.environment.compute import (
     NUMPY_HUGEPAGE_ENV_VAR,
     ComputeAssignment,
@@ -283,35 +278,6 @@ def test_a_pool_needs_a_replica():
         B.ComputeResources(replicas=0)
 
 
-def _pool(gpus, cpus, replicas):
-    return ({"num_gpus": gpus, "num_cpus": cpus}, replicas)
-
-
-@pytest.mark.parametrize(
-    "pools",
-    [
-        {"a": _pool(1, 0, 2)},
-        {"a": _pool(1, 0, 1), "b": _pool(0.5, 1, 2)},
-        {},
-    ],
-)
-def test_pools_that_fit_the_cluster_at_once_pass(pools):
-    _check_pools_fit(pools, {"GPU": 2, "CPU": 2})
-
-
-@pytest.mark.parametrize(
-    "pools",
-    [
-        {"a": _pool(1, 0, 3)},
-        {"a": _pool(1, 0, 1), "b": _pool(1, 0, 2)},
-        {"a": _pool(0, 1, 3)},
-    ],
-)
-def test_pools_that_fit_only_one_after_another_raise(pools):
-    with pytest.raises(ValueError, match="at once"):
-        _check_pools_fit(pools, {"GPU": 2, "CPU": 2})
-
-
 def test_a_share_of_a_gpu_limits_preallocation():
     assert gpu_memory_env(0.5) == {
         "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.450",
@@ -408,25 +374,6 @@ def test_the_assignment_carries_the_warm_up_outside_its_equality():
         Refine.compute_resources,
         group=protocol.protocol_id,
     )
-
-
-@pytest.mark.parametrize(
-    "resources, gpus, held, pools, replicas",
-    [
-        (B.ComputeResources(gpus=1), 1, 0, 1, 2),
-        (B.ComputeResources(gpus=0.5), 0.5, 0, 1, 4),
-        (B.ComputeResources(gpus=1), 1, 1, 1, 1),  # a long-running pool holds one
-        (B.ComputeResources(gpus=1), 1, 2, 1, 1),  # at least one, it waits its turn
-        (B.ComputeResources(gpus=1), 1, 0, 2, 1),  # two ephemeral pools share
-        (B.ComputeResources(gpus=0.5), 0.5, 0, 3, 1),
-        (B.ComputeResources(gpus=1, replicas=3), 1, 0, 2, 3),
-        (B.ComputeResources(gpus=1, task=B.TaskType.LONG_RUNNING), 1, 0, 1, 1),
-    ],
-)
-def test_the_replicas_of_a_pool(resources, gpus, held, pools, replicas):
-    options = {"num_gpus": gpus, "num_cpus": 0}
-
-    assert _pool_replicas(options, resources, 2, held, pools) == replicas
 
 
 @pytest.mark.parametrize(

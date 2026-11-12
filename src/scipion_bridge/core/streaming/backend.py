@@ -5,7 +5,7 @@ from __future__ import annotations
 import abc
 import re
 from dataclasses import dataclass, fields
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Tuple
 
 from .ir import IROp
 from .report.model import Annotations, Layer, PipelineReport
@@ -63,6 +63,11 @@ class CompiledPipeline(abc.ABC):
     def stats(self) -> Dict[str, StageStats]:
         """Return execution metrics per stage, keyed by a readable stage label."""
         ...
+
+    def layers(self, report: PipelineReport) -> Tuple[Layer, ...]:
+        """What the backend adds to the report of the pipeline, e.g. the
+        placement of its stages; ``report`` is its graph."""
+        return ()
 
     def close(self) -> None:
         """Terminate any resources or actors allocated for this pipeline."""

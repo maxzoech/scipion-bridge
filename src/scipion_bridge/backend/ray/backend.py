@@ -39,7 +39,6 @@ from scipion_bridge.core.environment.compute import (
     CPUS_ENV_VAR,
     ComputeAssignment,
     ComputeResources,
-    TaskType,
     gpu_claim,
     configure_numpy_hugepages,
     gpu_memory_env,
@@ -72,6 +71,21 @@ from scipion_bridge.core.streaming.sink_writer import SinkWriter
 from scipion_bridge.core.streaming.spill import SpillStoreFactory, pickle_spill_store
 
 from .function_table import FunctionTable, table_of
+from scipion_bridge.core.streaming.report.model import (
+    Layer,
+    PipelineReport,
+    report_of,
+)
+
+from .placement import (
+    GroupDemand,
+    Plan,
+    all_maps,
+    demands_of,
+    placement_layer,
+    plan_placement,
+    pooled,
+)
 from .mailbox import Mailbox, Ref, SpillPolicy
 from .profiling import ProfileConfig, Recorder, make_recorder, start_profile
 
@@ -757,7 +771,7 @@ def _ray_options(resources: ComputeResources, num_gpus: float) -> Dict[str, Any]
     }
 
 
-def _read_gpu_memory() -> List[float]:
+def read_gpu_memory() -> List[float]:
     """Memory in GiB of every GPU of this node, or none without nvidia-smi."""
     try:
         output = subprocess.run(
@@ -779,7 +793,7 @@ def _node_gpu_memory() -> List[float]:
     A task without GPUs does not know which GPUs Ray manages on its node, so
     it reports all of them; a GPU hidden from Ray only makes claims larger.
     """
-    return _read_gpu_memory()
+    return read_gpu_memory()
 
 
 @cache
@@ -1809,6 +1823,7 @@ class RayCompiledPipeline(CompiledPipeline):
         profile: Optional[ProfileConfig] = None,
         owns_profile: bool = False,
         functions: Optional[ray.ObjectRef] = None,
+        placement: Optional[_Placement] = None,
     ):
         """
         Args:
@@ -1829,6 +1844,8 @@ class RayCompiledPipeline(CompiledPipeline):
                 parent.
             functions: The function table of the pipeline's maps, kept in
                 the object store while the pipeline runs.
+            placement: The plan of the pools the pipeline owns, for its
+                report.
         """
         self._sources = sources
         self._stages = stages
@@ -1838,7 +1855,16 @@ class RayCompiledPipeline(CompiledPipeline):
         self._profile = profile
         self._owns_profile = owns_profile
         self._functions = functions
+        self._placement = placement
         self._recorder = make_recorder(profile, "driver")
+
+    def layers(self, report: PipelineReport) -> Tuple[Layer, ...]:
+        """The placement of the pools, if the pipeline owns them."""
+        match self._placement:
+            case None:
+                return ()
+            case placement:
+                return (placement.layer(),)
 
     @property
     def profile(self) -> Optional[ProfileConfig]:
@@ -2156,7 +2182,7 @@ class RayBackend(StreamingBackendProvider):
         labels = stage_labels(all_nodes, name)
         # The maps of the children of group_by share the pools of this
         # pipeline, so the claims cover them too.
-        maps = _all_maps(all_nodes)
+        maps = all_maps(all_nodes)
         claims = {node.compute: self._claim(node.compute) for node in maps}
         profile, owns_profile = self._profile_config(pipeline_id)
         # Map calls and the warm-up of executors find their functions in the
@@ -2179,21 +2205,27 @@ class RayBackend(StreamingBackendProvider):
             ),
         )
         owns_pools = self.pools is None
-        pools = (
-            self._compute_groups(maps, claims, Ref(functions), profile)
-            if self.pools is None
-            else self.pools
-        )
+        match self.pools:
+            case None:
+                pools, placement = self._compute_groups(
+                    ir_sinks, maps, claims, Ref(functions), profile
+                )
+            case given:
+                pools, placement = dict(given), None
         spill, spill_root = self._spill_config()
         # Every executor of a pool takes calls of a map at once; the items on
         # the routes of a stage must cover the replicas a protocol declared.
+        groups = {
+            compute.group
+            for node in all_nodes
+            if isinstance(node, IRMap)
+            and isinstance(compute := node.compute, ComputeAssignment)
+        }
         pooled_calls = max(
             (
-                replicas * _EXECUTOR_CALLS_IN_FLIGHT
-                for node in all_nodes
-                if isinstance(node, IRMap)
-                and isinstance(compute := node.compute, ComputeAssignment)
-                and (replicas := _declared_replicas(compute.resources)) > 1
+                pool.replicas * _EXECUTOR_CALLS_IN_FLIGHT
+                for group, pool in pools.items()
+                if group in groups and pool.declared and pool.replicas > 1
             ),
             default=0,
         )
@@ -2254,6 +2286,7 @@ class RayBackend(StreamingBackendProvider):
             profile=profile,
             owns_profile=owns_profile,
             functions=functions,
+            placement=placement,
         )
         return pipeline, connected
 
@@ -2409,49 +2442,46 @@ class RayBackend(StreamingBackendProvider):
 
     def _compute_groups(
         self,
+        ir_sinks: Sequence[IROp],
         nodes: Sequence[IRMap],
         claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]],
         functions: Ref,
         profile: Optional[ProfileConfig],
-    ) -> Dict[str, "_Pool"]:
-        """Create the pool of every group of ``nodes`` that runs on executors.
+    ) -> Tuple[Dict[str, "_Pool"], "_Placement"]:
+        """Plan and create the pool of every group of ``nodes`` that runs on executors.
 
-        Long-running pools start, preparing their executors, while the rest
-        of the pipeline is created. Ephemeral pools start executors on
-        demand; by default they share the GPUs the long-running pools leave
-        in equal parts.
+        The placement planner (``placement.py``) decides the executors of
+        every pool. Long-running pools start, preparing their executors,
+        while the rest of the pipeline is created; ephemeral pools start
+        executors on demand.
 
         Raises:
-            ValueError: If the long-running pools do not fit the cluster at
-                once.
+            ValueError: If the claims cannot be satisfied, or the
+                long-running pools do not fit the cluster at once.
         """
         # The maps of a group, once each: their copies in the children of a
         # group_by keep the fingerprint.
         stages: Dict[str, Set[Optional[str]]] = {}
-        claims_of: Dict[str, Tuple[Dict[str, Any], ComputeResources]] = {}
+        options_of: Dict[str, Dict[str, Any]] = {}
         for node in nodes:
             match node:
                 case IRMap(
-                    compute=ComputeAssignment(
-                        group=group, resources=resources
-                    ) as compute,
+                    compute=ComputeAssignment(group=group) as compute,
                 ) if _pooled(compute, claims[compute]):
                     stages.setdefault(group, set()).add(node.stage_fp)
-                    claims_of[group] = (claims[compute], resources)
+                    options_of[group] = claims[compute]
                 case _:
                     pass
 
-        cluster = ray.cluster_resources()
-        long_running = {
-            group: (options, _declared_replicas(resources))
-            for group, (options, resources) in claims_of.items()
-            if resources.task == TaskType.LONG_RUNNING
-        }
-        _check_pools_fit(long_running, cluster)
-        held_gpus = sum(
-            options["num_gpus"] * replicas
-            for options, replicas in long_running.values()
+        graph = report_of(ir_sinks)
+        demands = demands_of(nodes, self._num_gpus)
+        plan = plan_placement(
+            graph,
+            demands,
+            _cluster_node_gpus(),
+            ray.cluster_resources().get("CPU", 0),
         )
+        _check_one_phase(plan, demands)
         pools = {
             group: _Pool(
                 coordinator=RayComputeGroup.options(
@@ -2459,52 +2489,58 @@ class RayBackend(StreamingBackendProvider):
                 ).remote(
                     options,
                     len(stages[group]),
-                    replicas,
+                    plan.groups[group].replicas,
                     functions,
                     self.parameters,
                     group,
                     profile,
-                    idle_s=None if group in long_running else self.ephemeral_idle_s,
+                    idle_s=None if demands[group].holds else self.ephemeral_idle_s,
                 ),
-                replicas=replicas,
-                ephemeral=group not in long_running,
+                replicas=plan.groups[group].replicas,
+                ephemeral=not demands[group].holds,
+                declared=demands[group].replicas is not None,
             )
-            for group, (options, resources) in claims_of.items()
-            for replicas in [
-                _pool_replicas(
-                    options,
-                    resources,
-                    cluster.get("GPU", 0),
-                    held_gpus,
-                    ephemeral_pools=len(claims_of) - len(long_running),
-                ),
-            ]
+            for group, options in options_of.items()
         }
         # A failed warm-up surfaces on the first lease, which prepares again.
-        for group in long_running:
-            pools[group].coordinator.start.remote()
-        return pools
+        for group, pool in pools.items():
+            if demands[group].holds:
+                pool.coordinator.start.remote()
+        return pools, _Placement(graph, plan, demands)
 
 
-def _all_maps(nodes: Sequence[IROp]) -> List[IRMap]:
-    """The maps among ``nodes`` and in the children of their ``group_by`` nodes."""
-    maps: List[IRMap] = []
-    seen: Set[IROp] = set()
-    stack: List[IROp] = list(nodes)
-    while stack:
-        node = stack.pop()
-        if node in seen:
-            continue
-        seen.add(node)
-        match node:
-            case IRMap():
-                maps.append(node)
-            case IRDemux(template=IROp() as template):
-                stack.append(template)
-            case _:
-                pass
-        stack.extend(node.upstream)
-    return maps
+@dataclass(frozen=True)
+class _Placement:
+    """The plan a pipeline runs with, for its report."""
+
+    graph: PipelineReport
+    plan: Plan
+    demands: Mapping[str, GroupDemand]
+
+    def layer(self) -> Layer:
+        return placement_layer(self.graph, self.plan, self.demands)
+
+
+def _cluster_node_gpus() -> List[int]:
+    """The GPUs of every live node of the Ray cluster."""
+    return [
+        int(node["Resources"].get("GPU", 0)) for node in ray.nodes() if node["Alive"]
+    ]
+
+
+def _check_one_phase(plan: Plan, demands: Mapping[str, GroupDemand]) -> None:
+    """Raise if the pools need phases, which the backend cannot run yet."""
+    match plan.phases:
+        case () | (_,):
+            pass
+        case phases:
+            later = sorted({demands[g].name for phase in phases[1:] for g in phase})
+            raise ValueError(
+                "The protocols do not fit the cluster at once: the "
+                f"long-running protocols hold their GPUs, so {', '.join(later)} "
+                "would have to wait for them to flush, which this backend "
+                "cannot run yet. Reduce their replicas or claims.",
+            )
 
 
 @dataclass(frozen=True)
@@ -2515,60 +2551,20 @@ class _Pool:
     replicas: int
     # Whether the pool releases idle executors (ephemeral protocols).
     ephemeral: bool
+    # Whether the protocol declared its replicas (a number or "auto").
+    declared: bool
 
 
 def _pooled(
     compute: Optional[ComputeAssignment],
     options: Mapping[str, Any],
 ) -> bool:
-    """Whether the calls of a map run on the executors of a pool.
-
-    Long-running protocols hold their executors; calls claiming GPUs need
-    processes that keep their GPU. The ``cpu_only`` maps of a protocol share
-    its group id, but claim no GPUs and run as tasks.
-    """
+    """Whether the calls of a map run on the executors of a pool."""
     match compute:
         case None:
             return False
-        case ComputeAssignment(
-            resources=ComputeResources(task=TaskType.LONG_RUNNING),
-        ):
-            return True
-        case ComputeAssignment():
-            return options["num_gpus"] > 0
-
-
-def _declared_replicas(resources: ComputeResources) -> int:
-    """The replicas a protocol declared, or one."""
-    match resources.replicas:
-        case None:
-            return 1
-        case replicas:
-            return replicas
-
-
-def _pool_replicas(
-    options: Mapping[str, Any],
-    resources: ComputeResources,
-    cluster_gpus: float,
-    held_gpus: float,
-    ephemeral_pools: int,
-) -> int:
-    """Executors of a pool: declared, or the default of its task type.
-
-    The ephemeral pools of a pipeline share the GPUs that the long-running
-    pools (``held_gpus``) leave, in equal parts, so that they do not compete
-    for the same GPUs; each may start as many executors as its part fits, at
-    least one.
-    """
-    match (resources.task, resources.replicas):
-        case (_, int(replicas)):
-            return replicas
-        case (TaskType.LONG_RUNNING, None):
-            return 1
-        case _:
-            share = (cluster_gpus - held_gpus) / ephemeral_pools
-            return max(1, math.floor(share / options["num_gpus"]))
+        case ComputeAssignment(resources=resources):
+            return pooled(resources, options["num_gpus"])
 
 
 def _without_prepare(
@@ -2703,34 +2699,6 @@ def _needs_gpu_memory(node: IROp) -> bool:
             return True
         case _:
             return any(_needs_gpu_memory(upstream) for upstream in node.upstream)
-
-
-def _check_pools_fit(
-    pools: Mapping[str, Tuple[Dict[str, Any], int]],
-    cluster: Mapping[str, float],
-) -> None:
-    """Raise unless the long-running pools fit the cluster at once.
-
-    Args:
-        pools: The Ray options of an executor and the replicas, by group.
-        cluster: The resources of the Ray cluster.
-
-    The executors of a pool hold their resources until FLUSH: a pool that
-    fits only once another released its GPUs would wait for them forever.
-    """
-    gpus = sum(options["num_gpus"] * replicas for options, replicas in pools.values())
-    cpus = sum(options["num_cpus"] * replicas for options, replicas in pools.values())
-    cluster_gpus, cluster_cpus = cluster.get("GPU", 0), cluster.get("CPU", 0)
-    match (gpus <= cluster_gpus, cpus <= cluster_cpus):
-        case (True, True):
-            pass
-        case _:
-            raise ValueError(
-                f"The long-running protocols {sorted(pools)} hold {gpus:g} GPUs "
-                f"and {cpus:g} CPUs at once, but the Ray cluster has "
-                f"{cluster_gpus:g} GPUs and {cluster_cpus:g} CPUs. Reduce "
-                "their replicas or their claims.",
-            )
 
 
 def _check_cluster_fits(assignment: ComputeAssignment, num_gpus: float) -> None:

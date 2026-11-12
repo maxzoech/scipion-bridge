@@ -29,7 +29,7 @@ from ...core.streaming.backend import StageStats
 from ...core.streaming.ir import IROp
 from ...core.streaming.node import lower
 from ...core.streaming.pipeline import Pipeline
-from ...core.streaming.report.model import PipelineReport, report_of
+from ...core.streaming.report.model import Layer, PipelineReport, report_of
 from ...core.streaming.report.render import render_dot, render_html, render_text
 from ...core.streaming.sink import Sink
 from ...core.streaming.sink_writer import SinkWriter
@@ -39,7 +39,9 @@ from .backend import (
     DEFAULT_SPILL_THRESHOLD,
     RayBackend,
     RayCompiledPipeline,
+    read_gpu_memory,
 )
+from .placement import ClusterSpec, explain_placement
 from .container import configure_ray_env
 from .loader import LoaderStats, RayInputLoader, expand_pattern, shard
 
@@ -222,6 +224,33 @@ def _explain_requested() -> bool:
     return known.explain is not None
 
 
+def local_cluster() -> ClusterSpec:
+    """This machine as a cluster: its GPUs, as nvidia-smi reports them, and CPUs."""
+    memory = tuple(read_gpu_memory())
+    return ClusterSpec(
+        node_gpus=(len(memory),),
+        cpus=float(os.cpu_count() or 1),
+        gpu_memory=memory,
+    )
+
+
+def _cluster_of(gpus: Optional[str]) -> Optional[ClusterSpec]:
+    """The cluster of ``--explain-gpus``, e.g. ``4,4`` for two nodes of 4 GPUs,
+    with the CPUs and GPU memory of this machine."""
+    match gpus:
+        case None:
+            return None
+        case _:
+            local = local_cluster()
+            node_gpus = tuple(int(count) for count in gpus.split(","))
+            memory = min(local.gpu_memory, default=None)
+            return ClusterSpec(
+                node_gpus=node_gpus,
+                cpus=local.cpus * len(node_gpus),
+                gpu_memory=() if memory is None else (memory,) * sum(node_gpus),
+            )
+
+
 def _cli_parameters(config: Any, args: Any) -> Dict[str, Any]:
     """The parameter values given on the command line."""
     return {
@@ -400,10 +429,25 @@ class RayPipelineRunner:
             case pipeline:
                 return pipeline.report()
 
-    def explain(self, path: Path) -> None:
-        """Print the stages of the pipeline and write its report to ``path``
-        (HTML) and next to it (DOT), without running it."""
-        report = self.report()
+    def explain(self, path: Path, cluster: Optional[ClusterSpec] = None) -> None:
+        """Print the stages of the pipeline and their placement on
+        ``cluster`` (default: this machine), and write its report to ``path``
+        (HTML) and next to it (DOT), without running it.
+
+        A placement that cannot be satisfied on ``cluster`` is reported as a
+        warning instead of the placement.
+        """
+        cluster = local_cluster() if cluster is None else cluster
+        try:
+            report = explain_placement(self.ir_sinks, cluster)
+        except ValueError as error:
+            report = report_of(self.ir_sinks).with_layer(
+                Layer(
+                    "placement",
+                    "Placement",
+                    warnings=(f"The pipeline cannot run on {cluster}: {error}",),
+                ),
+            )
         print(render_text(report))
         _write_report(report, path)
 
@@ -657,6 +701,13 @@ class RayPipelineRunner:
             ),
         )
         parser.add_argument(
+            "--explain-gpus",
+            help=(
+                "The GPUs of every node of the cluster --explain plans for, "
+                "e.g. 4 or 4,4 (default: the GPUs of this machine)."
+            ),
+        )
+        parser.add_argument(
             "--report",
             type=Path,
             help=(
@@ -698,7 +749,7 @@ class RayPipelineRunner:
         args = parser.parse_args()
         if args.explain is not None:
             self.set_parameters(_cli_parameters(config, args))
-            self.explain(args.explain)
+            self.explain(args.explain, _cluster_of(args.explain_gpus))
             return
         if args.profile is not None:
             self.set_profile(args.profile)

@@ -78,6 +78,19 @@
   also in the names of their actors.
 - `ComputeAssignment.name` names the protocol of a group.
 
+### Placement
+- A placement planner (`backend/ray/placement.py`) decides the executors of
+  every pool: long-running protocols get GPUs of their own where the cluster
+  has enough (with a warning where they must share), the executors of a
+  protocol fill a GPU before the next, and ephemeral protocols split the GPUs
+  the others leave. Reports and `--explain` show the plan; `--explain-gpus`
+  plans for another cluster.
+- `@B.resources(..., replicas="auto")` sizes a long-running pool to the GPUs
+  the other long-running protocols leave.
+- Compiling fails for claims no cluster state satisfies, now also for a claim
+  above one GPU that is not a whole number, and when an ephemeral protocol
+  with GPUs has none left beside the long-running ones (it waited forever).
+
 ### Tooling
 - Static tensor columns are read from their Arrow storage, so null cells of a
   sparse `Collection` load with pyarrow 26, whose `to_numpy_ndarray` rejects

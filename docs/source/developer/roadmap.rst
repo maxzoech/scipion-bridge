@@ -91,7 +91,7 @@ Status
      - 1, 1b
    * - 3
      - Placement planner and placement groups
-     - Planned
+     - In progress: planner and reports done; phases and placement groups open
      - 2
    * - 4
      - Provenance: key paths, ``.astype``, ``.apply``, storage domains
@@ -170,6 +170,15 @@ Planned
 
 Placement planner (step 3)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+**Done:** the planner (``plan_placement``) and its ``placement`` layer in
+pipeline reports (``--explain``, ``--explain-gpus``). Pools get the replicas
+it plans; anti-affinity is planned but not enforced yet, and pipelines whose
+long-running protocols need several phases do not compile yet. Open, in this
+order: phases (per-pool release at FLUSH, gated starts of later phases,
+unbounded spilling at phase boundaries), then placement groups that enforce
+the plan.
+
 
 A module ``backend/ray/placement.py`` of pure functions, testable in-process.
 Input: every compute assignment of the graph, including ``group_by``

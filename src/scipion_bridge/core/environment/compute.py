@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import logging
 import os
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Literal, Optional, Union
 
 # ``numpy._core`` is the module in NumPy 2; NumPy 1.26 re-exports
 # ``numpy.core`` under it. NumPy's stubs omit the function.
@@ -13,6 +13,11 @@ from numpy._core.multiarray import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Replicas of a protocol: a number of processes, ``"auto"`` for as many as the
+# GPUs left by the other protocols hold, or None for the default of its task
+# type.
+Replicas = Union[int, Literal["auto"], None]
 
 # Shares of a GPU a memory claim is rounded up to.
 GPU_FRACTIONS = (1 / 8, 1 / 4, 1 / 2, 1.0)
@@ -63,16 +68,18 @@ class ComputeResources:
             none: the calls may use all cores of the machine and the OS
             scheduler shares them.
         task: Whether the resources are taken per call or held across calls.
-        replicas: Number of processes of a long-running protocol, each
-            holding the resources; the calls of its maps are spread over
-            them. ``None`` means one.
+        replicas: Number of processes of the protocol, each holding the
+            resources; the calls of its maps are spread over them.
+            ``"auto"`` sizes the pool to the GPUs the other protocols
+            leave. ``None`` means one process for a long-running protocol,
+            and the GPUs left in equal parts for an ephemeral one.
     """
 
     gpus: float = 0
     min_vram: Optional[float] = None
     cpus: Optional[float] = None
     task: TaskType = TaskType.EPHEMERAL
-    replicas: Optional[int] = None
+    replicas: Replicas = None
 
     def __post_init__(self) -> None:
         negative = [
@@ -88,10 +95,16 @@ class ComputeResources:
             raise ValueError(
                 f"Compute resources must not be negative, got {self}.",
             )
-        if self.replicas is not None and self.replicas < 1:
-            raise ValueError(
-                f"Compute resources need at least one replica, got {self}.",
-            )
+        match self.replicas:
+            case None | "auto":
+                pass
+            case int(replicas) if replicas >= 1:
+                pass
+            case _:
+                raise ValueError(
+                    "Compute resources need at least one replica or "
+                    f"replicas='auto', got {self}.",
+                )
 
 
 def gpu_memory_env(num_gpus: float) -> Dict[str, str]:

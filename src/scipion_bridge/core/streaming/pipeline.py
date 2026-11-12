@@ -119,13 +119,17 @@ class Pipeline:
                 return stats
 
     def report(self) -> PipelineReport:
-        """The graph of the pipeline, annotated with the stats of its stages.
+        """The graph of the pipeline, annotated with the stats of its stages
+        and the layers of its backend (e.g. the placement of its pools).
 
         Render it with ``scipion_bridge.core.streaming.report``. Also available
         after ``close()``, with the final stats.
         """
         report = report_of(self._ir_sinks)
-        return report.with_layer(stats_layer(report, self.stats()))
+        layers = [stats_layer(report, self.stats()), *self._compiled.layers(report)]
+        for layer in layers:
+            report = report.with_layer(layer)
+        return report
 
     def close(self) -> None:
         """Terminate the actors and other resources of the backend.
