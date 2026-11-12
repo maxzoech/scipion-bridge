@@ -128,13 +128,45 @@ class ClusterSpec:
 
 @dataclass(frozen=True)
 class Slot:
-    """GPUs of one node that the executors of a group run on."""
+    """GPUs of one node that the executors of a group run on.
+
+    Attributes:
+        node: The index of the node.
+        gpus: The GPUs on the node: one, or as many as one executor claims.
+        executors: The executors of the group on these GPUs; for ephemeral
+            groups, the most that the share of the group holds.
+        exclusive: Whether no other group runs on these GPUs in the phase:
+            a long-running group then reserves them whole, even if its
+            executors claim less.
+    """
 
     node: int
     gpus: Tuple[int, ...]
+    executors: int = 1
+    exclusive: bool = False
 
     def __str__(self) -> str:
         return f"node {self.node} GPU {','.join(map(str, self.gpus))}"
+
+
+@dataclass(frozen=True)
+class Bundle:
+    """The resources a long-running pool reserves on one node, for a slot.
+
+    Attributes:
+        node: The index of the node.
+        resources: The Ray resources of the bundle, e.g. ``{"GPU": 1.0}``.
+        executors: The executors of the pool that run in the bundle.
+    """
+
+    node: int
+    resources: Mapping[str, float]
+    executors: int
+
+    def __str__(self) -> str:
+        claims = ", ".join(f"{v:g} {k}" for k, v in self.resources.items())
+        executors = "executor" if self.executors == 1 else "executors"
+        return f"node {self.node}: {claims} for {self.executors} {executors}"
 
 
 @dataclass(frozen=True)
@@ -306,7 +338,7 @@ def plan_placement(
 
     units = _units(graph, demands)
     phases, unit_phase, warnings = _assign_phases(units, graph, demands, cluster)
-    _place_flexible(phases, demands, weights or {}, warnings)
+    _place_flexible(phases, demands, weights or {}, warnings, cluster)
     return _plan(graph, units, unit_phase, phases, demands, cluster, warnings)
 
 
@@ -582,20 +614,98 @@ def _place_flexible(
     demands: Mapping[str, GroupDemand],
     weights: Mapping[str, float],
     warnings: List[str],
+    cluster: _Cluster,
 ) -> None:
-    """Give the flexible groups of every phase their GPUs, in place of their
-    reservations: the GPUs the fixed groups leave (see ``_split``)."""
+    """Give the flexible groups of every phase their GPUs: the GPUs the fixed
+    groups leave.
+
+    Long-running elastic groups (``replicas="auto"``) keep the executor they
+    reserved and grow by whole executors (``_grow``); ephemeral groups then
+    split the GPUs left (``_split``).
+    """
     for phase in phases:
+        free = len(
+            [gpu for gpu in phase.gpus if not any(demands[g].fixed for g, _ in gpu)]
+        )
+        phase.gpus = [
+            [(g, s) for g, s in gpu if demands[g].holds] for gpu in phase.gpus
+        ]
         flexible = [
             demands[g]
             for g in phase.groups
             if not demands[g].fixed and demands[g].gpus > 0
         ]
-        phase.gpus = [
-            [(g, s) for g, s in gpu if demands[g].fixed] for gpu in phase.gpus
-        ]
-        _split(phase, flexible, weights)
+        total = sum(weights.get(d.group, 1.0) for d in flexible if d.elastic)
+        ephemeral = [d for d in flexible if not d.holds]
+        _grow(
+            phase,
+            [d for d in flexible if d.holds],
+            ephemeral,
+            {
+                d.group: free * weights.get(d.group, 1.0) / total
+                for d in flexible
+                if d.holds
+            },
+            cluster,
+        )
+        _split(phase, ephemeral, weights)
         _warn_shared(phase, demands, warnings)
+
+
+def _grow(
+    phase: _Phase,
+    holding: List[GroupDemand],
+    ephemeral: List[GroupDemand],
+    shares: Mapping[str, float],
+    cluster: _Cluster,
+) -> None:
+    """Add whole executors to the long-running elastic groups of ``phase``.
+
+    A group grows, one executor at a time and in turns, up to what its share
+    of the free GPUs holds, on GPUs of its own. An executor cannot span GPUs,
+    and the group holds what it takes, so every ephemeral group of the phase
+    keeps room for one executor beside it.
+    """
+    counts = {d.group: 1 for d in holding}
+    growing = [d for d in holding if d.gpus > 0]
+    while growing:
+        for demand in list(growing):
+            target = max(1, math.floor(shares[demand.group] / demand.gpus + _EPS))
+            grown = (
+                _with_executor(phase, demand, ephemeral, cluster)
+                if counts[demand.group] < target
+                else None
+            )
+            match grown:
+                case None:
+                    growing.remove(demand)
+                case _:
+                    phase.gpus = grown.gpus
+                    counts[demand.group] += 1
+
+
+def _with_executor(
+    phase: _Phase,
+    demand: GroupDemand,
+    ephemeral: List[GroupDemand],
+    cluster: _Cluster,
+) -> Optional[_Phase]:
+    """``phase`` with one more executor of ``demand`` on GPUs of its own, if
+    every group of ``ephemeral`` keeps room for one executor."""
+    match _pack(phase, demand, 1, cluster, exclusive=True):
+        case None:
+            return None
+        case [gpus]:
+            trial = phase.copy()
+            for gpu in gpus:
+                trial.gpus[gpu].append((demand.group, min(demand.gpus, 1.0)))
+            room = all(
+                _pack(trial, other, 1, cluster, exclusive=False) is not None
+                for other in ephemeral
+            )
+            return trial if room else None
+        case placement:
+            raise AssertionError(f"One executor placed as {placement}.")
 
 
 def _free_gpus(phase: _Phase) -> List[int]:
@@ -605,11 +715,11 @@ def _free_gpus(phase: _Phase) -> List[int]:
 def _split(
     phase: _Phase, flexible: List[GroupDemand], weights: Mapping[str, float]
 ) -> None:
-    """Give the flexible groups of ``phase`` their GPUs.
+    """Give the ephemeral groups of ``phase`` their GPUs.
 
     Elastic groups split the free GPUs by weight, each on consecutive GPUs;
     ephemeral groups with declared replicas may use all free GPUs. Without
-    a free GPU, a group runs one executor beside the fixed groups.
+    a free GPU, a group runs one executor beside the long-running groups.
     """
     free = _free_gpus(phase)
     elastic = [d for d in flexible if d.elastic]
@@ -672,7 +782,7 @@ def _plan(
             group: GroupPlan(
                 replicas=_replicas(demands[group], phases[phase]),
                 phase=phase,
-                slots=_slots(group, phases[phase], nodes, demands[group].gpus),
+                slots=_slots(demands[group], phases[phase], nodes),
             )
             for group, phase in phase_of.items()
         },
@@ -697,37 +807,117 @@ def _plan(
 
 
 def _replicas(demand: GroupDemand, phase: _Phase) -> int:
-    """The executors of ``demand``: declared, or what its share of the GPUs holds."""
-    match (demand.elastic, demand.replicas):
-        case (False, int(replicas)):
+    """The executors of ``demand``: declared, the executors a long-running
+    group was given, or what the share of an ephemeral group holds."""
+    match (demand.elastic, demand.holds, demand.replicas):
+        case (False, _, int(replicas)):
             return replicas
-        case (False, _):
+        case (False, _, _):
             return 1
-        case (True, _) if demand.gpus == 0:
+        case (True, _, _) if demand.gpus == 0:
             return 1
-        case (True, _):
+        case (True, True, _):
+            entries = sum(g == demand.group for gpu in phase.gpus for g, _ in gpu)
+            return entries // max(1, int(demand.gpus))
+        case (True, False, _):
             share = sum(s for gpu in phase.gpus for g, s in gpu if g == demand.group)
             return max(1, math.floor(share / demand.gpus + _EPS))
 
 
 def _slots(
-    group: str,
+    demand: GroupDemand,
     phase: _Phase,
     nodes: List[Tuple[int, int]],
-    claim: float,
 ) -> Tuple[Slot, ...]:
-    """The GPUs of ``group`` in ``phase``: one slot per GPU, or per group of
-    ``claim`` GPUs on a node for claims above one GPU."""
-    by_node: Dict[int, List[int]] = {}
+    """The GPUs of ``demand`` in ``phase``: one slot per GPU, or per group of
+    ``claim`` GPUs on a node for claims above one GPU, with the executors
+    on each."""
+    by_node: Dict[int, List[Tuple[int, int, bool]]] = {}
     for gpu, occupants in enumerate(phase.gpus):
-        if any(g == group for g, _ in occupants):
-            by_node.setdefault(nodes[gpu][0], []).append(nodes[gpu][1])
-    size = max(1, int(claim))
+        mine = [s for g, s in occupants if g == demand.group]
+        if mine:
+            executors = (
+                len(mine)
+                if demand.holds
+                else math.floor(sum(mine) / demand.gpus + _EPS)
+            )
+            alone = len(mine) == len(occupants)
+            by_node.setdefault(nodes[gpu][0], []).append(
+                (nodes[gpu][1], executors, alone)
+            )
+    match demand.gpus:
+        case claim if claim <= 1:
+            return tuple(
+                Slot(node, (gpu,), executors, alone)
+                for node, on_node in by_node.items()
+                for gpu, executors, alone in on_node
+            )
+        case claim:
+            size = int(claim)
+            return tuple(
+                Slot(
+                    node,
+                    tuple(gpu for gpu, _, _ in on_node[i : i + size]),
+                    1,
+                    all(alone for _, _, alone in on_node[i : i + size]),
+                )
+                for node, on_node in by_node.items()
+                for i in range(0, len(on_node) - size + 1, size)
+            )
+
+
+def bundles_of(pool: GroupPlan, demand: GroupDemand) -> Tuple[Bundle, ...]:
+    """The resources a long-running pool reserves, one bundle per slot.
+
+    Ephemeral pools reserve nothing: they release their GPUs when idle. Nor
+    do pools without GPUs.
+    """
     return tuple(
-        Slot(node, tuple(on_node[i : i + size]))
-        for node, on_node in by_node.items()
-        for i in range(0, len(on_node) - size + 1, size)
+        Bundle(slot.node, _bundle_resources(slot, demand), slot.executors)
+        for slot in pool.slots
+        if demand.holds and demand.gpus > 0 and slot.executors > 0
     )
+
+
+def _bundle_resources(slot: Slot, demand: GroupDemand) -> Dict[str, float]:
+    """The GPUs of the slot, whole if the group has them to itself (Ray would
+    pack fractional bundles of different groups on one GPU), else what its
+    executors claim; and the CPUs its executors reserve."""
+    gpus = (
+        round(slot.executors * demand.gpus, 6)
+        if demand.gpus < 1 and not slot.exclusive
+        else float(len(slot.gpus))
+    )
+    cpus = slot.executors * demand.cpus
+    return {
+        name: amount for name, amount in (("GPU", gpus), ("CPU", cpus)) if amount > 0
+    }
+
+
+def blockers_of(
+    plan: Plan,
+    demands: Mapping[str, GroupDemand],
+) -> Dict[str, FrozenSet[str]]:
+    """The pools of earlier phases that every pool must wait for: those on
+    one of its GPUs, and, if it reserves CPUs, the long-running pools of
+    earlier phases that reserve CPUs too."""
+    gpus = {
+        group: {(slot.node, gpu) for slot in pool.slots for gpu in slot.gpus}
+        for group, pool in plan.groups.items()
+    }
+
+    def cpus(group: str) -> bool:
+        return demands[group].holds and demands[group].cpus > 0
+
+    return {
+        group: frozenset(
+            other
+            for other, earlier in plan.groups.items()
+            if earlier.phase < pool.phase
+            and (gpus[other] & gpus[group] or (cpus(other) and cpus(group)))
+        )
+        for group, pool in plan.groups.items()
+    }
 
 
 def _occupants(
@@ -797,8 +987,28 @@ def placement_layer(
     graph: PipelineReport,
     plan: Plan,
     demands: Mapping[str, GroupDemand],
+    managed: bool = True,
 ) -> Layer:
-    """The plan as a layer of the report ``graph``."""
+    """The plan as a layer of the report ``graph``.
+
+    Args:
+        managed: Whether long-running pools reserve their planned GPUs
+            (``RayBackend(placement="managed")``); otherwise Ray places the
+            executors, and later phases wait for every earlier pool.
+    """
+    blockers = blockers_of(plan, demands)
+
+    def waits_for(group: str) -> Tuple[str, ...]:
+        return tuple(
+            demands[other].name
+            for other, pool in plan.groups.items()
+            if (
+                other in blockers[group]
+                if managed
+                else pool.phase < plan.groups[group].phase
+            )
+        )
+
     nodes: Dict[str, Dict[str, Value]] = {
         node.id: {"phase": plan.node_phases[node.id]} for node in graph.nodes
     }
@@ -834,6 +1044,11 @@ def placement_layer(
                 "gpus_per_executor": demands[group].gpus,
                 "cpus_per_executor": demands[group].cpus,
                 "gpus": tuple(str(slot) for slot in pool.slots),
+                "reserves": tuple(
+                    str(bundle)
+                    for bundle in (bundles_of(pool, demands[group]) if managed else ())
+                ),
+                "waits_for": waits_for(group),
             }
             for group, pool in plan.groups.items()
         },
@@ -841,7 +1056,16 @@ def placement_layer(
         panels=(
             TablePanel(
                 "Pools",
-                ("protocol", "task", "phase", "executors", "GPUs each", "on"),
+                (
+                    "protocol",
+                    "task",
+                    "phase",
+                    "executors",
+                    "GPUs each",
+                    "on",
+                    "reserves" if managed else "reserves (placement='ray': none)",
+                    "waits for",
+                ),
                 tuple(
                     (
                         demands[group].name,
@@ -850,6 +1074,13 @@ def placement_layer(
                         pool.replicas,
                         demands[group].gpus,
                         ", ".join(str(slot) for slot in pool.slots),
+                        "; ".join(
+                            str(b)
+                            for b in (
+                                bundles_of(pool, demands[group]) if managed else ()
+                            )
+                        ),
+                        ", ".join(waits_for(group)),
                     )
                     for group, pool in plan.groups.items()
                 ),
@@ -869,7 +1100,11 @@ def placement_layer(
     )
 
 
-def explain_placement(ir_sinks: Sequence[IROp], cluster: ClusterSpec) -> PipelineReport:
+def explain_placement(
+    ir_sinks: Sequence[IROp],
+    cluster: ClusterSpec,
+    managed: bool = True,
+) -> PipelineReport:
     """The report of the pipeline ending in ``ir_sinks``, with its placement
     on ``cluster``, planned without Ray.
 
@@ -883,4 +1118,4 @@ def explain_placement(ir_sinks: Sequence[IROp], cluster: ClusterSpec) -> Pipelin
         lambda resources: gpu_claim(resources, smallest),
     )
     plan = plan_placement(graph, demands, cluster.node_gpus, cluster.cpus)
-    return graph.with_layer(placement_layer(graph, plan, demands))
+    return graph.with_layer(placement_layer(graph, plan, demands, managed))

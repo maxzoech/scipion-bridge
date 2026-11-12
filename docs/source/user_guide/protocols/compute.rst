@@ -89,7 +89,20 @@ every protocol run:
   ``replicas="auto"``. A protocol never takes the minimum of one that feeds
   it.
 * Then ephemeral protocols and ``replicas="auto"`` split the GPUs that are
-  left, in equal parts.
+  left, in equal parts. A long-running protocol with ``replicas="auto"``
+  grows by whole executors and leaves room for one executor of every
+  ephemeral protocol beside it.
+
+The backend enforces the plan: every long-running protocol reserves its
+planned GPUs (a Ray placement group, on the planned node) from its first
+executor until it releases them, so that no other process lands on them. A
+GPU a protocol has to itself is reserved whole, even if its executors claim
+half of it. Ephemeral protocols reserve nothing and run on the GPUs that
+nobody reserved. On a cluster shared with other jobs, reserving GPUs may
+wait for them (the pool logs a warning after 30 seconds); there,
+``RayBackend(placement="ray")`` (``--placement ray``,
+``SCIPION_STREAM_PLACEMENT=ray``) leaves placement to Ray, as before:
+executors may then share a GPU although another one is free.
 
 Protocols that do not fit the cluster at once run in **phases**, one after
 another. For example, on one GPU, a long-running motion correction runs in
@@ -97,7 +110,9 @@ phase 0 and a long-running 2D classification after it in phase 1:
 
 * A long-running protocol holds its GPUs until the stream is flushed. Its
   pool then releases them as soon as FLUSH has passed its own stages, and
-  the pools of the next phase start.
+  the pools of the next phase on the same GPUs start (with
+  ``placement="ray"``, once every pool of the earlier phases has released
+  its GPUs).
 * The items for a later phase wait in front of its first stage, on disk
   (in the temporary directory of that stage's node). Within a phase,
   backpressure works as usual. The stage before the boundary therefore keeps

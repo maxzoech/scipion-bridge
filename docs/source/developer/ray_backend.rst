@@ -189,9 +189,27 @@ a lease arrives late. ``describe`` reports the state of a pool without taking
 its lock.
 
 **Placement.** The placement planner (``placement.py``, pure functions)
-decides the replicas of every pool and its phase; see
+decides the replicas of every pool, its phase and its slots (the GPUs of a
+node it runs on, with the executors on each); see
 :doc:`/user_guide/protocols/compute`. ``_compute_groups`` creates the pools
 from the plan, phase by phase.
+
+With ``RayBackend(placement="managed")`` (the default), a long-running pool
+gets a ``_Reservation``: one bundle per slot (``bundles_of``), pinned to the
+planned node by the ``ray.io/node-id`` label. A slot the pool has to itself
+is reserved whole, since Ray packs fractional bundles of different
+placement groups on one GPU; a shared slot reserves what its executors
+claim. The coordinator creates the placement group when its first executor
+starts (after the gate), named ``<pipeline id>/<group>/<generation>``, and
+creates every executor in the bundle with the most room
+(``_take_bundle``). ``_release`` removes the group after killing the
+executors; a start whose pool was released meanwhile reserves nothing and
+does not fail the pool, and a pool whose executors fail to start removes
+it as well. Ray keeps a placement group when the actor that created it
+dies, so ``RayCompiledPipeline.close`` removes the groups of the pipeline
+by name. Within a node, Ray picks the physical GPU of a bundle. Ephemeral
+pools and pools without GPUs reserve nothing; ``placement="ray"`` reserves
+nothing at all.
 
 **Phases.** Long-running pools hold their GPUs until FLUSH, so pools that do
 not fit the cluster at once run one after another. Three mechanisms make a
@@ -199,11 +217,15 @@ later phase wait instead of deadlocking:
 
 * *Release per pool*, above: an earlier pool frees its GPUs when FLUSH has
   passed its own stages, not the whole pipeline.
-* *Gates*: the coordinator of a later pool has the coordinators of all
-  earlier phases as ``blockers``. ``_start_executor`` waits for their
-  ``wait_released`` before it creates an executor, so a later pool never
-  takes a GPU an earlier one still needs, e.g. to restart an executor after
-  an idle release.
+* *Gates*: the coordinator of a later pool has ``blockers``: with managed
+  placement, the pools of earlier phases on one of its GPUs, or reserving
+  CPUs when it does (``blockers_of``); with ``placement="ray"``, all of
+  them, since Ray picks the GPUs. ``_start_executor`` waits for their
+  ``wait_released`` before it reserves and creates an executor, so a later
+  pool never takes a GPU an earlier one still needs, e.g. to restart an
+  executor after an idle release. Waits only point to earlier phases, so
+  they cannot form a cycle; an ephemeral executor of an earlier phase on a
+  GPU outside its plan can only delay a later pool until it goes idle.
 * *Boundaries*: the stage behind an edge into a later phase
   (``Plan.boundaries``) has an actor of its own, even a single-input map
   (``_is_hosted``, ``_host_of``), and a mailbox without bound that spills

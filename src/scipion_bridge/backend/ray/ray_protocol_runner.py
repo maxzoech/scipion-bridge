@@ -37,6 +37,7 @@ from ...core.streaming.spill import SpillStoreFactory, pickle_spill_store
 from .backend import (
     DEFAULT_BUFFER_SIZE,
     DEFAULT_SPILL_THRESHOLD,
+    PlacementMode,
     RayBackend,
     RayCompiledPipeline,
     read_gpu_memory,
@@ -216,6 +217,16 @@ def _parse_cli_value(dtype: Any, value: Any) -> Any:
 _DEFAULT_REPORT = "pipeline_report.html"
 
 
+def _placement_mode(value: str) -> PlacementMode:
+    match value:
+        case "managed":
+            return "managed"
+        case "ray":
+            return "ray"
+        case _:
+            raise ValueError(f"placement must be 'managed' or 'ray', got {value!r}.")
+
+
 def _explain_requested() -> bool:
     """Whether the command line asks for ``--explain``, before it is parsed."""
     peek = ArgumentParser(add_help=False)
@@ -293,6 +304,7 @@ class RayPipelineRunner:
         profile_log_level: int = logging.INFO,
         num_loaders: int = 4,
         loader_cpus: float = 0,
+        placement: PlacementMode = "managed",
     ) -> None:
         """
         Every buffering option is overridden by an environment variable, see
@@ -331,6 +343,10 @@ class RayPipelineRunner:
                 (``SCIPION_STREAM_NUM_LOADERS``).
             loader_cpus: CPUs reserved for each loader actor
                 (``SCIPION_STREAM_LOADER_CPUS``).
+            placement: ``"managed"`` reserves the GPUs the planner gives
+                every long-running protocol; ``"ray"`` lets Ray place them,
+                for clusters shared with other jobs
+                (``SCIPION_STREAM_PLACEMENT``).
         """
         self.protocol = protocol
         self.parameters = _validate_parameters(protocol, parameters or {})
@@ -343,6 +359,9 @@ class RayPipelineRunner:
             os.environ.get("SCIPION_STREAM_LOADER_CPUS", loader_cpus)
         )
         self.queue_size = int(os.environ.get("SCIPION_STREAM_QUEUE_SIZE", queue_size))
+        self.placement: PlacementMode = _placement_mode(
+            os.environ.get("SCIPION_STREAM_PLACEMENT", placement)
+        )
         self.max_in_flight = _env_int("SCIPION_STREAM_MAX_IN_FLIGHT", max_in_flight)
         self.buffer_size = _env_limit("SCIPION_STREAM_BUFFER_SIZE", buffer_size)
         self.spill_threshold = _env_limit(
@@ -393,6 +412,7 @@ class RayPipelineRunner:
             parameters=self.parameters,
             profile=self.profile,
             profile_log_level=self.profile_log_level,
+            placement=self.placement,
         )
         return Pipeline.from_ir(self.ir_sinks, backend=backend)
 
@@ -439,7 +459,11 @@ class RayPipelineRunner:
         """
         cluster = local_cluster() if cluster is None else cluster
         try:
-            report = explain_placement(self.ir_sinks, cluster)
+            report = explain_placement(
+                self.ir_sinks,
+                cluster,
+                managed=self.placement == "managed",
+            )
         except ValueError as error:
             report = report_of(self.ir_sinks).with_layer(
                 Layer(
@@ -708,6 +732,15 @@ class RayPipelineRunner:
             ),
         )
         parser.add_argument(
+            "--placement",
+            choices=["managed", "ray"],
+            help=(
+                "managed (default) reserves the GPUs the planner gives every "
+                "long-running protocol; ray lets Ray place them, for clusters "
+                "shared with other jobs."
+            ),
+        )
+        parser.add_argument(
             "--report",
             type=Path,
             help=(
@@ -747,6 +780,8 @@ class RayPipelineRunner:
             )
 
         args = parser.parse_args()
+        if args.placement is not None:
+            self.placement = _placement_mode(args.placement)
         if args.explain is not None:
             self.set_parameters(_cli_parameters(config, args))
             self.explain(args.explain, _cluster_of(args.explain_gpus))

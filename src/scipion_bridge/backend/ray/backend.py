@@ -12,6 +12,7 @@ from typing import (
     Dict,
     FrozenSet,
     List,
+    Literal,
     Mapping,
     Optional,
     Sequence,
@@ -34,7 +35,17 @@ import threading
 import time
 import uuid
 import ray  # type: ignore
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy  # type: ignore
+from ray.util.placement_group import (  # type: ignore
+    PlacementGroup,
+    get_placement_group,
+    placement_group,
+    placement_group_table,
+    remove_placement_group,
+)
+from ray.util.scheduling_strategies import (  # type: ignore
+    NodeAffinitySchedulingStrategy,
+    PlacementGroupSchedulingStrategy,
+)
 
 from scipion_bridge.core.environment.compute import (
     CPUS_ENV_VAR,
@@ -79,9 +90,12 @@ from scipion_bridge.core.streaming.report.model import (
 )
 
 from .placement import (
+    Bundle,
     GroupDemand,
     Plan,
     all_maps,
+    blockers_of,
+    bundles_of,
     demands_of,
     placement_layer,
     plan_placement,
@@ -872,6 +886,58 @@ def _unused_share(
 # Seconds ``close`` waits for the stages to remove their spilled items.
 _CLOSE_SPILL_TIMEOUT_S = 10.0
 
+# Seconds a pool waits for its placement group before it warns that the
+# cluster lacks the GPUs of the plan.
+_RESERVE_WARNING_S = 30.0
+
+# The label of every Ray node with its id, which pins a bundle to a node.
+_NODE_ID_LABEL = "ray.io/node-id"
+
+# Placement of the pools of executors: "managed" reserves the GPUs the
+# planner gives every long-running pool in a placement group, "ray" leaves
+# placement to Ray (for clusters shared with other jobs).
+PlacementMode = Literal["managed", "ray"]
+
+
+@dataclass(frozen=True)
+class _Reservation:
+    """The placement group a long-running pool reserves while it holds GPUs.
+
+    Attributes:
+        name: The prefix of the names of its placement groups: the id of the
+            pipeline and the group.
+        bundles: The resources of every bundle.
+        selectors: The label selector of every bundle, pinning it to a node.
+        executors: The executors that run in every bundle.
+    """
+
+    name: str
+    bundles: Tuple[Dict[str, float], ...]
+    selectors: Tuple[Dict[str, str], ...]
+    executors: Tuple[int, ...]
+
+
+def _reservation_of(
+    name: str,
+    bundles: Sequence[Bundle],
+    node_ids: Sequence[str],
+) -> Optional[_Reservation]:
+    """The reservation of the planned ``bundles``, with the nodes resolved
+    from their index to their Ray id; ``None`` without bundles."""
+    match bundles:
+        case []:
+            return None
+        case _:
+            return _Reservation(
+                name=name,
+                bundles=tuple(dict(bundle.resources) for bundle in bundles),
+                selectors=tuple(
+                    {_NODE_ID_LABEL: node_ids[bundle.node]} for bundle in bundles
+                ),
+                executors=tuple(bundle.executors for bundle in bundles),
+            )
+
+
 # Seconds an executor of an ephemeral protocol stays alive without calls,
 # unless the backend sets it otherwise.
 DEFAULT_EPHEMERAL_IDLE_S = 10.0
@@ -983,6 +1049,7 @@ class RayComputeGroup:
         profile: Optional[ProfileConfig],
         idle_s: Optional[float] = None,
         blockers: Sequence[Any] = (),
+        reservation: Optional[_Reservation] = None,
     ) -> None:
         """
         Args:
@@ -990,10 +1057,22 @@ class RayComputeGroup:
                 on an executor.
             blockers: The coordinators of the pools of earlier phases: an
                 executor starts once they have released their GPUs.
+            reservation: The placement group the executors run in, reserved
+                when the first one starts and removed when the pool is
+                released; ``None`` lets Ray place them.
         """
         self._options = options
         self._members = members
         self._blockers = list(blockers)
+        self._reservation = reservation
+        # The placement group of the current stream, and its reservation.
+        self._placement_group: Optional[PlacementGroup] = None
+        self._reserved: Optional[asyncio.Future[None]] = None
+        # The bundle of every ready executor, and of the executors starting,
+        # by a token, with the generation they start in.
+        self._bundle_of: Dict[int, int] = {}
+        self._starting_in: Dict[int, Tuple[int, int]] = {}
+        self._next_token = 0
         # The stages that run maps of the group, which release the pool once
         # all of them have passed FLUSH; and those that have, this stream.
         self._hosts: FrozenSet[str] = frozenset()
@@ -1110,31 +1189,128 @@ class RayComputeGroup:
                 await asyncio.gather(
                     *(b.wait_released.remote() for b in self._blockers)
                 )
-        self._recorder.instant("executor_create", "group")
-        executor: Any = RayComputeExecutor.options(
-            max_concurrency=self._members * _EXECUTOR_CALLS_IN_FLIGHT,
-            **self._options,
-        ).remote(self._parameters, self._group, self._profile)
+        token, bundle = self._take_bundle(generation)
+        executor: Optional[Any] = None
         try:
-            await executor.prepare.remote(self._functions)
+            placement = await self._placement(bundle, generation)
+            if placement is not None:
+                self._recorder.instant("executor_create", "group")
+                executor = RayComputeExecutor.options(
+                    max_concurrency=self._members * _EXECUTOR_CALLS_IN_FLIGHT,
+                    **self._options,
+                    **placement,
+                ).remote(self._parameters, self._group, self._profile)
+                await executor.prepare.remote(self._functions)
         except Exception as error:
-            ray.kill(executor)
+            if executor is not None:
+                ray.kill(executor)
             async with self._changed:
                 self._starting -= 1
-                self._failure = error
+                del self._starting_in[token]
+                # A release meanwhile removed the placement group: the start
+                # was cancelled, it did not fail.
+                if generation == self._generation:
+                    self._failure = error
+                # A pool whose executors fail to start holds no GPUs.
+                if not self._executors and not self._starting:
+                    self._unreserve()
                 self._changed.notify_all()
         else:
             async with self._changed:
                 self._starting -= 1
-                match generation == self._generation:
-                    case True:
+                del self._starting_in[token]
+                match (executor, generation == self._generation):
+                    case (None, _):
+                        # Released before the executor was created.
+                        pass
+                    case (_, True):
                         self._executors[self._next_id] = executor
                         self._leases[self._next_id] = 0
+                        self._bundle_of[self._next_id] = bundle
                         self._next_id += 1
-                    case False:
+                    case (_, False):
                         # The pool was released while the executor started.
                         ray.kill(executor)
                 self._changed.notify_all()
+
+    def _take_bundle(self, generation: int) -> Tuple[int, int]:
+        """The bundle with the most room for an executor starting now, and a
+        token for the start; the bundle is -1 without a reservation."""
+        match self._reservation:
+            case None:
+                bundle = -1
+            case reservation:
+                used = [
+                    *self._bundle_of.values(),
+                    *(b for g, b in self._starting_in.values() if g == generation),
+                ]
+                bundle = max(
+                    range(len(reservation.executors)),
+                    key=lambda b: reservation.executors[b] - used.count(b),
+                )
+        token = self._next_token
+        self._next_token += 1
+        self._starting_in[token] = (generation, bundle)
+        return token, bundle
+
+    async def _placement(
+        self, bundle: int, generation: int
+    ) -> Optional[Dict[str, Any]]:
+        """The Ray options placing an executor in ``bundle``, once the
+        placement group of the pool is reserved; none without a reservation.
+
+        ``None`` if the pool was released since the start of ``generation``
+        began: it must not reserve GPUs for a stream that has ended.
+
+        Raises:
+            Exception: If the placement group was removed while it was
+                reserved.
+        """
+        match (self._reservation, self._reserved, generation == self._generation):
+            case (_, _, False):
+                return None
+            case (None, _, _):
+                return {}
+            case (reservation, None, _):
+                group = placement_group(
+                    list(reservation.bundles),
+                    strategy="PACK",
+                    name=f"{reservation.name}/{self._generation}",
+                    bundle_label_selector=list(reservation.selectors),
+                )
+                self._placement_group = group
+                self._reserved = asyncio.ensure_future(self._reserve(group))
+            case _:
+                pass
+        assert self._reserved is not None and self._placement_group is not None
+        group = self._placement_group
+        await self._reserved
+        return {
+            "scheduling_strategy": PlacementGroupSchedulingStrategy(
+                placement_group=group,
+                placement_group_bundle_index=bundle,
+            ),
+        }
+
+    async def _reserve(self, group: PlacementGroup) -> None:
+        """Wait until Ray reserved ``group``, warning if it takes long.
+
+        Raises:
+            Exception: If the group was removed meanwhile.
+        """
+        ready = asyncio.wrap_future(group.ready().future())
+        with self._recorder.span("reserve", "group", level=logging.INFO):
+            done, _ = await asyncio.wait({ready}, timeout=_RESERVE_WARNING_S)
+            if not done:
+                logger.warning(
+                    "The executors of %s wait for their GPUs (%s) since %g s: "
+                    "other jobs may hold them. RayBackend(placement='ray') "
+                    "lets Ray place the executors instead.",
+                    self._group,
+                    self._reservation,
+                    _RESERVE_WARNING_S,
+                )
+            await ready
 
     async def return_leases(self, executor_ids: Sequence[int]) -> None:
         """Return the leases of a map without calls in flight."""
@@ -1220,12 +1396,24 @@ class RayComputeGroup:
             self._generation += 1
             self._changed.notify_all()
             await self._kill(list(self._executors))
+            self._unreserve()
+
+    def _unreserve(self) -> None:
+        """Remove the placement group of the pool, freeing its GPUs."""
+        match self._placement_group:
+            case None:
+                pass
+            case group:
+                remove_placement_group(group)
+                self._placement_group = None
+                self._reserved = None
 
     async def _kill(self, executor_ids: Sequence[int]) -> None:
         """Kill the executors ``executor_ids``, releasing their resources."""
         executors = [self._executors.pop(executor_id) for executor_id in executor_ids]
         for executor_id in executor_ids:
             del self._leases[executor_id]
+            self._bundle_of.pop(executor_id, None)
             self._idle_since.pop(executor_id, None)
         # Killing an executor discards the events it holds.
         await asyncio.gather(*(e.flush_profile.remote() for e in executors))
@@ -1902,6 +2090,7 @@ class RayCompiledPipeline(CompiledPipeline):
         functions: Optional[ray.ObjectRef] = None,
         placement: Optional[_Placement] = None,
         own_actor_maps: FrozenSet[str] = frozenset(),
+        placement_groups: Optional[str] = None,
     ):
         """
         Args:
@@ -1927,6 +2116,8 @@ class RayCompiledPipeline(CompiledPipeline):
             own_actor_maps: The labels of the maps that run on an actor of
                 their own (merging maps, maps behind a phase boundary), whose
                 stats include the buffering of the actor.
+            placement_groups: The prefix of the names of the placement groups
+                of the pools the pipeline owns, removed on ``close``.
         """
         self._sources = sources
         self._stages = stages
@@ -1938,6 +2129,7 @@ class RayCompiledPipeline(CompiledPipeline):
         self._functions = functions
         self._placement = placement
         self._own_actor_maps = own_actor_maps
+        self._placement_groups = placement_groups
         self._recorder = make_recorder(profile, "driver")
 
     def layers(self, report: PipelineReport) -> Tuple[Layer, ...]:
@@ -2055,6 +2247,12 @@ class RayCompiledPipeline(CompiledPipeline):
                 ray.kill(actor)
             except Exception:
                 pass
+        # Ray keeps a placement group when the actor that created it dies.
+        match self._placement_groups:
+            case None:
+                pass
+            case prefix:
+                _remove_placement_groups(prefix)
 
         match self._spill_root:
             case None:
@@ -2080,6 +2278,13 @@ class RayCompiledPipeline(CompiledPipeline):
         self._owns_profile = False
 
 
+def _remove_placement_groups(prefix: str) -> None:
+    """Remove the placement groups whose names start with ``prefix``."""
+    for entry in placement_group_table().values():
+        if entry["name"].startswith(prefix) and entry["state"] != "REMOVED":
+            remove_placement_group(get_placement_group(entry["name"]))
+
+
 class RayBackend(StreamingBackendProvider):
     """
     Streaming backend that compiles IR DAGs into persistent Ray actors with direct P2P messaging.
@@ -2100,6 +2305,7 @@ class RayBackend(StreamingBackendProvider):
         group_by_workers: Optional[int] = DEFAULT_GROUP_BY_WORKERS,
         ephemeral_idle_s: float = DEFAULT_EPHEMERAL_IDLE_S,
         pools: Optional[Mapping[str, "_Pool"]] = None,
+        placement: PlacementMode = "managed",
     ):
         """
         Args:
@@ -2146,9 +2352,17 @@ class RayBackend(StreamingBackendProvider):
             pools: The pools of executors of the parent pipeline, by compute
                 group; ``group_by`` children run their maps on them instead of
                 pools of their own.
+            placement: ``"managed"`` (the default) reserves the GPUs that the
+                placement planner gives every long-running pool, in a Ray
+                placement group, while the pool holds them. ``"ray"`` lets
+                Ray place the executors, for clusters shared with other jobs.
         """
         if queue_size <= 0:
             raise ValueError(f"Queue size must be positive, got {queue_size}.")
+        if placement not in ("managed", "ray"):
+            raise ValueError(
+                f"placement must be 'managed' or 'ray', got {placement!r}.",
+            )
         for option, value in {
             "max_in_flight": max_in_flight,
             "buffer_size": buffer_size,
@@ -2175,6 +2389,7 @@ class RayBackend(StreamingBackendProvider):
         self.group_by_workers = group_by_workers
         self.ephemeral_idle_s = ephemeral_idle_s
         self.pools = pools
+        self.placement: PlacementMode = placement
         # The driver imported NumPy before; the workers get the environment.
         configure_numpy_hugepages()
 
@@ -2306,7 +2521,7 @@ class RayBackend(StreamingBackendProvider):
         match self.pools:
             case None:
                 pools, placement = self._compute_groups(
-                    ir_sinks, maps, claims, Ref(functions), profile
+                    ir_sinks, maps, claims, Ref(functions), profile, pipeline_id
                 )
             case given:
                 pools, placement = dict(given), None
@@ -2429,6 +2644,7 @@ class RayBackend(StreamingBackendProvider):
             owns_profile=owns_profile,
             functions=functions,
             placement=placement,
+            placement_groups=f"{pipeline_id}/" if owns_pools else None,
             own_actor_maps=frozenset(
                 labels[node] for node in actor_map if isinstance(node, IRMap)
             ),
@@ -2589,6 +2805,7 @@ class RayBackend(StreamingBackendProvider):
         claims: Mapping[Optional[ComputeAssignment], Dict[str, Any]],
         functions: Ref,
         profile: Optional[ProfileConfig],
+        pipeline_id: str,
     ) -> Tuple[Dict[str, "_Pool"], "_Placement"]:
         """Plan and create the pool of every group of ``nodes`` that runs on executors.
 
@@ -2617,17 +2834,21 @@ class RayBackend(StreamingBackendProvider):
 
         graph = report_of(ir_sinks)
         demands = demands_of(nodes, self._num_gpus)
+        cluster = _cluster_nodes()
         plan = plan_placement(
             graph,
             demands,
-            _cluster_node_gpus(),
+            [gpus for _, gpus in cluster],
             ray.cluster_resources().get("CPU", 0),
         )
+        managed = self.placement == "managed"
         # The pools of a phase start executors once the pools of the earlier
-        # phases have released their GPUs.
+        # phases have released their GPUs: with managed placement, the pools
+        # on the same GPUs; else all of them, since Ray picks the GPUs.
+        waits = blockers_of(plan, demands)
         pools: Dict[str, _Pool] = {}
         for phase in plan.phases:
-            blockers = [pool.coordinator for pool in pools.values()]
+            earlier = dict(pools)
             pools.update(
                 {
                     group: _Pool(
@@ -2644,7 +2865,20 @@ class RayBackend(StreamingBackendProvider):
                             idle_s=(
                                 None if demands[group].holds else self.ephemeral_idle_s
                             ),
-                            blockers=blockers,
+                            blockers=[
+                                pool.coordinator
+                                for other, pool in earlier.items()
+                                if other in waits[group] or not managed
+                            ],
+                            reservation=(
+                                _reservation_of(
+                                    f"{pipeline_id}/{group}",
+                                    bundles_of(plan.groups[group], demands[group]),
+                                    [node_id for node_id, _ in cluster],
+                                )
+                                if managed
+                                else None
+                            ),
                         ),
                         replicas=plan.groups[group].replicas,
                         ephemeral=not demands[group].holds,
@@ -2659,7 +2893,7 @@ class RayBackend(StreamingBackendProvider):
         for group in plan.phases[0] if plan.phases else ():
             if demands[group].holds:
                 pools[group].coordinator.start.remote()
-        return pools, _Placement(graph, plan, demands)
+        return pools, _Placement(graph, plan, demands, managed)
 
 
 @dataclass(frozen=True)
@@ -2669,15 +2903,18 @@ class _Placement:
     graph: PipelineReport
     plan: Plan
     demands: Mapping[str, GroupDemand]
+    managed: bool = True
 
     def layer(self) -> Layer:
-        return placement_layer(self.graph, self.plan, self.demands)
+        return placement_layer(self.graph, self.plan, self.demands, self.managed)
 
 
-def _cluster_node_gpus() -> List[int]:
-    """The GPUs of every live node of the Ray cluster."""
+def _cluster_nodes() -> List[Tuple[str, int]]:
+    """The id and the GPUs of every live node of the Ray cluster."""
     return [
-        int(node["Resources"].get("GPU", 0)) for node in ray.nodes() if node["Alive"]
+        (node["NodeID"], int(node["Resources"].get("GPU", 0)))
+        for node in ray.nodes()
+        if node["Alive"]
     ]
 
 

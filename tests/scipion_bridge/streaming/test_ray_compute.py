@@ -17,6 +17,7 @@ from numpy._core.multiarray import (
 )
 import pytest
 import ray
+from ray.util.placement_group import placement_group_table
 
 import scipion_bridge as B
 from scipion_bridge.backend.ray import backend
@@ -416,6 +417,171 @@ def test_the_report_of_a_pipeline_shows_the_placement_of_its_pools():
         ("node 0 GPU 0",),
         ("node 0 GPU 1",),
     }
+
+
+# -- Managed placement -------------------------------------------------------
+def _live_placement_groups():
+    return [
+        entry
+        for entry in placement_group_table().values()
+        if entry["state"] != "REMOVED"
+    ]
+
+
+@B.resources(gpus=0.5, task=B.TaskType.LONG_RUNNING)
+class RecordingFirst(B.Protocol):
+    items: B.Input[int] = B.Input()
+    recorder: Any
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(self._run)
+
+    def _run(self, item):
+        _record(self.recorder, "first", seconds=0.1)
+        return {"out": item}
+
+
+@B.resources(gpus=0.5, task=B.TaskType.LONG_RUNNING)
+class RecordingSecond(B.Protocol):
+    out: B.Input[int] = B.Input()
+    recorder: Any
+
+    def outputs(self):
+        return {"result": int}
+
+    def steps(self):
+        return self.out.map(self._run)
+
+    def _run(self, item):
+        _record(self.recorder, "second", seconds=0.1)
+        return {"result": item}
+
+
+@B.resources(gpus=0.5, task=B.TaskType.LONG_RUNNING, replicas=2)
+class RecordingPair(RecordingFirst):
+    pass
+
+
+def _gpus_by_label(recorder):
+    calls = ray.get(recorder.get_calls.remote())
+    return {
+        label: {tuple(c["gpus"]) for c in calls if c["label"] == label}
+        for label in {c["label"] for c in calls}
+    }
+
+
+def test_long_running_protocols_run_on_the_gpus_planned_for_them():
+    # Ray alone would put both half-GPU executors on one GPU.
+    recorder = Recorder.remote()
+    first, second = RecordingFirst(), RecordingSecond()
+    first.recorder = second.recorder = recorder
+    pipeline, _ = _phased(first, second)
+
+    with pipeline:
+        for item in range(4):
+            pipeline.send(items=item)
+        pipeline.flush()
+        assert _live_placement_groups() == []
+
+    gpus = _gpus_by_label(recorder)
+    assert len(gpus["first"]) == len(gpus["second"]) == 1
+    assert gpus["first"] != gpus["second"]
+    assert _live_placement_groups() == []
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
+def test_the_executors_of_a_protocol_fill_a_gpu_before_the_next():
+    recorder = Recorder.remote()
+    protocol = RecordingPair()
+    protocol.recorder = recorder
+    pipeline = _compile(protocol, Collector.remote())
+
+    try:
+        for item in range(6):
+            pipeline.send("items", item)
+        pipeline.flush()
+
+        calls = ray.get(recorder.get_calls.remote())
+        assert len({call["pid"] for call in calls}) == 2
+        assert len({tuple(call["gpus"]) for call in calls}) == 1
+    finally:
+        pipeline.close()
+    assert _live_placement_groups() == []
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+class OneGpuFirst(HalfGpuFirst):
+    pass
+
+
+def _slowly(item):
+    time.sleep(0.3)
+    return {"result": item}
+
+
+def _latest(state, item):
+    return item
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+class SlowOneGpuSecond(HalfGpuSecond):
+    def steps(self):
+        # The scan has an actor of its own, which hosts the map: FLUSH passes
+        # the stage of the first protocol while this one still works.
+        return self.out.scan(_latest).map(_slowly)
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+class OneGpuThird(B.Protocol):
+    result: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"final": int}
+
+    def steps(self):
+        return self.result.map(lambda item: {"final": item})
+
+
+def test_a_later_phase_waits_only_for_the_pools_on_its_gpus(tmp_path):
+    # first and second run at once; third takes the GPU of first, which
+    # flushes long before second does.
+    first, second, third = OneGpuFirst(), SlowOneGpuSecond(), OneGpuThird()
+    trace = tmp_path / "trace.json"
+    collector = Collector.remote()
+    writer = CallbackSinkWriter(lambda item: ray.get(collector.append.remote(item)))
+    sink = (first | second | third).get_pipeline().write_to(writer)
+    backend = RayBackend(init_ray=False, profile=trace)
+
+    with Pipeline.from_sink(sink, backend=backend) as pipeline:
+        for item in range(6):
+            pipeline.send(items=item)
+
+    results = ray.get(collector.get.remote())
+    assert [result["final"] for result in results] == list(range(6))
+
+    def times(protocol, name):
+        return [t for t, event in _group_events(trace, protocol) if event == name]
+
+    created = min(times(third, "executor_create"))
+    assert max(times(first, "executor_kill")) <= created
+    assert created < max(times(second, "executor_kill"))
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
+def test_placement_can_be_left_to_ray():
+    pipeline, collector = _phased(AllGpusFirst(), AllGpusSecond(), placement="ray")
+
+    with pipeline:
+        for item in range(3):
+            pipeline.send(items=item)
+
+    results = ray.get(collector.get.remote())
+    assert [result["result"] for result in results] == [0, 1, 2]
+    assert pipeline.report().layer("placement").groups
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
 
 
 def _group_events(trace, protocol):
@@ -1376,6 +1542,7 @@ import os
 
 from numpy._core.multiarray import _set_madvise_hugepage
 import ray
+from ray.util.placement_group import placement_group_table
 
 from scipion_bridge.backend.ray.backend import RayBackend
 from scipion_bridge.core.streaming.node import lower

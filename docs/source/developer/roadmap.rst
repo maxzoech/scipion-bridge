@@ -91,7 +91,7 @@ Status
      - 1, 1b
    * - 3
      - Placement planner and placement groups
-     - In progress: planner, reports and phases done; placement groups open
+     - Done, except phases inside a ``group_by`` template
      - 2
    * - 4
      - Provenance: key paths, ``.astype``, ``.apply``, storage domains
@@ -160,8 +160,8 @@ Executor pools
 * Ephemeral calls claiming GPUs run on pools too, which start executors on
   demand and stop them after an idle time (``ephemeral_idle_s``). By default,
   the ephemeral pools of a pipeline share the free GPUs in equal parts.
-* All long-running pools of a pipeline must fit the cluster at once, or
-  compilation fails.
+* Long-running pools that do not fit the cluster at once run in phases (see
+  the placement planner below).
 * The children of ``group_by`` share the pools of their protocol, so
   ``group_by(workers=n)`` only partitions keys.
 
@@ -174,13 +174,16 @@ Placement planner (step 3)
 **Done:** the planner (``plan_placement``) and its ``placement`` layer in
 pipeline reports (``--explain``, ``--explain-gpus``); pools get the replicas
 it plans. Phases run: pools release their GPUs when FLUSH has passed their
-own stages, later phases wait for the earlier ones (gates), and the stage
-behind a boundary spills without bound. Phase boundaries are where
-checkpointing will put its barriers (step 6), and what provenance makes
-cheap to spill (step 4). Open: placement groups that enforce the plan
-(anti-affinity is planned but Ray still places the processes), which also
-lets the gates wait only for pools on the same GPUs; phases inside a
-``group_by`` template.
+own stages, later phases wait for the earlier pools on their GPUs (gates),
+and the stage behind a boundary spills without bound. Phase boundaries are
+where checkpointing will put its barriers (step 6), and what provenance
+makes cheap to spill (step 4). The plan is enforced with a placement group
+per long-running pool, a bundle per slot pinned to its node, reserved while
+the pool holds its GPUs; ``placement="ray"`` leaves placement to Ray.
+Open: phases inside a ``group_by`` template; pinning ephemeral executors;
+the GPU memory report below.
+
+What was planned, and what changed when it was built:
 
 
 A module ``backend/ray/placement.py`` of pure functions, testable in-process.
@@ -188,9 +191,10 @@ Input: every compute assignment of the graph, including ``group_by``
 templates, the GPUs of the cluster and, later, costs. Output: for every
 group, the slots (GPU bundle and share) of its replicas. Rules, in order:
 
-1. **Gang-schedule.** All replicas must fit at the same time, which prevents a
-   process from waiting for a GPU another one holds. If they do not fit,
-   compilation fails.
+1. **Gang-schedule.** The replicas of a pool hold their GPUs at the same time,
+   which prevents a process from waiting for a GPU another one holds. Pools
+   that do not fit at once run in phases; only claims no phase satisfies
+   fail to compile.
 2. **Anti-affinity.** Different long-running groups do not share a GPU, because
    processes on one GPU time-slice between their CUDA contexts (a reference
    build took 65 s instead of 5 to 10 s). Fractional claims are filled with
@@ -198,9 +202,12 @@ group, the slots (GPU bundle and share) of its replicas. Rules, in order:
 3. **Leftover GPUs** go to the costliest group; before costs exist, GPUs are
    split in proportion to the claims.
 
-The plan is enforced with one Ray placement group with a one-GPU bundle per
-GPU, and every replica is created in its bundle. A mode that leaves placement
-to Ray remains, for shared clusters. ``replicas=n`` stays a manual override.
+The plan was to enforce it with one Ray placement group with a one-GPU
+bundle per GPU. Phases need reservations that change hands at every
+boundary, and a claim of several GPUs needs one bundle, so every
+long-running pool reserves a placement group of its own instead. A mode
+that leaves placement to Ray remains, for shared clusters (``placement="ray"``).
+``replicas=n`` stays a manual override.
 Executors would report their peak GPU memory, and the planner would warn when
 it exceeds the claim.
 
@@ -317,8 +324,9 @@ Risks and open decisions
   at class definition, a check of what methods reach through closures and
   globals, and a digest of the protocol compared at FLUSH to detect writes
   that bypass the seal.
-* **Placement groups reserve GPUs** for the whole run, which suits a dedicated
-  pipeline and not a shared cluster; keep the mode that leaves placement to Ray.
+* **Placement groups reserve GPUs** while a pool holds them, which suits a
+  dedicated pipeline and not a shared cluster; ``placement="ray"`` leaves
+  placement to Ray there.
 * **Storage domains must be configured** on multi-node clusters. Without them,
   every reference belongs to the driver's node, which is correct but
   materializes everything at the source. Checkpointing also needs a shared

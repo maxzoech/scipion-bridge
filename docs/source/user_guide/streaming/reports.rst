@@ -50,8 +50,10 @@ Reading the report
   of a run (the children of a ``group_by`` added up); later layers will
   describe placement on GPUs, lineage and costs.
 * The ``placement`` layer shows where the executors of every protocol run:
-  the panel *Pools* lists them, one panel per phase draws the GPUs and the
-  protocols on each, and the warnings name protocols that share a GPU.
+  the panel *Pools* lists them, with the GPUs each reserves and the
+  protocols of earlier phases it waits for; one panel per phase draws the
+  GPUs and the protocols on each, and the warnings name protocols that share
+  a GPU. ``--placement ray`` shows the plan without reservations.
   ``--explain`` plans for the GPUs of this machine; ``--explain-gpus 4,4``
   plans for another cluster, e.g. two nodes of four GPUs.
 * *Colour by* colours the stages by the metric of a layer, e.g. the time the

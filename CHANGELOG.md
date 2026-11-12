@@ -95,6 +95,21 @@
   Long-running pools release their GPUs as soon as FLUSH has passed their
   own stages. Before, such pipelines failed to compile, or hung when an
   ephemeral protocol found no GPU beside the long-running ones.
+- The plan is enforced: every long-running pool reserves the GPUs planned
+  for it in a Ray placement group, pinned to its node, from its first
+  executor until its release, so that processes of other protocols cannot
+  land on them (before, Ray could put two models on one GPU while another
+  stayed idle). A pool with a GPU to itself reserves it whole. Ephemeral
+  pools reserve nothing. `RayBackend(placement="ray")`, the runner's
+  `--placement ray` or `SCIPION_STREAM_PLACEMENT=ray` leave placement to
+  Ray, for clusters shared with other jobs. Requires Ray 2.49.
+- A pool of a later phase waits only for the pools of earlier phases on its
+  GPUs (with `placement="ray"`, for all of them). Reports show what every
+  pool reserves and waits for.
+- Long-running pools with `replicas="auto"` grow by whole executors and
+  leave room for one executor of every ephemeral protocol of their phase;
+  before, a share below one executor still took a whole GPU, and an
+  ephemeral protocol could be left without one.
 - A map behind a phase boundary runs on an actor of its own; the stats of
   such maps (and of merging maps) include the buffering of their actor.
 - Every stage spills into the temporary directory of its own node and

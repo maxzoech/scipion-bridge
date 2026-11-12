@@ -5,8 +5,11 @@ import random
 import pytest
 
 from scipion_bridge.backend.ray.placement import (
+    Bundle,
     ClusterSpec,
     all_maps,
+    blockers_of,
+    bundles_of,
     demands_of,
     explain_placement,
     placement_layer,
@@ -203,8 +206,8 @@ def sink_id(plan):
     return next(node for node in plan.node_phases if "sink" in node)
 
 
-@pytest.mark.parametrize("seed", range(20))
-def test_no_group_runs_in_an_earlier_phase_than_one_upstream_of_it(seed):
+def _random_pipeline(seed):
+    """A random DAG of 8 maps with random claims, and a random cluster."""
     rng = random.Random(seed)
     source = IRSource(name="x")
     nodes: list = [source]
@@ -212,8 +215,9 @@ def test_no_group_runs_in_an_earlier_phase_than_one_upstream_of_it(seed):
         node = _map(
             index,
             ComputeResources(
-                gpus=rng.choice([0, 0.5, 1]),
+                gpus=rng.choice([0, 0.25, 0.5, 1]),
                 task=rng.choice([LONG, TaskType.EPHEMERAL]),
+                replicas=rng.choice([None, None, "auto"]),
             ),
         )
         for upstream in rng.sample(nodes, k=min(len(nodes), rng.randint(1, 2))):
@@ -222,8 +226,14 @@ def test_no_group_runs_in_an_earlier_phase_than_one_upstream_of_it(seed):
     sink = IRSink(writer=CallbackSinkWriter(lambda item: None))
     nodes[-1].add_downstream(sink)
     sinks = [sink, *(n for n in nodes if not n.downstream)]
+    return sinks, [rng.randint(1, 3) for _ in range(rng.randint(1, 2))]
 
-    plan = _plan(sinks, [rng.randint(1, 3)])
+
+@pytest.mark.parametrize("seed", range(20))
+def test_no_group_runs_in_an_earlier_phase_than_one_upstream_of_it(seed):
+    sinks, node_gpus = _random_pipeline(seed)
+
+    plan = _plan(sinks, node_gpus)
 
     graph = report_of(sinks)
     for edge in graph.edges:
@@ -364,6 +374,140 @@ def test_the_plan_is_deterministic():
         )
 
     assert plan() == plan()
+
+
+def test_auto_replicas_take_whole_executors_and_leave_room_for_ephemeral_groups():
+    # The long-running group's share of the free GPUs is 2/3: it keeps one
+    # whole GPU, and the ephemeral groups split the other.
+    sinks = _chain(
+        ComputeResources(gpus=1),
+        ComputeResources(gpus=1, task=LONG, replicas="auto"),
+        ComputeResources(gpus=1),
+    )
+    plan = _plan(sinks, [2])
+    demands = demands_of(all_maps(sinks), lambda resources: resources.gpus)
+
+    assert plan.groups["g1"].replicas == 1
+    assert bundles_of(plan.groups["g1"], demands["g1"]) == (Bundle(0, {"GPU": 1.0}, 1),)
+    held = {gpu for slot in plan.groups["g1"].slots for gpu in slot.gpus}
+    for group in ("g0", "g2"):
+        assert not held & {g for s in plan.groups[group].slots for g in s.gpus}
+
+
+# -- Bundles and blockers ----------------------------------------------------
+def _demands(sinks):
+    return demands_of(all_maps(sinks), lambda resources: resources.gpus)
+
+
+@pytest.mark.parametrize(
+    "resources, node_gpus, bundles",
+    [
+        # Executors of a fraction fill one bundle per GPU, which reserves
+        # the GPU whole: Ray would pack fractions of other pools beside them.
+        (
+            ComputeResources(gpus=0.5, task=LONG, replicas=3),
+            [2],
+            (Bundle(0, {"GPU": 1.0}, 2), Bundle(0, {"GPU": 1.0}, 1)),
+        ),
+        (
+            ComputeResources(gpus=1, task=LONG, replicas=2, cpus=2),
+            [2],
+            (
+                Bundle(0, {"GPU": 1.0, "CPU": 2}, 1),
+                Bundle(0, {"GPU": 1.0, "CPU": 2}, 1),
+            ),
+        ),
+        # A claim of several GPUs is one bundle, on a node with enough.
+        (
+            ComputeResources(gpus=2, task=LONG),
+            [1, 2],
+            (Bundle(1, {"GPU": 2.0}, 1),),
+        ),
+        # Ephemeral pools and pools without GPUs reserve nothing.
+        (ComputeResources(gpus=1), [2], ()),
+        (ComputeResources(cpus=2, task=LONG), [2], ()),
+    ],
+)
+def test_the_bundles_of_a_pool(resources, node_gpus, bundles):
+    sinks = _chain(resources)
+    plan = _plan(sinks, node_gpus)
+
+    assert bundles_of(plan.groups["g0"], _demands(sinks)["g0"]) == bundles
+
+
+def test_pools_sharing_a_gpu_reserve_what_their_executors_claim():
+    sinks = _chain(
+        ComputeResources(gpus=0.5, task=LONG),
+        ComputeResources(gpus=0.5, task=LONG),
+    )
+    plan = _plan(sinks, [1])
+
+    for group in ("g0", "g1"):
+        assert bundles_of(plan.groups[group], _demands(sinks)[group]) == (
+            Bundle(0, {"GPU": 0.5}, 1),
+        )
+
+
+def test_a_later_pool_waits_only_for_the_pools_on_its_gpus():
+    # On one GPU, P2 waits for P0. On two GPUs, P0 and P1 run at once, and
+    # P2 waits for the one on its GPU.
+    sinks = _chain(
+        ComputeResources(gpus=1, task=LONG),
+        ComputeResources(gpus=1, task=LONG),
+        ComputeResources(gpus=1, task=LONG),
+    )
+    one = _plan(sinks, [1])
+    two = _plan(sinks, [2])
+
+    assert blockers_of(one, _demands(sinks)) == {
+        "g0": frozenset(),
+        "g1": {"g0"},
+        "g2": {"g0", "g1"},
+    }
+    assert [two.groups[g].phase for g in ("g0", "g1", "g2")] == [0, 0, 1]
+    assert blockers_of(two, _demands(sinks))["g2"] == {"g0"}
+
+
+def test_pools_reserving_cpus_wait_for_each_other():
+    sinks = _chain(
+        ComputeResources(cpus=2, task=LONG),
+        ComputeResources(cpus=2, task=LONG),
+    )
+
+    assert blockers_of(_plan(sinks, [0], cpus=3), _demands(sinks))["g1"] == {"g0"}
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_reservations_fit_and_leave_room_for_ephemeral_pools(seed):
+    sinks, node_gpus = _random_pipeline(seed)
+    demands = _demands(sinks)
+
+    plan = _plan(sinks, node_gpus)
+
+    for phase, groups in enumerate(plan.phases):
+        held: dict = {}
+        for group in groups:
+            demand, pool = demands[group], plan.groups[group]
+            bundles = bundles_of(pool, demand)
+            if bundles:
+                assert sum(b.executors for b in bundles) == pool.replicas
+            for slot, bundle in zip(
+                [s for s in pool.slots if s.executors > 0], bundles
+            ):
+                for gpu in slot.gpus:
+                    use = bundle.resources["GPU"] / len(slot.gpus)
+                    held[(slot.node, gpu)] = held.get((slot.node, gpu), 0) + use
+        assert all(use <= 1 + 1e-9 for use in held.values()), (phase, held)
+        for group in groups:
+            demand = demands[group]
+            if demand.holds or demand.gpus == 0:
+                continue
+            free = [
+                1 - held.get((node, gpu), 0)
+                for node, count in enumerate(node_gpus)
+                for gpu in range(count)
+            ]
+            assert max(free) + 1e-9 >= min(demand.gpus, 1.0), (group, held)
 
 
 def test_replicas_auto_is_a_valid_declaration():
