@@ -366,6 +366,54 @@ in ``_writable_static_buffer``, a dynamic one in ``split_rows``.
 ``RootEngine`` also defines ``__getstate__`` and ``__setstate__`` for the rare
 case where an engine is pickled directly. They drop and recreate its lock.
 
+Reference columns
+^^^^^^^^^^^^^^^^^
+
+A static column can hold the rows of a *source* instead of owning them, for
+example the images of an MRC stack (``source.py``). This is how the library
+records the provenance of data: which values are still rows of an input file
+and which were computed. References are internal. The public API of the
+types does not change, and a Set with references behaves exactly like one
+owning the same values.
+
+* A ``Reference(source, index, digests)`` holds rows ``index`` (a ``range`` or
+  an array of positions) of a ``ColumnSource``. ``_refs`` maps the field key
+  to it.
+* **Reading** the column reads the rows once (``_read_reference``) and keeps
+  them in ``_data``: a *cached* reference. The first read takes the
+  ``xxh3_128`` digest of every row (``row_digests``). Reads after that, for
+  example after a spill dropped the rows, compare against the digests and
+  check the files' size and mtime. A difference raises
+  ``StaleReferenceError``.
+* **Writing** through the engine turns the column into an owned one, since it
+  then holds what was written. Writing a single element reads the rows first.
+  The buffers stay writable. A write in place into the read rows is not seen
+  by the engine, so whoever relies on a reference instead of its bytes first
+  calls ``references.verify``, which compares the rows with their digests.
+* **Views** need no special handling: ``reference_at(key)`` narrows the
+  reference with the selection of the view, digests included.
+* **Concatenation** joins references into a ``ConcatSource`` without reading
+  unread ones. A field that is a reference in some inputs and owned in others
+  becomes owned.
+* **Pickling.** ``Set._pickle_state`` asks ``references.pickled_references``
+  which columns to pickle as references. ``_from_arrow`` restores them
+  (``_restore_state``). The ``PicklingMode`` (a context variable) and the
+  ``ReferencePolicy`` decide whether the rows travel too:
+
+  * ``TRANSFER`` (default): read rows travel with their reference, unread ones
+    as the reference only;
+  * ``SPILL``: verified read rows are dropped.
+
+  ``to_arrow`` is unchanged: it exports every initialized column, reading
+  references.
+
+``references.py`` is the internal API the rest of the library uses:
+``set_reference``, ``column_states``, ``prefetch``, ``verify``, ``pickling``
+and the ``ReferencePolicy``. The policy makes every decision about references
+(prefetching, keeping bytes), so a cost model can replace it in one place.
+Sets without references skip all of this: ``_refs`` is empty, and the checks
+on it are guarded.
+
 Thread safety
 ^^^^^^^^^^^^^
 

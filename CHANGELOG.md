@@ -94,6 +94,16 @@
   items/s, busy and `wait_s`. *Colour by* in the HTML report offers every
   numeric annotation of a layer.
 
+### Provenance
+- Columns of Sets can reference rows of a source (an input file) instead of
+  owning them, internally to the type system: their public API and behaviour
+  are unchanged. A reference is read once and cached, any write makes the
+  column owned, and views and `concat` keep references. Every row gets an
+  xxh3 digest when it is read, and rereading detects changed inputs exactly
+  (`StaleReferenceError`). Pickling sends unread references without their
+  rows; spilling can drop the rows of verified references.
+- New dependency: `xxhash`.
+
 ### Placement
 - A placement planner (`backend/ray/placement.py`) decides the executors of
   every pool: long-running protocols get GPUs of their own where the cluster

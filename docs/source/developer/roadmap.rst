@@ -95,7 +95,7 @@ Status
      - 2
    * - 4
      - Provenance: key paths, ``.astype``, ``.apply``, storage domains
-     - Planned
+     - In progress: reference columns in the struct storage done
      - 1
    * - 5
      - Lineage

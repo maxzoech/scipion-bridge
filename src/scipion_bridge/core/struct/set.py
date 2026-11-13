@@ -7,7 +7,19 @@ N-dimensional arrays across the outer batch dimension.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Dict, Optional, Sequence, Type, TypeVar, Union, cast, overload
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
 from typing_extensions import Self, TypeGuard
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +37,7 @@ from .schema import (
 )
 from .exceptions import UninitializedFieldError
 from .storage import _BaseStorage, RootEngine
+from . import references
 from .utils.arrow_utils import (
     find_nested_column,
     leaf_from_arrow,
@@ -546,10 +559,22 @@ class Set(Marker[T], SchemaConvertible):
         the rows of the view are exported, and contiguous buffers are wrapped
         without copying.
         """
+        return self._to_arrow(frozenset())
+
+    def _pickle_state(self) -> Tuple[pa.RecordBatch, Any]:
+        """The batch without the columns pickled as references, and those."""
+        pickled, omitted = references.pickled_references(self)
+        return self._to_arrow(omitted), tuple(pickled)
+
+    def _restore_state(self, state: Any) -> None:
+        references.restore_references(self, list(state))
+
+    def _to_arrow(self, omitted: FrozenSet[Tuple[str, ...]]) -> pa.RecordBatch:
         leaves = {
             path: leaf_to_arrow(self._storage.read(key, entry), entry)
             for path, entry in self.schema().tree_iter()
-            if (key := self._storage.root.extend(path)) in self._storage
+            if path.path not in omitted
+            and (key := self._storage.root.extend(path)) in self._storage
         }
         return leaves_to_batch(
             self.schema(),

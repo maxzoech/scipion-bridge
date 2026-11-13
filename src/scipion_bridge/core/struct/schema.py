@@ -73,6 +73,18 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
         """Class restoring this instance from its RecordBatch when unpickled."""
         return type(self)
 
+    def _pickle_state(self) -> Tuple[pa.RecordBatch, Any]:
+        """The RecordBatch to pickle, and the state restored after it.
+
+        By default all data is in the batch. Sets add the references of
+        their columns (``references.py``).
+        """
+        return self.to_arrow(), ()
+
+    def _restore_state(self, state: Any) -> None:
+        """Restore what ``_pickle_state`` kept apart from the batch."""
+        assert state == ()
+
     def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
         """Pickle data-carrying instances as Arrow RecordBatches.
 
@@ -92,13 +104,14 @@ class SchemaConvertible(metaclass=abc.ABCMeta):
             case True:
                 return super().__reduce_ex__(protocol)
             case False:
-                batch = self.to_arrow()
+                batch, state = self._pickle_state()
                 return (
                     _from_arrow,
                     (
                         self._pickle_cls(),
                         batch.columns,
                         batch.schema.serialize().to_pybytes(),
+                        state,
                     ),
                 )
 
@@ -107,15 +120,18 @@ def _from_arrow(
     cls: Type[SchemaConvertible],
     columns: List[pa.Array],
     serialized_schema: bytes,
+    state: Any = (),
 ) -> SchemaConvertible:
     """Unpickle an instance serialized by ``SchemaConvertible.__reduce_ex__``."""
     schema = pa.ipc.read_schema(pa.py_buffer(serialized_schema))
-    return cls.from_arrow(
+    result = cls.from_arrow(
         pa.RecordBatch.from_arrays(
             [_with_type(column, field.type) for column, field in zip(columns, schema)],
             schema=schema,
         ),
     )
+    result._restore_state(state)
+    return result
 
 
 def _with_type(array: pa.Array, target: pa.DataType) -> pa.Array:

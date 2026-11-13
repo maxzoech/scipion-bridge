@@ -47,6 +47,7 @@ from .schema import (
     SchemaSetEntry,
 )
 from .key_path import IndexType, KeyPath
+from .source import Reference
 
 FieldKey = Tuple[str, ...]
 
@@ -211,9 +212,25 @@ class _BaseStorage(abc.ABC):
                     f"Cannot concatenate sets: field '{path}' is initialized in some sets but not others.",
                 )
 
+            # Rows of sources stay references: unread ones are joined without
+            # reading them.
+            references = [_reference_of(st, p) for p, st in zip(st_paths, all_storages)]
+            result_key = result_storage.root.extend(path)
+            if all(r is not None for r in references) and not any(
+                _is_cached(st, p) for p, st in zip(st_paths, all_storages)
+            ):
+                assert isinstance(result_storage, RootEngine)
+                result_storage.set_reference(
+                    RootEngine._decompose(result_key)[0],
+                    Reference.concat(cast(List[Reference], references)),
+                )
+                continue
+
             buffers = [
                 st.read(p, target_entry) for p, st in zip(st_paths, all_storages)
             ]
+            # Reading took the digests of rows read just now.
+            references = [_reference_of(st, p) for p, st in zip(st_paths, all_storages)]
 
             match target_entry.is_static:
                 case True:
@@ -221,13 +238,31 @@ class _BaseStorage(abc.ABC):
                 case False:
                     concatenated = concat_columns(buffers)
 
-            result_storage.write(
-                result_storage.root.extend(path),
-                target_entry,
-                concatenated,
-            )
+            result_storage.write(result_key, target_entry, concatenated)
+            if all(r is not None for r in references):
+                assert isinstance(result_storage, RootEngine)
+                field_key = RootEngine._decompose(result_key)[0]
+                result_storage.set_reference(
+                    field_key,
+                    Reference.concat(cast(List[Reference], references)),
+                    rows=result_storage._data[field_key],
+                )
 
         return result_storage
+
+
+def _reference_of(storage: _BaseStorage, key: KeyPath) -> Optional[Reference]:
+    """The reference holding the rows of ``key`` in ``storage``, if any."""
+    root = storage.root_storage
+    return root.reference_at(key) if isinstance(root, RootEngine) else None
+
+
+def _is_cached(storage: _BaseStorage, key: KeyPath) -> bool:
+    """Whether ``key`` is a reference column of ``storage`` whose rows were read."""
+    root = storage.root_storage
+    return isinstance(root, RootEngine) and root.is_cached(
+        RootEngine._decompose(key)[0]
+    )
 
 
 class StorageView(_BaseStorage):
@@ -285,6 +320,15 @@ class RootEngine(_BaseStorage):
     copy-on-write of a read-only buffer, splitting a ragged column into rows,
     materializing pending rows) run once under a lock with double-checked
     locking. Whole-column writes and buffer expansion are not thread-safe.
+
+    A static column can also be a *reference* to rows of a source, e.g. the
+    images of a stack (``source.py``): ``_refs`` holds it, and ``_data`` its
+    rows once they were read (a cached reference). A reference is read on the
+    first read of the column, and any write turns the column into an owned
+    one. Writes in place into the read rows are not seen here; whoever relies
+    on a reference checks its rows against their digests first
+    (``references.verified``). References are internal: reading, writing and
+    exporting a column behave as if the engine owned the rows.
     """
 
     def __init__(
@@ -295,6 +339,7 @@ class RootEngine(_BaseStorage):
         super().__init__(root=root, parent=parent)
         self._data: Dict[FieldKey, Column] = {}
         self._chunks: Dict[FieldKey, List[Any]] = {}
+        self._refs: Dict[FieldKey, Reference] = {}
         # (column keys, their prefixes), see _initialized_prefixes
         self._prefix_cache: Tuple[FrozenSet[FieldKey], FrozenSet[FieldKey]] = (
             frozenset(),
@@ -339,11 +384,23 @@ class RootEngine(_BaseStorage):
         """True if ``field_key`` is ``prefix`` or a field nested below it."""
         return field_key[: len(prefix)] == prefix
 
-    def _columns(self) -> Tuple[Tuple[FieldKey, Union[Column, List[Any]]], ...]:
-        """Snapshot of all columns: buffers first, then pending row lists."""
-        return (*tuple(self._data.items()), *tuple(self._chunks.items()))
+    def _columns(
+        self,
+    ) -> Tuple[Tuple[FieldKey, Union[Column, List[Any], Reference]], ...]:
+        """Snapshot of all columns: buffers first, then pending row lists, then
+        references whose rows were not read yet."""
+        columns = (*tuple(self._data.items()), *tuple(self._chunks.items()))
+        if not self._refs:
+            return columns
+        return (
+            *columns,
+            *((k, ref) for k, ref in tuple(self._refs.items()) if k not in self._data),
+        )
 
-    def _siblings(self, field_key: FieldKey) -> List[Union[Column, List[Any]]]:
+    def _siblings(
+        self,
+        field_key: FieldKey,
+    ) -> List[Union[Column, List[Any], Reference]]:
         """Other columns of the container that holds ``field_key``.
 
         Columns of one container share their outer length.
@@ -405,6 +462,8 @@ class RootEngine(_BaseStorage):
         queries do not scan every column.
         """
         keys = frozenset(self._data) | frozenset(self._chunks)
+        if self._refs:
+            keys |= frozenset(self._refs)
         cached_keys, cached_prefixes = self._prefix_cache
         if cached_keys == keys:
             return cached_prefixes
@@ -426,6 +485,9 @@ class RootEngine(_BaseStorage):
             for k, v in tuple(self._chunks.items())
             if not self._is_under(k, prefix)
         }
+        self._refs = {
+            k: v for k, v in tuple(self._refs.items()) if not self._is_under(k, prefix)
+        }
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
         """Return the active sequence length of data stored under key or root.
@@ -437,18 +499,17 @@ class RootEngine(_BaseStorage):
         prefix, index_tuple = self._decompose(target_key)
         effective_idx = self._compute_index(index_tuple)
 
-        column = next(
-            (c for k, c in self._columns() if self._is_under(k, prefix)),
-            None,
-        )
-        match (column, effective_idx):
-            case (None, _):
-                return None
-            case (_, ()):
+        for field_key, column in self._columns():
+            if not self._is_under(field_key, prefix):
+                continue
+            if not effective_idx:
                 return len(column)
-            case _:
-                element = self._element_at(column, effective_idx)
-                return 0 if element is None else len(element)
+            if isinstance(column, Reference):
+                self._read_reference(field_key)
+                column = self._data[field_key]
+            element = self._element_at(column, effective_idx)
+            return 0 if element is None else len(element)
+        return None
 
     # --------------------------------------------------------------------------
     # Reading
@@ -457,6 +518,8 @@ class RootEngine(_BaseStorage):
     def read(self, key: KeyPath, entry: Entry) -> Any:
         field_key, index_tuple = self._decompose(key)
         effective_idx = self._compute_index(index_tuple)
+        if self._refs and field_key in self._refs and field_key not in self._data:
+            self._read_reference(field_key)
 
         chunks = self._chunks.get(field_key)
         match chunks:
@@ -500,6 +563,67 @@ class RootEngine(_BaseStorage):
             case _:
                 return value
 
+    def _read_reference(self, field_key: FieldKey) -> None:
+        """Read the rows of a reference column, once, under the lock."""
+        with self._lock:
+            if field_key in self._data or field_key not in self._refs:
+                return
+            rows, reference = self._refs[field_key].read()
+            self._refs[field_key] = reference
+            self._data[field_key] = rows
+
+    # --------------------------------------------------------------------------
+    # References (internal, see source.py and references.py)
+    # --------------------------------------------------------------------------
+
+    def set_reference(
+        self,
+        field_key: FieldKey,
+        reference: Reference,
+        rows: Optional[Column] = None,
+    ) -> None:
+        """Make ``field_key`` a reference, with its rows if they were read."""
+        with self._lock:
+            self._chunks.pop(field_key, None)
+            self._refs[field_key] = reference
+            if rows is None:
+                self._data.pop(field_key, None)
+            else:
+                self._data[field_key] = rows
+
+    def reference_at(self, key: KeyPath) -> Optional[Reference]:
+        """The reference holding the rows of ``key``, narrowed to them.
+
+        ``None`` if the column is not a reference, or ``key`` selects in a
+        way a reference cannot follow (a single element, nested indices).
+        """
+        field_key, index_tuple = self._decompose(key)
+        reference = self._refs.get(field_key)
+        effective_idx = self._compute_index(index_tuple)
+        match (reference, effective_idx):
+            case (None, _):
+                return None
+            case (_, ()):
+                return reference
+            case (_, (slice() | np.ndarray() as selector,)):
+                return reference.narrow(selector)
+            case _:
+                return None
+
+    def references(self) -> Dict[FieldKey, Reference]:
+        """The reference columns, by field."""
+        return dict(self._refs)
+
+    def is_cached(self, field_key: FieldKey) -> bool:
+        """Whether the rows of a reference column were read."""
+        return field_key in self._refs and field_key in self._data
+
+    def own(self, field_key: FieldKey) -> None:
+        """Make a reference column an owned one, reading its rows if needed."""
+        self._read_reference(field_key)
+        with self._lock:
+            self._refs.pop(field_key, None)
+
     def _materialize_pending(self, field_key: FieldKey, entry: Entry) -> None:
         """Merge pending rows of a column into one buffer, once, under the lock."""
         with self._lock:
@@ -521,6 +645,13 @@ class RootEngine(_BaseStorage):
 
         field_key, index_tuple = self._decompose(key)
         effective_idx = self._compute_index(index_tuple)
+        if self._refs and field_key in self._refs:
+            # A written column holds what was written, not rows of a source.
+            if effective_idx:
+                self.own(field_key)
+            else:
+                with self._lock:
+                    self._refs.pop(field_key, None)
 
         match (effective_idx, entry.is_static):
             case ((), _):
