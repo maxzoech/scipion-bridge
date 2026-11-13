@@ -18,6 +18,7 @@ from scipion_bridge.core.struct.references import PicklingMode
 from scipion_bridge.core.struct.source import (
     ArraySource,
     ColumnSource,
+    ConcatSource,
     FileId,
     Reference,
     StaleReferenceError,
@@ -184,6 +185,62 @@ def test_concat_of_a_reference_and_an_owned_column_owns_it():
     _same(joined, concat([ea, eb]))
 
 
+def _reference(s):
+    engine = s.storage.root_storage
+    return references._reference_states(s, engine)[("pixels",)][0]
+
+
+def test_contiguous_rows_of_one_source_are_joined():
+    lazy, _, source = _referencing()
+
+    reference = _reference(concat([lazy[:3], lazy[3:]]))
+
+    assert reference.source is source
+    assert reference.index == range(0, 6)
+
+
+def test_regrouping_keeps_references_flat():
+    # The pattern of Op.chunk and the loaders: concatenate the rest with the
+    # next Set, emit a slice, keep the rest.
+    lazy_rest, eager_rest, sizes = None, None, []
+    for i in range(300):
+        lazy, eager, _ = _referencing(5, offset=100 * i)
+        references.prefetch(lazy)
+        if lazy_rest is not None:
+            lazy, eager = concat([lazy_rest, lazy]), concat([eager_rest, eager])
+        batch, lazy_rest, eager_rest = lazy[:3], lazy[3:], eager[3:]
+
+        _same(batch, eager[:3])
+        reference = _reference(batch)
+        parts = (
+            reference.source.parts
+            if isinstance(reference.source, ConcatSource)
+            else (reference,)
+        )
+        assert not any(isinstance(p.source, ConcatSource) for p in parts)
+        assert sum(len(p) for p in parts) == 3
+        sizes.append(len(pickle.dumps(batch)))
+
+    assert max(sizes) < 2 * min(sizes)
+
+
+def test_regrouped_rows_keep_their_digests():
+    a, _, _ = _referencing(3)
+    b, _, _ = _referencing(3, offset=1000)
+    c, _, _ = _referencing(3, offset=2000)
+    for s in (a, b, c):
+        references.prefetch(s)
+
+    kept = concat([concat([a, b])[2:], c])
+    written = concat([concat([a, b])[2:], c])
+    written["pixels"][1, 0, 0] = -5.0
+    references.verify(kept)
+    references.verify(written)
+
+    assert _states(kept)[("pixels",)] == "cached"
+    assert _states(written)[("pixels",)] == "owned"
+
+
 # -- Pickling ------------------------------------------------------------------
 def test_pickling_for_transfer_keeps_rows_and_the_reference():
     lazy, eager, _ = _referencing()
@@ -343,6 +400,22 @@ def test_spilling_keeps_the_rows_of_files_this_process_cannot_read(tmp_path):
 
     assert _states(restored)[("pixels",)] == "cached"
     np.testing.assert_array_equal(restored["pixels"], _rows(4))
+
+
+def test_a_spilled_slice_of_a_concat_rereads_only_its_rows(tmp_path):
+    sets = []
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        _, spilled = _file_backed(tmp_path / name)
+        sets.append(pickle.loads(spilled))
+    view = concat(sets)[3:5]
+
+    with references.pickling(PicklingMode.SPILL):
+        restored = pickle.loads(pickle.dumps(view))
+    np.testing.assert_array_equal(restored["pixels"], _rows(4)[[3, 0]])
+
+    parts = _reference(restored).source.parts
+    assert [p.source.stats.read_bytes for p in parts] == [64, 64]
 
 
 def test_spilling_by_reference_can_be_turned_off(tmp_path, monkeypatch):

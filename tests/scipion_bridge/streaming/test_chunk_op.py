@@ -8,6 +8,8 @@ from scipion_bridge.core.streaming import lower
 from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import Pipeline
 from scipion_bridge.core.streaming import CallbackSinkWriter
+from scipion_bridge.core.struct import references
+from scipion_bridge.core.struct.source import ArraySource, ConcatSource, Reference
 
 
 def _discard(item):
@@ -64,6 +66,47 @@ def _chunks(op, batches):
         emitted.extend(emissions)
     _, emissions = accumulate.flush_fn(state)
     return [(len(s), [int(x) for x in s["id"].flatten()]) for s in emitted + emissions]
+
+
+class Image(B.Struct):
+    pixels: B.Array[np.float32] = B.Array(shape=(2, 2))
+
+
+def _referencing(n, offset):
+    s = B.Set[Image](capacity=n)
+    rows = np.arange(offset, offset + 4 * n, dtype=np.float32).reshape(n, 2, 2)
+    references.set_reference(s, ("pixels",), Reference(ArraySource(rows), range(n)))
+    references.prefetch(s)
+    return s
+
+
+def test_chunks_of_references_hold_only_their_rows():
+    # Each batch references the parts of the inputs it holds, not every Set
+    # the accumulator has seen.
+    (sink,) = lower([Source("input").chunk(7).sink(_discard)])
+    (accumulate,) = sink.upstream
+    assert isinstance(accumulate, IRAccumulate)
+
+    state, batches = accumulate.initial_state_fn(), []
+    for i in range(200):
+        state, emissions = accumulate.accumulate_fn(state, _referencing(5, 20 * i))
+        batches.extend(emissions)
+
+    for batch in batches:
+        reference = references._reference_states(batch, batch.storage.root_storage)[
+            ("pixels",)
+        ][0]
+        assert isinstance(reference.source, ConcatSource)
+        assert len(reference.source.parts) <= 3
+        assert not any(
+            isinstance(p.source, ConcatSource) for p in reference.source.parts
+        )
+    np.testing.assert_array_equal(
+        np.concatenate([b["pixels"] for b in batches]),
+        np.concatenate([_referencing(5, 20 * i)["pixels"] for i in range(200)])[
+            : 7 * len(batches)
+        ],
+    )
 
 
 def test_chunk_sub_batches_drop_last_false():

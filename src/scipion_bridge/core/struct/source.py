@@ -20,7 +20,7 @@ import os
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import xxhash
@@ -221,7 +221,8 @@ class Reference:
         """The rows ``selector`` of this reference, with their digests.
 
         ``selector`` is relative to this reference's rows, like the index of
-        a ``KeyPath`` component: a slice or an array of positions.
+        a ``KeyPath`` component: a slice or an array of positions. A narrowed
+        concatenation keeps only the parts holding the selected rows.
         """
         match selector:
             case slice():
@@ -233,7 +234,30 @@ class Reference:
                 digests = None if self.digests is None else self.digests[positions]
             case _:
                 raise TypeError(f"Cannot narrow a reference with {selector!r}.")
-        return Reference(self.source, index, digests)
+        narrowed = Reference(self.source, index, digests)
+        if isinstance(self.source, ConcatSource):
+            return Reference.concat(narrowed.segments())
+        else:
+            return narrowed
+
+    def segments(self) -> Tuple[Reference, ...]:
+        """The rows of this reference as references to sources that are not
+        concatenations, in order, each narrowed to its rows."""
+        if not isinstance(self.source, ConcatSource):
+            return (self,)
+        parts = self.source.parts
+        starts = np.cumsum([0, *(len(part) for part in parts)])
+        positions = np.asarray(self.index, dtype=np.int64)
+        owners = np.searchsorted(starts, positions, side="right") - 1
+        runs = np.split(np.arange(len(positions)), np.flatnonzero(np.diff(owners)) + 1)
+        segments = []
+        for run in (run for run in runs if len(run)):
+            owner = int(owners[run[0]])
+            segment = parts[owner].narrow(_compact(positions[run] - starts[owner]))
+            if self.digests is not None:
+                segment = replace(segment, digests=self.digests[run])
+            segments.append(segment)
+        return tuple(segments)
 
     def read(self) -> Tuple[np.ndarray, Reference]:
         """Read the rows, and the reference with their digests.
@@ -263,15 +287,67 @@ class Reference:
 
     @staticmethod
     def concat(references: Sequence[Reference]) -> Reference:
-        """One reference to the rows of ``references``, in order."""
-        source = ConcatSource(tuple(references))
-        parts = [r.digests for r in references if r.digests is not None]
-        digests = np.concatenate(parts) if len(parts) == len(references) else None
+        """One reference to the rows of ``references``, in order.
+
+        Concatenations are flattened: the parts of the result are the rows of
+        each source the references hold, so a reference stays as small as its
+        rows however often Sets are concatenated and sliced (e.g. by
+        ``Op.chunk``). Adjacent rows of one source are joined.
+        """
+        segments: List[Reference] = []
+        for segment in (s for r in references for s in r.segments()):
+            if segments and segments[-1].source is segment.source:
+                segments[-1] = _joined(segments[-1], segment)
+            else:
+                segments.append(segment)
+        if len(segments) == 1:
+            return segments[0]
+        source = ConcatSource(tuple(segments))
+        parts = [s.digests for s in segments if s.digests is not None]
+        digests = (
+            np.concatenate([np.empty((0, DIGEST_BYTES), dtype=np.uint8), *parts])
+            if len(parts) == len(segments)
+            else None
+        )
         return Reference(source, range(source.rows), digests)
 
 
+def _compact(positions: NDArray[np.int64]) -> Union[slice, NDArray[np.int64]]:
+    """``positions`` as a slice if they are one ascending run, else as is."""
+    if len(positions) and np.all(np.diff(positions) == 1):
+        return slice(int(positions[0]), int(positions[-1]) + 1)
+    else:
+        return positions
+
+
+def _joined(first: Reference, second: Reference) -> Reference:
+    """The rows of two references to one source, one after the other."""
+    a, b = first.index, second.index
+    if (
+        isinstance(a, range)
+        and isinstance(b, range)
+        and a.step == b.step == 1
+        and a.stop == b.start
+    ):
+        index: RowIndex = range(a.start, b.stop)
+    else:
+        index = np.concatenate(
+            [np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)]
+        )
+    digests = (
+        None
+        if first.digests is None or second.digests is None
+        else np.concatenate([first.digests, second.digests])
+    )
+    return Reference(first.source, index, digests)
+
+
 class ConcatSource(ColumnSource):
-    """The rows of several references, one after another."""
+    """The rows of several references, one after another.
+
+    Built by ``Reference.concat`` only: its parts never reference another
+    concatenation, and each holds just the rows it contributes.
+    """
 
     def __init__(self, parts: Tuple[Reference, ...]) -> None:
         super().__init__()
