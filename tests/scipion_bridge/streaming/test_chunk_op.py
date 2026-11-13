@@ -10,6 +10,14 @@ from scipion_bridge.core.streaming import Pipeline
 from scipion_bridge.core.streaming import CallbackSinkWriter
 
 
+def _discard(item):
+    """Sink of the tests that ignores the results.
+
+    Not ``print``: Ray replaces ``builtins.print`` in the driver once it shows
+    a progress bar, after which the builtin no longer pickles.
+    """
+
+
 class Item(B.Struct):
     id: int
 
@@ -44,7 +52,7 @@ def test_chunk_op_validation():
 
 def _chunks(op, batches):
     """Run the accumulator ``op`` lowers to in-process, as its stage does on flush."""
-    (sink,) = lower([op.sink(print)])
+    (sink,) = lower([op.sink(_discard)])
     (accumulate,) = sink.upstream
     assert isinstance(accumulate, IRAccumulate)
     assert accumulate.flush_fn is not None

@@ -33,6 +33,14 @@ pytestmark = [
 ]
 
 
+def _discard(item):
+    """Sink of the tests that ignores the results.
+
+    Not ``print``: Ray replaces ``builtins.print`` in the driver once it shows
+    a progress bar, after which the builtin no longer pickles.
+    """
+
+
 class Item(B.Struct):
     id: int
 
@@ -93,7 +101,7 @@ def _child_labels(pipeline):
 
 
 def test_group_by_lowers_to_demux_with_template():
-    sink_node = Source("x").group_by(0, _chunk_ids).unkey().sink(print)
+    sink_node = Source("x").group_by(0, _chunk_ids).unkey().sink(_discard)
 
     (sink,) = lower([sink_node])
 
@@ -119,7 +127,7 @@ def test_unkey_adds_no_node():
 
 
 def test_template_is_not_part_of_the_enclosing_graph():
-    sink_node = Source("x").group_by(0, _chunk_ids).unkey().sink(print)
+    sink_node = Source("x").group_by(0, _chunk_ids).unkey().sink(_discard)
 
     (sink,) = lower([sink_node])
 
@@ -137,12 +145,12 @@ def test_pipeline_consuming_another_source_raises():
     )
 
     with pytest.raises(ValueError, match="may only consume its input"):
-        lower([keyed.unkey().sink(print)])
+        lower([keyed.unkey().sink(_discard)])
 
 
 def test_pipeline_with_branch_off_its_result_raises():
     def checkpointed(stream):
-        return stream.checkpoint(CallbackSinkWriter(print)).map(_second)
+        return stream.checkpoint(CallbackSinkWriter(_discard)).map(_second)
 
     with pytest.raises(ValueError, match="must lead to the stream it returns"):
         Source("x").group_by(0, checkpointed)
@@ -150,7 +158,7 @@ def test_pipeline_with_branch_off_its_result_raises():
 
 def test_pipeline_returning_a_sink_raises():
     with pytest.raises(TypeError, match="must return a stream"):
-        Source("x").group_by(0, lambda stream: stream.sink(print))
+        Source("x").group_by(0, lambda stream: stream.sink(_discard))
 
 
 def test_non_positive_max_keys_raises():
@@ -172,7 +180,7 @@ def test_non_positive_group_by_workers_raises():
 def test_workers_are_lowered_to_the_demux(workers):
     sink_node = Source("x").group_by(0, _chunk_ids, workers=workers).unkey()
 
-    (sink,) = lower([sink_node.sink(print)])
+    (sink,) = lower([sink_node.sink(_discard)])
 
     (demux,) = sink.upstream
     assert isinstance(demux, IRDemux)
@@ -180,7 +188,7 @@ def test_workers_are_lowered_to_the_demux(workers):
 
 
 def test_workers_default_to_the_backend():
-    (sink,) = lower([Source("x").group_by(0, _chunk_ids).unkey().sink(print)])
+    (sink,) = lower([Source("x").group_by(0, _chunk_ids).unkey().sink(_discard)])
 
     (demux,) = sink.upstream
     assert isinstance(demux, IRDemux)
@@ -234,7 +242,7 @@ def test_chunks_items_per_key():
 
 def test_children_are_created_lazily_per_key():
     pipeline = _compile(
-        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(print),
+        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(_discard),
     )
 
     try:
@@ -260,7 +268,7 @@ def test_children_are_created_lazily_per_key():
 
 def test_stats_count_items_of_children():
     pipeline = _compile(
-        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(print),
+        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(_discard),
     )
 
     try:
@@ -279,7 +287,7 @@ def test_stats_count_items_of_children():
 
 def test_exceeding_max_keys_fails_the_pipeline():
     pipeline = _compile(
-        Source("x").group_by(0, _chunk_ids, max_keys=2).unkey().sink(print),
+        Source("x").group_by(0, _chunk_ids, max_keys=2).unkey().sink(_discard),
     )
 
     try:
@@ -374,7 +382,7 @@ def test_items_of_starting_children_keep_their_order():
 
 def test_max_keys_counts_starting_children():
     pipeline = _compile(
-        Source("x").group_by(0, _chunk_ids, max_keys=1).unkey().sink(print),
+        Source("x").group_by(0, _chunk_ids, max_keys=1).unkey().sink(_discard),
     )
 
     try:
@@ -395,7 +403,7 @@ def test_failing_child_after_collect_fails_the_next_send():
         Source("x")
         .group_by(0, lambda stream: stream.map(_second).collect(1).map(_reject))
         .unkey()
-        .sink(print),
+        .sink(_discard),
     )
 
     try:
@@ -419,7 +427,7 @@ def _named_child_actors(key):
 
 def test_close_terminates_children():
     pipeline = _compile(
-        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(print),
+        Source("x").group_by(0, _chunk_ids, workers=None).unkey().sink(_discard),
     )
     pipeline.send("x", ("close-test", _make_set([1])))
     pipeline.flush()

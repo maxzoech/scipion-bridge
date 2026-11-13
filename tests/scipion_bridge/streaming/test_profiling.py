@@ -26,6 +26,14 @@ from scipion_bridge.core.streaming import PickleSpillStore
 _PROCESS = ProcessInfo(label="stage", pid=42, node="node")
 
 
+def _discard(item):
+    """Sink of the tests that ignores the results.
+
+    Not ``print``: Ray replaces ``builtins.print`` in the driver once it shows
+    a progress bar, after which the builtin no longer pickles.
+    """
+
+
 class _Done:
     """A completed call of an actor: awaiting it returns at once."""
 
@@ -323,7 +331,7 @@ def test_profiled_pipeline_writes_the_events_of_every_process(tmp_path):
         Source("x")
         .group_by(0, lambda stream: stream.map(_second).map(_double))
         .unkey()
-        .sink(print)
+        .sink(_discard)
     )
     (sink,) = lower([node])
     pipeline = RayBackend(init_ray=False, profile=path).compile([sink])

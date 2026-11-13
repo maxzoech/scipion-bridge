@@ -23,6 +23,14 @@ from scipion_bridge.core.streaming import Pipeline, StageStats
 pytestmark = pytest.mark.usefixtures("ray_cluster")
 
 
+def _discard(item):
+    """Sink of the tests that ignores the results.
+
+    Not ``print``: Ray replaces ``builtins.print`` in the driver once it shows
+    a progress bar, after which the builtin no longer pickles.
+    """
+
+
 class Item(B.Struct):
     id: int
 
@@ -91,7 +99,7 @@ def test_clone_copies_every_node_and_shares_functions():
 
 
 def test_clone_keeps_upstream_order_of_multi_input_stages():
-    sink_node = Source("left").combine_latest(Source("right")).sink(print)
+    sink_node = Source("left").combine_latest(Source("right")).sink(_discard)
     (sink_ir,) = lower([sink_node])
 
     (clone,) = clone_ir([sink_ir])
@@ -106,7 +114,7 @@ def test_clone_keeps_shared_upstream_nodes_shared():
     # The template of the protocol uses its input twice (collect and chunk).
     source = Source("x")
     trained = source.collect(3).map(_double)
-    sink_node = source.chunk(2).combine_latest(trained).sink(print)
+    sink_node = source.chunk(2).combine_latest(trained).sink(_discard)
     (sink_ir,) = lower([sink_node])
 
     (clone,) = clone_ir([sink_ir])
@@ -121,7 +129,7 @@ def test_clone_leaves_template_untouched():
     template = _template()
     (clone,) = clone_ir([template])
 
-    clone.add_downstream(IRSink(writer=CallbackSinkWriter(print)))
+    clone.add_downstream(IRSink(writer=CallbackSinkWriter(_discard)))
 
     assert template.downstream == []
     assert template.upstream[0].downstream == [template]
@@ -158,7 +166,7 @@ def test_clones_of_one_template_run_independently():
 
 
 def test_compile_name_prefixes_stage_labels():
-    (sink,) = lower([Source("x").map(_double).sink(print)])
+    (sink,) = lower([Source("x").map(_double).sink(_discard)])
     pipeline = RayBackend(init_ray=False).compile([sink], name="group_by[3]:")
 
     try:
@@ -176,7 +184,7 @@ def _named_actors():
 
 
 def test_compiling_starts_no_actors_until_the_pipeline_starts():
-    (sink,) = lower([Source("x").map(_double).sink(print)])
+    (sink,) = lower([Source("x").map(_double).sink(_discard)])
     before = _named_actors()
     pipeline = Pipeline(RayBackend(init_ray=False).compile([sink]), [sink])
 
@@ -199,7 +207,7 @@ def test_compiling_starts_no_actors_until_the_pipeline_starts():
 
 
 def test_closing_an_unstarted_pipeline_starts_nothing():
-    (sink,) = lower([Source("x").map(_double).sink(print)])
+    (sink,) = lower([Source("x").map(_double).sink(_discard)])
     before = _named_actors()
     pipeline = Pipeline(RayBackend(init_ray=False).compile([sink]), [sink])
 
@@ -232,12 +240,12 @@ def _reject(s):
 
 def test_failing_child_stage_aborts_abort_targets():
     backend = RayBackend(init_ray=False)
-    (parent_sink,) = lower([Source("p").map(_double).sink(print)])
+    (parent_sink,) = lower([Source("p").map(_double).sink(_discard)])
     parent = backend.compile([parent_sink])
 
     # After collect, the failed child stage never receives another item, so
     # only the abort reaches the parent.
-    (child_sink,) = lower([Source("c").collect(1).map(_reject).sink(print)])
+    (child_sink,) = lower([Source("c").collect(1).map(_reject).sink(_discard)])
     child = backend.compile(
         [child_sink],
         name="child:",

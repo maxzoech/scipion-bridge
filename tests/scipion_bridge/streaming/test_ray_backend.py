@@ -10,6 +10,14 @@ from scipion_bridge.backend.ray import RayBackend
 pytestmark = pytest.mark.usefixtures("ray_cluster")
 
 
+def _discard(item):
+    """Sink of the tests that ignores the results.
+
+    Not ``print``: Ray replaces ``builtins.print`` in the driver once it shows
+    a progress bar, after which the builtin no longer pickles.
+    """
+
+
 @ray.remote
 class Collector:
     def __init__(self):
@@ -98,7 +106,7 @@ def test_leaving_the_context_terminates_the_actors():
         Source("numbers")
         .map_batch(lambda x: x * 2)
         .scan(lambda a, b: a + b)
-        .sink(print)
+        .sink(_discard)
     )
 
     with Pipeline.from_sink(sink_node, backend=RayBackend(init_ray=False)) as pipeline:
