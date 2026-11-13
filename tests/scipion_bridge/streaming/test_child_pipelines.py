@@ -190,7 +190,11 @@ def test_compiling_starts_no_actors_until_the_pipeline_starts():
 
     try:
         report = pipeline.report()
-        assert [layer.name for layer in report.layers] == ["stats", "placement"]
+        assert [layer.name for layer in report.layers] == [
+            "stats",
+            "placement",
+            "provenance",
+        ]
         assert pipeline.stats() == {
             "0:source(x)": StageStats(),
             "1:map(_double)": StageStats(),

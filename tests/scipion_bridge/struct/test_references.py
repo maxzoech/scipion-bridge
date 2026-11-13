@@ -426,13 +426,3 @@ def test_spilling_by_reference_can_be_turned_off(tmp_path, monkeypatch):
 
     assert _states(restored)[("pixels",)] == "cached"
     assert len(spilled) > _rows(4).nbytes
-
-
-def test_prefetch_all_reads_the_sets_inside_items():
-    lazy, _, source = _referencing()
-    item = {"out": [lazy, (lazy[1:3],)], "n": 3}
-
-    references.prefetch_all(item)
-
-    assert source.reads == 1
-    assert _states(lazy)[("pixels",)] == "cached"

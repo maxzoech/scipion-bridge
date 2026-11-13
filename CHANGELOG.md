@@ -116,6 +116,17 @@
   stage spills metadata instead of images. `SCIPION_STREAM_SPILL_REFERENCES=0`
   spills the bytes. Items sent between stages always carry their rows.
 - `StageStats` gain `spill_bytes` and `reread_s`.
+- References stay as small as their rows when Sets are concatenated and
+  sliced again and again (`Op.chunk`, the loaders): before, every batch
+  carried the references of all earlier ones, which made transfers slower
+  over a run and could fail to pickle.
+- Reports have a `provenance` layer: per stage, the bytes per item that are
+  references to input files, read references or owned; where files are read
+  (`read_here`) and where columns lose their reference (`computed_here`,
+  with red edges and a warning, which says when the values are only copied).
+  The panels *Key paths* and *Spill estimate* show the state of the
+  referenced paths at every stage and the bytes a spill writes at every
+  phase boundary. Stages sample their first 3 items in and out.
 
 ### Placement
 - A placement planner (`backend/ray/placement.py`) decides the executors of

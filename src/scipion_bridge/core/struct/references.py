@@ -26,15 +26,15 @@ from typing import (
     Literal,
     Optional,
     Protocol,
+    Sequence,
     Tuple,
-    cast,
 )
 
 import numpy as np
 
 from .key_path import KeyPath
-from .schema import ArrayEntryBase, Schema, SchemaConvertible
-from .source import FileId, Reference
+from .schema import ArrayEntryBase, Schema
+from .source import FileId, Reference, row_digests
 from .storage import FieldKey, RootEngine, _BaseStorage
 
 State = Literal["reference", "cached", "owned"]
@@ -215,22 +215,6 @@ def prefetch(obj: Stored) -> None:
             )
 
 
-def prefetch_all(item: Any) -> None:
-    """Prefetch the Sets and Structs in ``item``, and in its dicts, lists and tuples."""
-    match item:
-        case dict():
-            for value in item.values():
-                prefetch_all(value)
-        case list() | tuple():
-            for value in item:
-                prefetch_all(value)
-        case SchemaConvertible(is_descriptor=False):
-            # Sets, Structs and Collections holding data have a storage.
-            prefetch(cast(Stored, item))
-        case _:
-            pass
-
-
 def verify(obj: Stored) -> None:
     """Make every cached reference of ``obj`` whose rows changed an owned column.
 
@@ -246,6 +230,43 @@ def verify(obj: Stored) -> None:
             np.asarray(engine._data[field_key]),
         ):
             engine.own(field_key)
+
+
+def unchanged_columns(sources: Sequence[Stored], obj: Stored) -> Tuple[FieldKey, ...]:
+    """The owned leaves of ``obj`` holding the rows of a reference of ``sources``.
+
+    A leaf counts when a Set of ``sources`` has a read reference at the same
+    path with as many rows, and the digests of the rows of ``obj`` equal its
+    digests: the values were copied, not computed, and lost their reference.
+    Hashes those leaves; for reports.
+    """
+    digests = {
+        path: reference.digests
+        for source in sources
+        if (engine := _root_engine(source)) is not None and engine.references()
+        for path, (reference, _) in _reference_states(source, engine).items()
+        if reference.digests is not None
+    }
+    if not digests:
+        return ()
+    storage = obj.storage
+    return tuple(
+        path
+        for path, state in column_states(obj).items()
+        if state.state == "owned"
+        and path in digests
+        and state.rows == len(digests[path])
+        and np.array_equal(
+            row_digests(
+                np.asarray(
+                    storage.read(
+                        storage.root.extend(_key_path(path)), _entry_of(obj, path)
+                    )
+                ),
+            ),
+            digests[path],
+        )
+    )
 
 
 # -- Pickling ------------------------------------------------------------------

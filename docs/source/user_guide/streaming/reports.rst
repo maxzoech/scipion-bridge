@@ -58,6 +58,19 @@ Reading the report
   a GPU. ``--placement ray`` shows the plan without reservations.
   ``--explain`` plans for the GPUs of this machine; ``--explain-gpus 4,4``
   plans for another cluster, e.g. two nodes of four GPUs.
+* The ``provenance`` layer shows which columns of the items are still rows
+  of the input files (references), as sampled from the first 3 items in and
+  out of every stage. Per stage, ``reference_bytes``, ``cached_bytes`` (read
+  references) and ``owned_bytes`` per item, and ``reference_fraction``;
+  ``read_here`` names the paths whose files the stage reads, and
+  ``computed_here`` the paths that arrive as references and leave as owned
+  columns. Edges into such a stage are drawn red, and a warning gives the
+  bytes per item a spill after it writes, and whether the values were only
+  copied (then keeping the input's columns keeps the reference). The panel
+  *Key paths* lists the state of every referenced path at every stage
+  (``ref``, ``ref*`` read, ``own``, ``C`` lost here), and *Spill estimate*
+  the bytes per item spilled at every phase boundary. A lost reference
+  costs only bytes when spilling, never correctness.
 * *Colour by* colours the stages by any numeric annotation of a layer, e.g.
   ``busy``, which shows the bottleneck, ``wait_max_s``, which shows where
   items queue, or ``throughput``. The legend gives the range of the values.

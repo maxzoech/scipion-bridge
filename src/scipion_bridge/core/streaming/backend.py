@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import abc
-import re
 from dataclasses import dataclass, fields
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .ir import IROp
-from .report.model import Annotations, Layer, PipelineReport, TablePanel
+from .provenance import StageSamples
+from .report.model import (
+    Annotations,
+    Layer,
+    PipelineReport,
+    TablePanel,
+    template_label,
+)
 
 
 @dataclass
@@ -141,6 +147,11 @@ class CompiledPipeline(abc.ABC):
         """Return execution metrics per stage, keyed by a readable stage label."""
         ...
 
+    def provenance(self) -> Dict[str, StageSamples]:
+        """The provenance of the first items of every stage, by stage label
+        (see ``provenance.py``); empty if the backend does not sample."""
+        return {}
+
     def layers(self, report: PipelineReport) -> Tuple[Layer, ...]:
         """What the backend adds to the report of the pipeline, e.g. the
         placement of its stages; ``report`` is its graph."""
@@ -163,11 +174,6 @@ class StreamingBackendProvider(abc.ABC):
         ...
 
 
-# The child of a group_by in the label of one of its stages: the stages of
-# child ``a`` of ``2:group_by`` are labelled ``2:group_by[a]/<stage>``.
-_CHILD = re.compile(r"\[[^\]]*\](?=/)")
-
-
 def stats_layer(report: PipelineReport, stats: Mapping[str, StageStats]) -> Layer:
     """The stats of a pipeline as a layer of its report.
 
@@ -179,7 +185,7 @@ def stats_layer(report: PipelineReport, stats: Mapping[str, StageStats]) -> Laye
     """
     by_node: Dict[str, List[StageStats]] = {}
     for label, stage in stats.items():
-        by_node.setdefault(_CHILD.sub("", label), []).append(stage)
+        by_node.setdefault(template_label(label), []).append(stage)
     merged = {
         node.id: merge_stats(by_node[node.id])
         for node in report.nodes

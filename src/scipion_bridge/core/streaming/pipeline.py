@@ -11,7 +11,9 @@ from dependency_injector.wiring import Provide, inject
 from .backend import CompiledPipeline, StageStats, StreamingBackendProvider, stats_layer
 from .ir import IROp
 from .node import Node, lower
+from .provenance import StageSamples
 from .report.model import PipelineReport, report_of
+from .report.provenance import provenance_layer
 
 
 class Pipeline:
@@ -35,6 +37,7 @@ class Pipeline:
         # The stats of the stages when the pipeline was closed; None if it was
         # not closed yet, or released after a failure.
         self._final_stats: Optional[Dict[str, StageStats]] = None
+        self._final_provenance: Dict[str, StageSamples] = {}
 
     @classmethod
     @inject
@@ -131,8 +134,9 @@ class Pipeline:
             return self._final_stats
 
     def report(self) -> PipelineReport:
-        """The graph of the pipeline, annotated with the stats of its stages
-        and the layers of its backend (e.g. the placement of its pools).
+        """The graph of the pipeline, annotated with the stats of its stages,
+        the layers of its backend (e.g. the placement of its pools) and the
+        provenance of the columns of its first items.
 
         Render it with ``scipion_bridge.core.streaming.report``. Also available
         after ``close()``, with the final stats.
@@ -141,7 +145,10 @@ class Pipeline:
         layers = [stats_layer(report, self.stats()), *self._compiled.layers(report)]
         for layer in layers:
             report = report.with_layer(layer)
-        return report
+        samples = (
+            self._final_provenance if self._closed else self._compiled.provenance()
+        )
+        return report.with_layer(provenance_layer(report, samples))
 
     def close(self) -> None:
         """Terminate the actors and other resources of the backend.
@@ -155,6 +162,7 @@ class Pipeline:
             self._closed = True
             try:
                 self._final_stats = self._compiled.stats()
+                self._final_provenance = self._compiled.provenance()
             finally:
                 self._compiled.close()
 

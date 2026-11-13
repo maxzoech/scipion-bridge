@@ -13,7 +13,7 @@ import html
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Tuple
 
-from .drawing import Drawing, DrawnNode
+from .drawing import LOST_COLOR, Drawing, DrawnNode
 
 _CHAR_WIDTH = 7.0
 _LINE_HEIGHT = 16.0
@@ -182,10 +182,11 @@ def _edge_svg(svg_id: str, classes: str, dashed: bool, source: Box, target: Box)
     x1, y1, x2, y2 = source.x, source.bottom, target.x, target.top
     middle = (y1 + y2) / 2
     dash = ' stroke-dasharray="5,4"' if dashed else ""
+    stroke = LOST_COLOR if "lost" in classes.split() else "#555"
     return (
         f'<g id="{svg_id}" class="edge {classes}">'
         f'<path d="M {x1:.1f} {y1:.1f} C {x1:.1f} {middle:.1f}, {x2:.1f} '
-        f'{middle:.1f}, {x2:.1f} {y2:.1f}" fill="none" stroke="#555"{dash} '
+        f'{middle:.1f}, {x2:.1f} {y2:.1f}" fill="none" stroke="{stroke}"{dash} '
         'marker-end="url(#arrow)"/></g>'
     )
 

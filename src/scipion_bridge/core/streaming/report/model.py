@@ -15,6 +15,7 @@ since its children are compiled at runtime.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
@@ -234,6 +235,17 @@ class PipelineReport:
             edges=tuple(ReportEdge(**edge) for edge in data["edges"]),
             layers=tuple(_layer_from_json(layer) for layer in data["layers"]),
         )
+
+
+# The child of a group_by in the label of one of its stages: the stages of
+# child ``a`` of ``2:group_by`` are labelled ``2:group_by[a]/<stage>``.
+_CHILD = re.compile(r"\[[^\]]*\](?=/)")
+
+
+def template_label(label: str) -> str:
+    """The id of the node of a stage label: a stage of a ``group_by`` child
+    is a node of its template."""
+    return _CHILD.sub("", label)
 
 
 def report_of(sinks: Sequence[IROp], prefix: str = "") -> PipelineReport:

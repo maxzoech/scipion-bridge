@@ -752,6 +752,51 @@ def test_a_phase_boundary_spills_references_instead_of_images(tmp_path, monkeypa
     assert _wait_for_free_gpus() == CLUSTER_GPUS
 
 
+def _copied(chunk):
+    copy = B.Set[ImageItem](capacity=len(chunk))
+    copy["defocus"] = chunk["defocus"]
+    copy["pixels"] = np.array(chunk["pixels"])
+    return {"result": copy}
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class ImagesCopied(B.Protocol):
+    out: B.Input[B.Set[ImageItem]] = B.Input()
+
+    def outputs(self):
+        return {"result": B.Set[ImageItem]}
+
+    def steps(self):
+        return self.out.map(_copied)
+
+
+def test_the_report_shows_where_references_are_lost(tmp_path):
+    chunks = _image_chunks(tmp_path / "stack.npy", chunks=4, size=16)
+    pipeline, _ = _phased(ImagesFirst(), ImagesCopied(), spill_threshold=2)
+    with pipeline:
+        for chunk in chunks:
+            pipeline.send(items=chunk)
+
+    report = pipeline.report()
+    layer = report.layer("provenance")
+    titles = {node.id: node.title for node in report.nodes}
+    first, copied = (
+        next(i for i, t in titles.items() if t.endswith(name))
+        for name in ("_pass_on)", "_copied)")
+    )
+
+    # The pixels stay references through the first protocol, across Ray.
+    assert layer.nodes[first]["computed_here"] == ()
+    assert layer.nodes[first]["reference_fraction"] > 0.9
+    assert layer.nodes[copied]["computed_here"] == ("pixels",)
+    assert layer.nodes[copied]["unchanged"] == ("pixels",)
+    assert any(values.get("lost") for values in layer.edges.values())
+    (warning,) = layer.warnings
+    assert "pixels" in warning
+    assert {panel.title for panel in layer.panels} == {"Key paths", "Spill estimate"}
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
 def test_phases_start_over_with_every_stream():
     pipeline, collector = _phased(AllGpusFirst(), AllGpusSecond())
 

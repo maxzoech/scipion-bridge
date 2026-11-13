@@ -394,7 +394,12 @@ owning the same values.
   reference with the selection of the view, digests included.
 * **Concatenation** joins references into a ``ConcatSource`` without reading
   unread ones. A field that is a reference in some inputs and owned in others
-  becomes owned.
+  becomes owned. Concatenations stay flat: ``Reference.concat`` splits its
+  inputs into ``segments()``, references to plain sources narrowed to the
+  rows they hold, and joins adjacent rows of one source; narrowing a
+  concatenation keeps only the segments it selects. ``Op.chunk`` and the
+  loaders concatenate the rest of one Set with the next again and again, so
+  nested concatenations would make every batch carry all earlier ones.
 * **Pickling.** ``Set._pickle_state`` asks ``references.pickled_references``
   which columns to pickle as references. ``_from_arrow`` restores them
   (``_restore_state``). The ``PicklingMode`` (a context variable) and the
@@ -412,8 +417,11 @@ owning the same values.
   references.
 
 ``references.py`` is the internal API the rest of the library uses:
-``set_reference``, ``column_states``, ``prefetch``, ``verify``, ``pickling``
-and the ``ReferencePolicy``. The policy makes every decision about references
+``set_reference``, ``column_states``, ``prefetch``, ``verify``,
+``unchanged_columns``, ``pickling`` and the ``ReferencePolicy``. The
+provenance layer of reports (``core/streaming/report/provenance.py``) draws
+the ``column_states`` that every stage samples from its first items
+(``core/streaming/provenance.py``). The policy makes every decision about references
 (prefetching, keeping bytes), so a cost model can replace it in one place.
 Sets without references skip all of this: ``_refs`` is empty, and the checks
 on it are guarded.

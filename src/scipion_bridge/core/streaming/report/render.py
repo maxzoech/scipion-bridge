@@ -36,7 +36,7 @@ from .model import (
 )
 
 from . import layout as builtin_layout
-from .drawing import PLAIN_FILL, SHAPES, Drawing, drawing_of
+from .drawing import LOST_COLOR, PLAIN_FILL, SHAPES, Drawing, drawing_of
 
 Layout = Literal["auto", "graphviz", "builtin"]
 
@@ -156,6 +156,7 @@ def render_dot(report: PipelineReport) -> str:
             + ("" if not e.classes else f', class="{e.classes}"')
             + (", style=dashed" if e.dashed else "")
             + (', color="#999999"' if e.classes == "virtual" else "")
+            + (f', color="{LOST_COLOR}"' if "lost" in e.classes.split() else "")
             + "];"
             for e in drawing.edges
         ),
@@ -266,7 +267,7 @@ def render_html(
     data = report.to_json().replace("</", "<\\/")
     return _PAGE.format(
         title=html.escape(title),
-        style=_STYLE,
+        style=_STYLE.replace("LOST_COLOR", LOST_COLOR),
         summary=html.escape(
             f"{len(report.nodes)} stages · {len(report.groups)} compute groups · "
             f"{len(report.layers)} layers",
@@ -366,6 +367,8 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 6
 #graph .edge path, #graph .edge polygon { stroke: var(--muted); }
 #graph .edge polygon, #graph .arrowhead { fill: var(--muted); }
 #graph .edge { cursor: pointer; }
+#graph .edge.lost path, #graph .edge.lost polygon { stroke: LOST_COLOR; }
+#graph .edge.lost polygon { fill: LOST_COLOR; }
 #graph .cluster text, #graph .cluster-label { fill: var(--muted); }
 #graph .cluster-frame, #graph .cluster polygon, #graph .cluster path {
   fill: none; stroke: var(--line); stroke-dasharray: 5 4; }

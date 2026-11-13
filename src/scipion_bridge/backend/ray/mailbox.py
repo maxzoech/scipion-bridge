@@ -19,7 +19,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, Hashable, Optional, Tuple
 
-from scipion_bridge.core.struct import references
+from scipion_bridge.core.streaming.provenance import prefetch_all
 from scipion_bridge.core.streaming.backend import StageStats
 from scipion_bridge.core.streaming.node import FlushSignal
 from scipion_bridge.core.streaming.spill import SpillStore
@@ -150,7 +150,7 @@ class Mailbox:
                     # Rows spilled as references are read again now, so
                     # the stage does not wait for them in its computation.
                     t_reread = time.perf_counter()
-                    await asyncio.to_thread(references.prefetch_all, value)
+                    await asyncio.to_thread(prefetch_all, value)
                     self._stats.reread_s += time.perf_counter() - t_reread
                 case Ref(ref=ref):
                     details["source"] = "object_store"

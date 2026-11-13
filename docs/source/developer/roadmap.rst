@@ -96,7 +96,8 @@ Status
    * - 4
      - Provenance: key paths, ``.astype``, ``.apply``, storage domains
      - In progress: reference columns, particle resolvers referencing their
-       stacks, and spilling by reference done
+       stacks, spilling by reference and the provenance layer of reports
+       done
      - 1
    * - 5
      - Lineage

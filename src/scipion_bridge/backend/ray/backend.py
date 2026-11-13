@@ -71,6 +71,7 @@ from scipion_bridge.core.streaming.ir import (
     topological_order,
 )
 from scipion_bridge.core.streaming.node import FLUSH
+from scipion_bridge.core.streaming.provenance import StageSamples
 from scipion_bridge.core.streaming.report.model import (
     Layer,
     PipelineReport,
@@ -472,6 +473,27 @@ class RayCompiledPipeline(CompiledPipeline):
             return {label: StageStats() for label in self._plan.stage_labels}
         else:
             return self._runtime_stats(self._runtime)
+
+    def provenance(self) -> Dict[str, StageSamples]:
+        """The provenance samples of every stage that started, by label.
+
+        The stages of ``group_by`` children follow, labelled with their key.
+        """
+        if self._runtime is None:
+            return {}
+        else:
+            runtime = self._runtime
+            hosts = ray.get(
+                [actor.provenance.remote() for actor in runtime.hosts.values()]
+            )
+            children = ray.get(
+                [demux.children_provenance.remote() for demux in runtime.demuxes],
+            )
+            return {
+                label: samples
+                for stage in [*hosts, *children]
+                for label, samples in stage.items()
+            }
 
     def _runtime_stats(self, runtime: _Runtime) -> Dict[str, StageStats]:
         hosts = runtime.hosts

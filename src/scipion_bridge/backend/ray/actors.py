@@ -53,6 +53,7 @@ from scipion_bridge.core.streaming.ir import (
 )
 from scipion_bridge.core.streaming.keyed import share_keys
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
+from scipion_bridge.core.streaming.provenance import ProvenanceSampler, StageSamples
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
 from scipion_bridge.core.streaming.spill import SpillStoreFactory
 
@@ -287,6 +288,7 @@ class _PipelinedStage(abc.ABC):
             label: Label of the stage in stats and the profile.
         """
         self._stats = StageStats()
+        self._provenance = ProvenanceSampler()
         self._label = label
         self._recorder = make_recorder(config.profile, label)
         self._mailbox = Mailbox(
@@ -365,6 +367,19 @@ class _PipelinedStage(abc.ABC):
     async def map_stats(self) -> Dict[str, StageStats]:
         """Return the execution metrics of the maps on the routes, by label."""
         return {label: runner.stats for label, runner in self._maps.items()}
+
+    async def provenance(self) -> Dict[str, StageSamples]:
+        """Return the samples of this stage and of the maps on its routes.
+
+        A map on an actor of its own has the label of the actor; the samples
+        of its calls are the ones of the map.
+        """
+        return {
+            self._label: self._provenance.samples,
+            **{
+                label: runner.provenance.samples for label, runner in self._maps.items()
+            },
+        }
 
     async def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of this stage."""
@@ -464,6 +479,8 @@ class _PipelinedStage(abc.ABC):
                         port=port,
                     )
 
+            if not isinstance(item, FlushSignal):
+                self._provenance.receive(item)
             try:
                 with span:
                     emissions = await self._compute(item, port)
@@ -474,6 +491,10 @@ class _PipelinedStage(abc.ABC):
 
             t_processed = time.perf_counter()
             self._stats.process_s += t_processed - t_start
+            self._provenance.emit(
+                None if isinstance(item, FlushSignal) else item,
+                emissions,
+            )
 
             with self._recorder.span("blocked", "compute", items=len(emissions)):
                 for out_item in emissions:
@@ -1424,6 +1445,7 @@ class _MapRunner:
         self._linger: Optional[asyncio.Task[None]] = None
         self._recorder = recorder
         self.stats = StageStats()
+        self.provenance = ProvenanceSampler()
         # The executors stay alive until this map released them on FLUSH.
         self._executors = _LeasedExecutors(
             self._lease,
@@ -1455,7 +1477,16 @@ class _MapRunner:
         self.stats.wait_max_s = max(self.stats.wait_max_s, waited)
         self.stats.process_s += time.perf_counter() - t_start - waited
         self.stats.last_out_t = time.time()
+        if self.provenance.sampling:
+            await self._sample(item, result)
         return result
+
+    async def _sample(self, item: Any, result: ray.ObjectRef) -> None:
+        """Sample the item of a call and its result, fetched from the object
+        store (for the first items only, see ``provenance.py``)."""
+        received = await item if isinstance(item, ray.ObjectRef) else item
+        self.provenance.receive(received)
+        self.provenance.emit(received, [await result])
 
     async def _call(self, item: Any) -> Tuple[ray.ObjectRef, float]:
         """The result of a call, and how long it waited for an executor.
@@ -1628,6 +1659,8 @@ class ChildPipeline(Protocol):
     def source_handle(self, source_name: str) -> Any: ...
 
     def stats(self) -> Dict[str, StageStats]: ...
+
+    def provenance(self) -> Dict[str, StageSamples]: ...
 
     def close_spill(self) -> List[ray.ObjectRef]: ...
 
@@ -1820,6 +1853,13 @@ class RayDemuxActor(_PipelinedStage):
             *(asyncio.to_thread(child.stats) for child in self._started()),
         )
         return {label: stage for child in stats for label, stage in child.items()}
+
+    async def children_provenance(self) -> Dict[str, StageSamples]:
+        """Return the provenance samples of every stage of the started children."""
+        samples = await asyncio.gather(
+            *(asyncio.to_thread(child.provenance) for child in self._started()),
+        )
+        return {label: stage for child in samples for label, stage in child.items()}
 
     async def close_spill(self) -> None:
         """Remove the spilled items of the router and of its children."""

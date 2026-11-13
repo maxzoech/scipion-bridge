@@ -35,6 +35,8 @@ PALETTE = (
 )
 # Fill of stages without a compute group, and of group_by nodes.
 PLAIN_FILL = "#eeeeee"
+# Edges into a stage where columns lose their reference to input files.
+LOST_COLOR = "#d62d20"
 GROUP_BY_FILL = "#fff3d6"
 
 # Graphviz shapes of the kinds of stages.
@@ -74,6 +76,9 @@ class DrawnEdge:
     Attributes:
         svg_id: ``e<i>`` for the i-th edge of the report, ``v<i>`` for a
             virtual edge.
+        classes: Its SVG classes: ``boundary`` (a phase boundary), ``lost``
+            (into a stage where columns lose their reference to input
+            files) or ``virtual``.
         dashed: Drawn dashed: a phase boundary or a virtual edge.
     """
 
@@ -135,12 +140,23 @@ def drawing_of(report: PipelineReport) -> Drawing:
         for edge, values in layer.edges.items()
         if "boundary" in values
     }
+    # Edges into a stage where columns lose their reference to input files.
+    lost = {
+        edge
+        for layer in report.layers
+        for edge, values in layer.edges.items()
+        if values.get("lost") is True
+    }
     edges = [
         DrawnEdge(
             svg_id=f"e{i}",
             source=index[edge.source],
             target=index[edge.target],
-            classes="boundary" if (edge.source, edge.target) in boundaries else "",
+            classes=" ".join(
+                name
+                for name, edges in (("boundary", boundaries), ("lost", lost))
+                if (edge.source, edge.target) in edges
+            ),
             dashed=(edge.source, edge.target) in boundaries,
         )
         for i, edge in enumerate(report.edges)
