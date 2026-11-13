@@ -58,9 +58,9 @@ def _convert_to_argname(name: str) -> str:
 
 def _format_stats(stats: Dict[str, StageStats]) -> str:
     """Format cumulative per-stage metrics as a table, with the throughput,
-    busy fraction and waits of the stages that were active."""
+    busy, utilization and waits of the stages that were active."""
     header = (
-        f"{'stage':<40} {'in':>6} {'out':>6} {'items/s':>8} {'busy':>6} "
+        f"{'stage':<40} {'in':>6} {'out':>6} {'items/s':>8} {'busy':>6} {'util':>6} "
         f"{'idle_s':>8} {'process_s':>10} {'wait_s':>8} {'blocked_s':>10} "
         f"{'emit_s':>8} {'buffered':>8} {'spilled':>8} {'fetch_s':>8} "
         f"{'spill_s':>8}"
@@ -68,6 +68,7 @@ def _format_stats(stats: Dict[str, StageStats]) -> str:
     rows = [
         f"{label:<40} {s.items_in:>6} {s.items_out:>6} "
         f"{_derived(s, 'throughput', 8, 2)} {_derived(s, 'busy', 6, 2)} "
+        f"{_derived(s, 'utilization', 6, 2)} "
         f"{s.idle_s:>8.2f} {s.process_s:>10.2f} {s.wait_s:>8.2f} "
         f"{s.blocked_s:>10.2f} {s.emit_s:>8.2f} {s.buffered_peak:>8} "
         f"{s.spilled:>8} {s.fetch_s:>8.2f} {s.spill_s:>8.2f}"

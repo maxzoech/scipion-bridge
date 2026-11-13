@@ -128,7 +128,7 @@ def _panel_text(panel: Panel) -> List[str]:
             return [
                 f"  {title}",
                 *(
-                    f"    node {slot.node} GPU {slot.gpu}: "
+                    f"    node {slot.node} {slot.name}: "
                     + (
                         ", ".join(f"{o.group} {o.share:.0%}" for o in slot.occupants)
                         or "free"
@@ -320,7 +320,7 @@ def _panel_html(panel: Panel, fills: Mapping[str, str], layer: Layer) -> str:
             )
         case GpuMapPanel(title=title, gpus=gpus):
             cells = "".join(
-                f'<div class="gpu"><div class="gpu-name">node {slot.node} · GPU {slot.gpu}</div>'
+                f'<div class="gpu"><div class="gpu-name">node {slot.node} · {slot.name}</div>'
                 '<div class="gpu-bar">'
                 + "".join(
                     f'<div class="gpu-share" style="width:{o.share:.0%};'

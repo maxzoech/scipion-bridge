@@ -26,7 +26,8 @@ class StageStats:
         items_out: Data items forwarded downstream.
         idle_s: Time spent waiting for input. High values mean the stage is
             starved by its upstream.
-        process_s: Time spent in the stage logic.
+        process_s: Time spent in the stage logic. For a map running on an
+            executor or as a Ray task, the time its calls executed there.
         blocked_s: Time spent waiting for room in the outbox. High values mean
             that the maps on the routes of the stage, which run at most
             ``max_in_flight`` items at a time, are throttling it.
@@ -39,8 +40,9 @@ class StageStats:
             the spill store.
         spill_s: Time spent writing items to the spill store.
         wait_s: Time items waited before the stage took them: in its
-            mailbox, or for an executor of its pool (maps). High values mean
-            the stage is slower than its upstream.
+            mailbox, or, for a map, for an executor of its pool, for the
+            other call in flight on it, or in Ray's queue for resources.
+            High values mean the stage is slower than its upstream.
         wait_max_s: The longest wait of an item.
         spill_bytes: Bytes written to the spill store. Columns that
             reference rows of input files are written as references.
@@ -48,8 +50,11 @@ class StageStats:
             items read back from the spill store.
         first_in_t: When the stage received its first item, in seconds since
             the epoch; ``None`` before.
-        last_out_t: When the stage forwarded its last item so far, in
-            seconds since the epoch; ``None`` before.
+        last_done_t: When the stage finished processing its last item so
+            far, in seconds since the epoch; ``None`` before.
+        capacity: The items the stage can process at once: 1 for a stage on
+            an actor, the executors it used for a map on a pool; ``None``
+            for maps running as Ray tasks, whose CPUs Ray shares.
     """
 
     items_in: int = 0
@@ -67,24 +72,29 @@ class StageStats:
     spill_bytes: int = 0
     reread_s: float = 0.0
     first_in_t: Optional[float] = None
-    last_out_t: Optional[float] = None
+    last_done_t: Optional[float] = None
+    capacity: Optional[int] = None
 
     @property
     def active_s(self) -> Optional[float]:
-        """The time from the first item in to the last item out, if known."""
-        if self.first_in_t is None or self.last_out_t is None:
+        """The time from the first item in until the last item was
+        processed, if known."""
+        if self.first_in_t is None or self.last_done_t is None:
             return None
-        return max(self.last_out_t - self.first_in_t, 0.0)
+        else:
+            return max(self.last_done_t - self.first_in_t, 0.0)
 
 
 def merge_stats(stages: Sequence[StageStats]) -> StageStats:
     """The stats of several stages as one, e.g. the children of a group_by.
 
-    Counts and times add up; peaks and the longest wait are the highest;
-    the activity spans from the earliest first item to the latest last one.
+    Counts, times and capacities add up (children sharing a pool count its
+    executors once each); peaks and the longest wait are the highest; the
+    activity spans from the earliest first item to the latest last one.
     """
     firsts = [s.first_in_t for s in stages if s.first_in_t is not None]
-    lasts = [s.last_out_t for s in stages if s.last_out_t is not None]
+    lasts = [s.last_done_t for s in stages if s.last_done_t is not None]
+    capacities = [s.capacity for s in stages]
     return StageStats(
         **{
             field.name: sum(getattr(stage, field.name) for stage in stages)
@@ -94,29 +104,41 @@ def merge_stats(stages: Sequence[StageStats]) -> StageStats:
         buffered_peak=max((s.buffered_peak for s in stages), default=0),
         wait_max_s=max((s.wait_max_s for s in stages), default=0.0),
         first_in_t=min(firsts, default=None),
-        last_out_t=max(lasts, default=None),
+        last_done_t=max(lasts, default=None),
+        capacity=(
+            None
+            if not capacities or None in capacities
+            else sum(c for c in capacities if c is not None)
+        ),
     )
 
 
-_NOT_SUMMED = frozenset({"buffered_peak", "wait_max_s", "first_in_t", "last_out_t"})
+_NOT_SUMMED = frozenset(
+    {"buffered_peak", "wait_max_s", "first_in_t", "last_done_t", "capacity"},
+)
 
 
 def throughput_of(stats: StageStats) -> Dict[str, float]:
     """Metrics derived from the stats of a stage, if it was active.
 
-    ``throughput`` is the items it forwarded per second while it was
+    ``throughput`` is the items it processed per second while it was
     active, ``s_per_item`` the mean time to process an item, ``busy`` the
-    items in processing at once on average (at most 1 for a stage on an
-    actor of its own; a map on a pool can reach its executors), and
-    ``wait_mean_s`` the mean wait of an item before the stage took it.
+    items in processing at once on average, ``utilization`` that share of
+    its ``capacity`` (for stages that have one), and ``wait_mean_s`` the
+    mean wait of an item before the stage took it.
     """
     active = stats.active_s
     if active is None or stats.items_in == 0:
         return {}
+    busy = stats.process_s / active if active > 0 else 0.0
+    utilization = (
+        {} if stats.capacity is None else {"utilization": busy / stats.capacity}
+    )
     return {
-        "throughput": stats.items_out / active if active > 0 else 0.0,
+        "throughput": stats.items_in / active if active > 0 else 0.0,
         "s_per_item": stats.process_s / stats.items_in,
-        "busy": stats.process_s / active if active > 0 else 0.0,
+        "busy": busy,
+        **utilization,
         "wait_mean_s": stats.wait_s / stats.items_in,
     }
 
@@ -181,7 +203,8 @@ def stats_layer(report: PipelineReport, stats: Mapping[str, StageStats]) -> Laye
     its template (``merge_stats``), with ``children`` their number. Stages of
     the backend without a node in the report, such as the sinks of the
     children, are left out. Stages that were active also get the metrics of
-    ``throughput_of``; the panel *Throughput* lists them, busiest first.
+    ``throughput_of``; the panel *Throughput* lists them, the most utilized
+    first, then the maps without a capacity (Ray tasks), busiest first.
     """
     by_node: Dict[str, List[StageStats]] = {}
     for label, stage in stats.items():
@@ -204,7 +227,7 @@ def stats_layer(report: PipelineReport, stats: Mapping[str, StageStats]) -> Laye
             node_id: _annotations(stage, derived[node_id], children.get(node_id))
             for node_id, stage in merged.items()
         },
-        metric="busy",
+        metric="utilization",
         panels=_throughput_panels(merged, derived),
         warnings=_bottleneck(report, merged, derived),
     )
@@ -231,7 +254,10 @@ def _throughput_panels(
 ) -> Tuple[TablePanel, ...]:
     active = sorted(
         (node_id for node_id in merged if derived[node_id]),
-        key=lambda node_id: -derived[node_id]["busy"],
+        key=lambda node_id: (
+            "utilization" not in derived[node_id],
+            -derived[node_id].get("utilization", derived[node_id]["busy"]),
+        ),
     )
     if not active:
         return ()
@@ -244,6 +270,7 @@ def _throughput_panels(
                 "items/s",
                 "s/item",
                 "busy",
+                "utilization",
                 "wait mean s",
                 "wait max s",
                 "peak buffered",
@@ -256,6 +283,7 @@ def _throughput_panels(
                     round(derived[node_id]["throughput"], 3),
                     round(derived[node_id]["s_per_item"], 4),
                     round(derived[node_id]["busy"], 2),
+                    _rounded(derived[node_id].get("utilization"), 2),
                     round(derived[node_id]["wait_mean_s"], 4),
                     round(merged[node_id].wait_max_s, 4),
                     merged[node_id].buffered_peak,
@@ -272,17 +300,27 @@ def _bottleneck(
     merged: Mapping[str, StageStats],
     derived: Mapping[str, Mapping[str, float]],
 ) -> Tuple[str, ...]:
-    """A warning naming the busiest top-level stage, if items waited for it."""
+    """A warning naming the most utilized top-level stage, if items waited
+    for it.
+
+    Maps running as Ray tasks have no capacity of their own, so they are
+    not compared: their ``busy`` counts calls on CPUs that Ray shares.
+    """
     top = {node.id for node in report.nodes if node.parent is None}
-    candidates = [n for n in merged if n in top and derived[n]]
+    candidates = [n for n in merged if n in top and "utilization" in derived[n]]
     if not candidates:
         return ()
-    busiest = max(candidates, key=lambda n: derived[n]["busy"])
+    busiest = max(candidates, key=lambda n: derived[n]["utilization"])
     waited = merged[busiest].wait_s > merged[busiest].process_s / 10
     if not waited:
         return ()
     return (
-        f"{busiest} is the bottleneck: busy {derived[busiest]['busy']:.2f}, "
-        f"its items waited {derived[busiest]['wait_mean_s']:.3g} s on average "
+        f"{busiest} is the bottleneck: utilization "
+        f"{derived[busiest]['utilization']:.2f}, its items waited "
+        f"{derived[busiest]['wait_mean_s']:.3g} s on average "
         f"({merged[busiest].wait_max_s:.3g} s at most).",
     )
+
+
+def _rounded(value: Optional[float], digits: int) -> Optional[float]:
+    return None if value is None else round(value, digits)

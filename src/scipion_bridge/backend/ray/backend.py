@@ -160,18 +160,52 @@ def _ray_options(resources: ComputeResources, num_gpus: float) -> Dict[str, Any]
 
 
 def read_gpu_memory() -> List[float]:
-    """Memory in GiB of every GPU of this node, or none without nvidia-smi."""
+    """Memory in GiB of every GPU of this node visible to this process
+    (``CUDA_VISIBLE_DEVICES``), or none without nvidia-smi."""
     try:
         output = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
             capture_output=True,
             text=True,
             check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return []
+    gpus = [
+        tuple(field.strip() for field in line.split(","))
+        for line in output.splitlines()
+        if line.strip()
+    ]
     # nvidia-smi reports MiB.
-    return [float(mib) / 1024 for mib in output.split()]
+    return [
+        float(mib) / 1024
+        for _, _, mib in visible_gpus(gpus, os.environ.get("CUDA_VISIBLE_DEVICES"))
+    ]
+
+
+def visible_gpus(
+    gpus: Sequence[Tuple[str, ...]],
+    visible: Optional[str],
+) -> List[Tuple[str, ...]]:
+    """The rows ``(index, uuid, ...)`` of ``gpus`` that ``CUDA_VISIBLE_DEVICES``
+    (``visible``) shows, in its order; all of them if it is unset.
+
+    Entries are indices or UUIDs (``GPU-...``, also by a unique prefix); CUDA
+    stops at the first entry that names no GPU.
+    """
+    if visible is None:
+        return list(gpus)
+    shown: List[Tuple[str, ...]] = []
+    for entry in (e.strip() for e in visible.split(",")):
+        match = [gpu for gpu in gpus if gpu[0] == entry or gpu[1].startswith(entry)]
+        if not entry or len(match) != 1 or match[0] in shown:
+            break
+        shown.append(match[0])
+    return shown
 
 
 @ray.remote(num_cpus=0, num_gpus=0)
@@ -366,6 +400,8 @@ class RayCompiledPipeline(CompiledPipeline):
         self._plan = plan
         self._runtime: Optional[_Runtime] = None
         self._closed = False
+        # The GPUs the executors of every group ran on, kept when closing.
+        self._devices: Dict[str, Dict[int, Tuple[str, ...]]] = {}
 
     def start(self) -> None:
         """Start the actors of the pipeline and wait until they are connected.
@@ -399,9 +435,15 @@ class RayCompiledPipeline(CompiledPipeline):
             await asyncio.gather(*connected)
 
     def layers(self, report: PipelineReport) -> Tuple[Layer, ...]:
-        """The placement of the pools, if the pipeline owns them."""
+        """The placement of the pools, if the pipeline owns them, with the
+        GPUs their executors ran on."""
         placement = self._plan.placement
-        return () if placement is None else (placement.layer(),)
+        if placement is None:
+            return ()
+        elif self._runtime is not None and not self._closed:
+            return (placement.layer(_devices_of(self._runtime)),)
+        else:
+            return (placement.layer(self._devices),)
 
     @property
     def profile(self) -> Optional[ProfileConfig]:
@@ -538,6 +580,8 @@ class RayCompiledPipeline(CompiledPipeline):
         if runtime.owns_profile:
             self._close_profile(runtime)
 
+        self._keep_devices(runtime)
+
         try:
             ray.get(self.close_spill(), timeout=_CLOSE_SPILL_TIMEOUT_S)
         except Exception:
@@ -558,6 +602,14 @@ class RayCompiledPipeline(CompiledPipeline):
 
         # Without a reference, Ray frees the function table.
         runtime.functions = None
+
+    def _keep_devices(self, runtime: _Runtime) -> None:
+        """Keep the GPUs the executors ran on for reports after closing."""
+        try:
+            self._devices = _devices_of(runtime)
+        except Exception:
+            # A failed pool may be gone; the report shows the planned GPUs.
+            pass
 
     def close_spill(self) -> List[ray.ObjectRef]:
         """Make every stage remove its spilled items; the calls to await."""
@@ -1259,8 +1311,17 @@ class _Placement:
     demands: Mapping[str, GroupDemand]
     managed: bool = True
 
-    def layer(self) -> Layer:
-        return placement_layer(self.graph, self.plan, self.demands, self.managed)
+    def layer(
+        self,
+        devices: Mapping[str, Mapping[int, Tuple[str, ...]]] = {},
+    ) -> Layer:
+        return placement_layer(
+            self.graph,
+            self.plan,
+            self.demands,
+            self.managed,
+            devices,
+        )
 
 
 def _cluster_nodes() -> List[Tuple[str, int]]:
@@ -1380,6 +1441,11 @@ class _RouteBuilder:
                     self.actor_map[downstream],
                     downstream.upstream.index(node),
                 )
+
+
+def _devices_of(runtime: _Runtime) -> Dict[str, Dict[int, Tuple[str, ...]]]:
+    """The GPU ids the executors of every group ran on, by bundle."""
+    return dict(ray.get([group.devices.remote() for group in runtime.groups]))
 
 
 def _stats_of(

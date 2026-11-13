@@ -87,7 +87,7 @@ def test_stats_annotate_the_stages():
     layer = stats_layer(report, {"1:map(_forward)": StageStats(items_in=3)})
 
     assert layer.nodes["1:map(_forward)"]["items_in"] == 3
-    assert layer.metric == "busy"
+    assert layer.metric == "utilization"
 
 
 def test_stats_of_group_by_children_add_up_in_the_template():
@@ -120,7 +120,8 @@ def test_active_stages_get_throughput_busy_and_wait():
         wait_s=1.0,
         wait_max_s=0.5,
         first_in_t=100.0,
-        last_out_t=104.0,
+        last_done_t=104.0,
+        capacity=1,
     )
 
     layer = stats_layer(
@@ -129,6 +130,7 @@ def test_active_stages_get_throughput_busy_and_wait():
 
     node = layer.nodes["1:map(_forward)"]
     assert (node["throughput"], node["s_per_item"], node["busy"]) == (1.0, 0.5, 0.5)
+    assert node["utilization"] == 0.5
     assert node["wait_mean_s"] == 0.25
     # A stage without items has no times, so no derived metrics.
     assert "busy" not in layer.nodes["0:source(particles)"]
@@ -150,7 +152,7 @@ def test_children_span_from_the_first_item_to_the_last():
                 process_s=1.0,
                 wait_max_s=0.2,
                 first_in_t=10.0,
-                last_out_t=11.0,
+                last_done_t=11.0,
             ),
             "2:group_by[b]/1:refine": StageStats(
                 items_in=1,
@@ -158,13 +160,13 @@ def test_children_span_from_the_first_item_to_the_last():
                 process_s=1.0,
                 wait_max_s=0.7,
                 first_in_t=12.0,
-                last_out_t=14.0,
+                last_done_t=14.0,
             ),
         },
     )
 
     node = layer.nodes["2:group_by/1:refine"]
-    assert (node["first_in_t"], node["last_out_t"]) == (10.0, 14.0)
+    assert (node["first_in_t"], node["last_done_t"]) == (10.0, 14.0)
     assert node["wait_max_s"] == 0.7
     assert node["throughput"] == 0.5
 
@@ -180,7 +182,8 @@ def test_html_colours_by_any_numeric_annotation():
                     items_out=2,
                     process_s=1.0,
                     first_in_t=0.0,
-                    last_out_t=2.0,
+                    last_done_t=2.0,
+                    capacity=1,
                 ),
             },
         ),
@@ -189,7 +192,7 @@ def test_html_colours_by_any_numeric_annotation():
     page = render_html(report, "builtin")
 
     options = re.findall(r'data-layer="stats" data-key="([^"]+)"', page)
-    assert options[0] == "busy"
+    assert options[0] == "utilization"
     assert {"throughput", "wait_max_s", "process_s", "items_in"} <= set(options)
 
 

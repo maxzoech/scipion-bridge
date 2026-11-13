@@ -33,7 +33,7 @@ Rules, in order:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import (
     Callable,
     Dict,
@@ -866,6 +866,35 @@ def _slots(
             )
 
 
+def _physical_gpus(
+    plan: Plan,
+    demands: Mapping[str, GroupDemand],
+    devices: Mapping[str, Mapping[int, Tuple[str, ...]]],
+) -> Dict[Tuple[int, int], str]:
+    """The GPU id of every GPU of the plan an executor ran on, by node and
+    index in the plan.
+
+    The bundles of a pool are its slots in order (``bundles_of``), so the
+    executor of a bundle ran on the GPUs of its slot.
+    """
+    return {
+        (slot.node, gpu): device
+        for group, pool in plan.groups.items()
+        for index, slot in enumerate(_bundled_slots(pool, demands[group]))
+        if len(ids := devices.get(group, {}).get(index, ())) == len(slot.gpus)
+        for gpu, device in zip(slot.gpus, ids)
+    }
+
+
+def _bundled_slots(pool: GroupPlan, demand: GroupDemand) -> Tuple[Slot, ...]:
+    """The slots of a pool that get a bundle, in the order of its bundles."""
+    return tuple(
+        slot
+        for slot in pool.slots
+        if demand.holds and demand.gpus > 0 and slot.executors > 0
+    )
+
+
 def bundles_of(pool: GroupPlan, demand: GroupDemand) -> Tuple[Bundle, ...]:
     """The resources a long-running pool reserves, one bundle per slot.
 
@@ -874,8 +903,7 @@ def bundles_of(pool: GroupPlan, demand: GroupDemand) -> Tuple[Bundle, ...]:
     """
     return tuple(
         Bundle(slot.node, _bundle_resources(slot, demand), slot.executors)
-        for slot in pool.slots
-        if demand.holds and demand.gpus > 0 and slot.executors > 0
+        for slot in _bundled_slots(pool, demand)
     )
 
 
@@ -988,6 +1016,7 @@ def placement_layer(
     plan: Plan,
     demands: Mapping[str, GroupDemand],
     managed: bool = True,
+    devices: Mapping[str, Mapping[int, Tuple[str, ...]]] = {},
 ) -> Layer:
     """The plan as a layer of the report ``graph``.
 
@@ -995,7 +1024,11 @@ def placement_layer(
         managed: Whether long-running pools reserve their planned GPUs
             (``RayBackend(placement="managed")``); otherwise Ray places the
             executors, and later phases wait for every earlier pool.
+        devices: The GPU ids the executors of every group ran on, by the
+            index of their bundle, once the pipeline ran: the GPU maps show
+            them instead of the indices of the plan.
     """
+    physical = _physical_gpus(plan, demands, devices)
     blockers = blockers_of(plan, demands)
 
     def waits_for(group: str) -> Tuple[str, ...]:
@@ -1089,7 +1122,10 @@ def placement_layer(
                 GpuMapPanel(
                     f"GPUs in phase {index}: "
                     + (", ".join(demands[g].name for g in groups) or "no pools"),
-                    gpu_map,
+                    tuple(
+                        replace(slot, device=physical.get((slot.node, slot.gpu)))
+                        for slot in gpu_map
+                    ),
                 )
                 for index, (groups, gpu_map) in enumerate(
                     zip(plan.phases, plan.gpu_maps)

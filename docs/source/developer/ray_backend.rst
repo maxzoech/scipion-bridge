@@ -147,6 +147,15 @@ parameters in the worker process, records the call for the profiler, and
 calls the function. Ray queues them on the cluster's CPUs and reuses the
 worker processes.
 
+**Timing.** Tasks and ``RayComputeExecutor.call`` return two objects
+(``num_returns=2``): the result, which the routes pass on untouched, and a
+``CallTiming`` of how long the call waited where it ran (in Ray's queue, or
+for the other call in flight on its executor) and executed. The map runner
+counts the execution as ``process_s`` and the waits as ``wait_s``
+(``account_call``); timed in the stage actor, a call would also count
+waits, and a map with two calls in flight on one executor would be
+``busy`` 2.
+
 **Pools.** Calls of long-running protocols, and calls claiming GPUs, run on a
 pool of ``RayComputeExecutor``\ s, threaded actors that hold the claim of the
 protocol for their lifetime; Ray pins each to its GPU. Calls claiming GPUs

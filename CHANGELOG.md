@@ -84,15 +84,24 @@
   also in the names of their actors.
 - `ComputeAssignment.name` names the protocol of a group.
 - Stage stats record how long items waited before a stage took them
-  (`wait_s`, `wait_max_s`: in its mailbox, or for an executor) and when the
-  stage received its first item and forwarded its last (`first_in_t`,
-  `last_out_t`). The `process_s` of a map on an executor pool no longer
-  includes the wait for an executor.
-- The stats layer derives `throughput`, `s_per_item`, `busy` and
-  `wait_mean_s` (`throughput_of`), colours by `busy`, lists the stages in a
-  *Throughput* panel and names the bottleneck; the runner's table shows
-  items/s, busy and `wait_s`. *Colour by* in the HTML report offers every
-  numeric annotation of a layer.
+  (`wait_s`, `wait_max_s`: in its mailbox, for an executor, for the other
+  call in flight on it, or in Ray's queue), when the stage received its
+  first item and finished processing its last (`first_in_t`,
+  `last_done_t`), and its `capacity` (1 for a stage, the executors of a
+  pool map). Maps account the time their calls executed, as measured by
+  the executor or task running them (returned next to the result), not the
+  time from submitting a call to its result.
+- The stats layer derives `throughput` (items processed per second, also of
+  sinks), `s_per_item`, `busy`, `utilization` (`busy` over `capacity`) and
+  `wait_mean_s` (`throughput_of`), colours by `utilization`, lists the
+  stages in a *Throughput* panel and names the most utilized stage whose
+  items wait as the bottleneck; maps running as Ray tasks have no capacity
+  and are not compared. The runner's table shows items/s, busy, utilization
+  and `wait_s`. *Colour by* in the HTML report offers every numeric
+  annotation of a layer.
+- After a run, the GPU maps of the placement layer name the GPUs by the
+  devices the executors ran on (`nvidia-smi` numbering). `--explain` and the
+  GPU memory of claims count only the GPUs `CUDA_VISIBLE_DEVICES` shows.
 
 ### Provenance
 - Columns of Sets can reference rows of a source (an input file) instead of

@@ -22,6 +22,7 @@ from scipion_bridge.core.environment.compute import (
 )
 from scipion_bridge.core.streaming import (
     CallbackSinkWriter,
+    GpuMapPanel,
     IRDemux,
     IRMap,
     IROp,
@@ -541,6 +542,27 @@ def test_the_layer_shows_phases_boundaries_and_gpus():
     ]
     assert layer.nodes["3:m2"]["waits_for"] == "the FLUSH of phase 0"
     assert any("wait on disk" in warning for warning in report.warnings)
+
+
+def test_after_a_run_the_gpus_are_named_by_the_devices_they_ran_on():
+    sinks = _chain(
+        ComputeResources(gpus=1, task=LONG),
+        None,
+        ComputeResources(gpus=1, task=LONG),
+    )
+    graph = report_of(sinks)
+    demands = demands_of(all_maps(sinks), lambda resources: resources.gpus)
+    plan = plan_placement(graph, demands, [1], 8.0)
+    # With CUDA_VISIBLE_DEVICES=3, the one GPU of the plan is device 3.
+    devices = {group: {0: ("3",)} for group in plan.groups}
+
+    planned = placement_layer(graph, plan, demands)
+    ran = placement_layer(graph, plan, demands, devices=devices)
+
+    gpu_maps = [p for p in ran.panels if isinstance(p, GpuMapPanel)]
+    assert [slot.name for p in gpu_maps for slot in p.gpus] == ["GPU 3", "GPU 3"]
+    planned_maps = [p for p in planned.panels if isinstance(p, GpuMapPanel)]
+    assert [slot.name for p in planned_maps for slot in p.gpus] == ["GPU 0", "GPU 0"]
 
 
 def test_explain_plans_without_ray():

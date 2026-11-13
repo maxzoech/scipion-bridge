@@ -25,6 +25,7 @@ from typing import (
     Set,
     Tuple,
     Union,
+    cast,
 )
 import abc
 import asyncio
@@ -33,6 +34,7 @@ import logging
 import threading
 import time
 import ray  # type: ignore
+from ray.exceptions import RayError  # type: ignore
 from ray.util.placement_group import (  # type: ignore
     PlacementGroup,
     placement_group,
@@ -287,7 +289,8 @@ class _PipelinedStage(abc.ABC):
                 ``None`` to keep every item in memory.
             label: Label of the stage in stats and the profile.
         """
-        self._stats = StageStats()
+        # A stage processes one item at a time.
+        self._stats = StageStats(capacity=1)
         self._provenance = ProvenanceSampler()
         self._label = label
         self._recorder = make_recorder(config.profile, label)
@@ -491,6 +494,8 @@ class _PipelinedStage(abc.ABC):
 
             t_processed = time.perf_counter()
             self._stats.process_s += t_processed - t_start
+            if not isinstance(item, FlushSignal):
+                self._stats.last_done_t = time.time()
             self._provenance.emit(
                 None if isinstance(item, FlushSignal) else item,
                 emissions,
@@ -561,7 +566,6 @@ class _PipelinedStage(abc.ABC):
             case _InFlightItem():
                 self._stats.emit_s += time.perf_counter() - t_start
                 self._stats.items_out += 1
-                self._stats.last_out_t = time.time()
             case _FlushBarrier(barriers=barriers):
                 # The events up to the FLUSH are in the trace when it returns.
                 await self._recorder.flush()
@@ -734,19 +738,41 @@ def _serve_parameters(parameters: Mapping[str, Any]) -> None:
         _served_parameters = dict(parameters)
 
 
-def _run_map_call(functions: Ref, label: str, item: Any) -> Any:
+@dataclass(frozen=True)
+class CallTiming:
+    """Where a call of a map ran: how long it waited there and executed.
+
+    Returned next to the result of every call (``num_returns=2``), so the
+    map accounts the execution, not the time the call queued in Ray or
+    waited for the other call in flight on its executor.
+    """
+
+    waited_s: float
+    execute_s: float
+
+
+def _run_map_call(
+    functions: Ref,
+    label: str,
+    item: Any,
+    submitted_t: float,
+) -> Tuple[Any, CallTiming]:
     """Run one call of a map ``label``, holding the resources of the task.
 
     The function comes from the pipeline's function table, unpacked once per
     process. Ray may reuse the worker process for other calls or end it, so
-    the profiling events of the call are sent before it returns.
+    the profiling events of the call are sent before it returns. The call
+    waited in Ray's queue since ``submitted_t`` (seconds since the epoch).
     """
+    waited = max(time.time() - submitted_t, 0.0)
     table = table_of(functions)
     _serve_parameters(table.parameters)
     recorder = make_recorder(table.profile, "task worker")
     try:
         with recorder.span("execute", f"map:{label}", gpus=ray.get_gpu_ids()):
-            return table.functions[label](item)
+            t_start = time.perf_counter()
+            result = table.functions[label](item)
+            return result, CallTiming(waited, time.perf_counter() - t_start)
     finally:
         recorder.flush_sync()
 
@@ -841,33 +867,47 @@ class RayComputeExecutor:
         self._recorder = make_recorder(profile, f"executor({group})")
         self._recorder.instant("start", "executor", gpus=ray.get_gpu_ids())
 
-    def call(self, functions: Ref, label: str, stage: str, item: Any) -> Any:
+    def call(
+        self,
+        functions: Ref,
+        label: str,
+        stage: str,
+        item: Any,
+    ) -> Tuple[Any, CallTiming]:
         """Run the function of the map ``label`` from ``functions`` on ``item``.
 
         The calls of a map of the protocol (``stage``, its fingerprint) run
         one at a time; the copies of a map in the children of a ``group_by``
         are the same map. So an executor runs as many calls at once as the
-        protocol has maps, however many children share it.
+        protocol has maps, however many children share it. Returns the
+        result and its timing (called with ``num_returns=2``).
         """
         func = table_of(functions).functions[label]
         lane = f"map:{label}"
         lock = self._locks.setdefault(stage, threading.Lock())
+        t_wait = time.perf_counter()
         with self._recorder.span("lock_wait", lane, overlapping=True):
             lock.acquire()
         try:
+            t_start = time.perf_counter()
             with self._recorder.span("execute", lane):
-                return func(item)
+                result = func(item)
+            return result, CallTiming(
+                t_start - t_wait,
+                time.perf_counter() - t_start,
+            )
         finally:
             lock.release()
 
-    def prepare(self, functions: Ref) -> None:
+    def prepare(self, functions: Ref) -> Tuple[str, ...]:
         """Build the process-scope resources of the group before the first call.
 
-        Returns once the executor holds its resources, runs, and e.g. has
-        loaded the model of its protocol.
+        Returns, once the executor holds its resources, runs, and e.g. has
+        loaded the model of its protocol, the ids of its GPUs.
         """
         with self._recorder.span("prepare", "executor", level=logging.INFO):
             table_of(functions).preparers[self._group]()
+        return tuple(str(gpu) for gpu in ray.get_gpu_ids())
 
     def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of the executor."""
@@ -934,6 +974,8 @@ class RayComputeGroup:
         # The bundle of every ready executor, and of the executors starting,
         # by a token, with the generation they start in.
         self._bundle_of: Dict[int, int] = {}
+        # The GPUs the executors of every bundle ran on, kept after release.
+        self._devices: Dict[int, Tuple[str, ...]] = {}
         self._starting_in: Dict[int, Tuple[int, int]] = {}
         self._next_token = 0
         # The stages that run maps of the group, which release the pool once
@@ -1055,6 +1097,7 @@ class RayComputeGroup:
                 )
         token, bundle = self._take_bundle(generation)
         executor: Optional[Any] = None
+        gpus: Tuple[str, ...] = ()
         try:
             placement = await self._placement(bundle, generation)
             if placement is not None:
@@ -1064,7 +1107,7 @@ class RayComputeGroup:
                     **self._options,
                     **placement,
                 ).remote(self._parameters, self._group, self._profile)
-                await executor.prepare.remote(self._functions)
+                gpus = await executor.prepare.remote(self._functions)
         except Exception as error:
             if executor is not None:
                 ray.kill(executor)
@@ -1086,14 +1129,20 @@ class RayComputeGroup:
                 # Without an executor, the pool was released before it was
                 # created.
                 if executor is not None and generation == self._generation:
-                    self._executors[self._next_id] = executor
-                    self._leases[self._next_id] = 0
-                    self._bundle_of[self._next_id] = bundle
-                    self._next_id += 1
+                    self._add_executor(executor, bundle, gpus)
                 elif executor is not None:
                     # The pool was released while the executor started.
                     ray.kill(executor)
                 self._changed.notify_all()
+
+    def _add_executor(self, executor: Any, bundle: int, gpus: Tuple[str, ...]) -> None:
+        """Add a started executor to the pool; call with the lock held."""
+        self._executors[self._next_id] = executor
+        self._leases[self._next_id] = 0
+        self._bundle_of[self._next_id] = bundle
+        if bundle >= 0:
+            self._devices[bundle] = gpus
+        self._next_id += 1
 
     def _take_bundle(self, generation: int) -> Tuple[int, int]:
         """The bundle with the most room for an executor starting now, and a
@@ -1209,6 +1258,10 @@ class RayComputeGroup:
     async def flush_profile(self) -> None:
         """Wait until the collector wrote the profiling events of the group."""
         await self._recorder.flush()
+
+    async def devices(self) -> Tuple[str, Dict[int, Tuple[str, ...]]]:
+        """The group, and the GPU ids its executors ran on by bundle."""
+        return self._group, dict(self._devices)
 
     async def describe(self) -> Dict[str, Any]:
         """The state of the pool, read without waiting for its lock."""
@@ -1458,9 +1511,9 @@ class _MapRunner:
         """Submit a call and wait until its result is in the object store.
 
         The span of the call covers its queueing for resources and its
-        transfer; the worker running it records its execution.
+        transfer; the worker running it records its execution, and returns
+        its timing with the result.
         """
-        t_start = time.perf_counter()
         if self.stats.first_in_t is None:
             self.stats.first_in_t = time.time()
         with self._recorder.span(
@@ -1469,14 +1522,14 @@ class _MapRunner:
             overlapping=True,
             seq=self.stats.items_in + 1,
         ):
-            result, waited = await self._call(item)
+            result, timing, waited = await self._call(item)
 
-        self.stats.items_in += 1
-        self.stats.items_out += 1
-        self.stats.wait_s += waited
-        self.stats.wait_max_s = max(self.stats.wait_max_s, waited)
-        self.stats.process_s += time.perf_counter() - t_start - waited
-        self.stats.last_out_t = time.time()
+        account_call(self.stats, waited, await _timing_of(timing))
+        if self._group is not None:
+            self.stats.capacity = max(
+                self.stats.capacity or 0,
+                len(self._executors.ids),
+            )
         if self.provenance.sampling:
             await self._sample(item, result)
         return result
@@ -1488,27 +1541,28 @@ class _MapRunner:
         self.provenance.receive(received)
         self.provenance.emit(received, [await result])
 
-    async def _call(self, item: Any) -> Tuple[ray.ObjectRef, float]:
-        """The result of a call, and how long it waited for an executor.
-
-        Calls without a pool queue inside Ray, which the map cannot see.
-        """
+    async def _call(
+        self,
+        item: Any,
+    ) -> Tuple[ray.ObjectRef, ray.ObjectRef, float]:
+        """The result of a call, its timing, and how long it waited for an
+        executor of the pool (0 for Ray tasks, which queue inside Ray)."""
         if self._group is None:
-            return await self._completions.done(self._submit(item)), 0.0
+            result, timing = self._submit(item)
+            return await self._completions.done(result), timing, 0.0
         else:
             _cancel(self._linger)
             t_wait = time.perf_counter()
             async with self._executors.slot() as executor:
                 waited = time.perf_counter() - t_wait
-                result = await self._completions.done(
-                    executor.call.remote(
-                        self._functions,
-                        self._label,
-                        self._stage,
-                        item,
-                    ),
+                result, timing = executor.call.options(num_returns=2).remote(
+                    self._functions,
+                    self._label,
+                    self._stage,
+                    item,
                 )
-            return result, waited
+                await self._completions.done(result)
+            return result, timing, waited
 
     def _schedule_linger(self) -> None:
         """Return the leases soon, if the map is idle (ephemeral protocols)."""
@@ -1533,16 +1587,56 @@ class _MapRunner:
             self._executors.stop()
             await self._group.return_leases.remote(leases)
 
-    def _submit(self, item: Any) -> ray.ObjectRef:
-        return _run_in_task.options(**self._options).remote(
+    def _submit(self, item: Any) -> Tuple[ray.ObjectRef, ray.ObjectRef]:
+        """Submit a call as a Ray task: the refs of its result and timing."""
+        refs = _run_in_task.options(**self._options, num_returns=2).remote(
             self._functions,
             self._label,
             item,
+            time.time(),
         )
+        # The stubs of Ray do not model num_returns.
+        return cast(Tuple[ray.ObjectRef, ray.ObjectRef], refs)
 
     async def _lease(self, held: Sequence[int]) -> Optional[Tuple[int, Any]]:
         assert self._group is not None, "Long-running map has no compute group."
         return await self._group.lease.remote(held)
+
+
+def account_call(
+    stats: StageStats,
+    waited: float,
+    timing: Optional[CallTiming],
+) -> None:
+    """Add a call of a map to its stats.
+
+    ``waited`` is how long the call waited for an executor of the pool;
+    ``timing`` how long it waited and executed where it ran, or ``None`` if
+    the call failed (its error is raised where its result is read).
+    """
+    waited_there, executed = (
+        (0.0, 0.0)
+        if timing is None
+        else (
+            timing.waited_s,
+            timing.execute_s,
+        )
+    )
+    stats.items_in += 1
+    stats.items_out += 1
+    stats.wait_s += waited + waited_there
+    stats.wait_max_s = max(stats.wait_max_s, waited + waited_there)
+    stats.process_s += executed
+    stats.last_done_t = time.time()
+
+
+async def _timing_of(timing: ray.ObjectRef) -> Optional[CallTiming]:
+    """The timing of a call; ``None`` if the call failed."""
+    try:
+        return await timing
+    except RayError:
+        # The error of the call reaches the stage reading its result.
+        return None
 
 
 # Longest time a newly submitted call waits to join the poll of the calls in

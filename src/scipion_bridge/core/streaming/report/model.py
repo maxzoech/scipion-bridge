@@ -92,11 +92,25 @@ class GpuOccupant:
 
 @dataclass(frozen=True)
 class GpuSlot:
-    """A GPU of the cluster, by node and index on the node."""
+    """A GPU of the cluster, by node and index on the node.
+
+    Attributes:
+        node: The index of the node.
+        gpu: The index of the GPU on the node in the plan.
+        occupants: The processes on the GPU.
+        device: The id of the GPU its executors ran on (as in
+            ``CUDA_VISIBLE_DEVICES`` and ``nvidia-smi``), once they ran.
+    """
 
     node: int
     gpu: int
     occupants: Tuple[GpuOccupant, ...] = ()
+    device: Optional[str] = None
+
+    @property
+    def name(self) -> str:
+        """``GPU <id>``: the device its executors ran on, else its index."""
+        return f"GPU {self.gpu if self.device is None else self.device}"
 
 
 @dataclass(frozen=True)
@@ -384,6 +398,7 @@ def _panel_json(panel: Panel) -> Dict[str, Any]:
                         "occupants": [
                             {"group": o.group, "share": o.share} for o in slot.occupants
                         ],
+                        "device": slot.device,
                     }
                     for slot in gpus
                 ],
@@ -427,6 +442,7 @@ def _panel_from_json(data: Mapping[str, Any]) -> Panel:
                             GpuOccupant(o["group"], o["share"])
                             for o in slot["occupants"]
                         ),
+                        device=slot.get("device"),
                     )
                     for slot in data["gpus"]
                 ),

@@ -89,14 +89,15 @@ Statistics
      - Time spent waiting for input. High values mean the stage is *starved*
        by its upstream.
    * - ``process_s``
-     - Time spent in the stage logic. For a map, the time from submitting a
-       call until its result is ready; on an executor pool, without the wait
-       for an executor.
+     - Time spent in the stage logic. For a map running on an executor or as
+       a Ray task, the time its calls executed there, measured by the
+       process running them.
    * - ``wait_s``, ``wait_max_s``
      - Time items waited before the stage took them, in total and at most:
-       in the mailbox of the stage, or, for a map on an executor pool, for
-       an executor (Ray backend). High values mean the stage is slower than
-       its upstream.
+       in the mailbox of the stage, or, for a map, for an executor of its
+       pool, for the other call in flight on that executor, or in Ray's
+       queue for CPUs (Ray backend). High values mean the stage is slower
+       than its upstream.
    * - ``blocked_s``
      - Time spent waiting for room downstream. High values mean the stage is
        *throttled* by the maps after it.
@@ -112,23 +113,30 @@ Statistics
      - Bytes written to the spill store, and the time spent reading the rows
        of input files again for spilled items: columns read from input
        files are spilled as references to their rows (Ray backend).
-   * - ``first_in_t``, ``last_out_t``
-     - When the stage received its first item and forwarded its last, in
-       seconds since the epoch (Ray backend); ``None`` before.
+   * - ``first_in_t``, ``last_done_t``
+     - When the stage received its first item and finished processing its
+       last, in seconds since the epoch (Ray backend); ``None`` before.
+   * - ``capacity``
+     - The items the stage can process at once: 1 for a stage on an actor,
+       the executors it used for a map on a pool; ``None`` for maps running
+       as Ray tasks, which share the cluster's CPUs.
 
 From these, ``throughput_of`` derives, for a stage that was active:
 
-* ``throughput``: items forwarded per second, from its first item to its
-  last;
+* ``throughput``: items processed per second, from its first item until it
+  finished its last (sinks and accumulators included);
 * ``s_per_item``: the mean time to process an item;
-* ``busy``: the items in processing at once, on average. A stage on an actor
-  of its own is at most 1 (always working); a map on an executor pool can
-  reach the calls its executors run at once;
+* ``busy``: the items in processing at once, on average, at most its
+  ``capacity``;
+* ``utilization``: ``busy`` over ``capacity``, from 0 (idle) to 1 (always
+  working), for stages that have a capacity;
 * ``wait_mean_s``: the mean wait of an item before the stage took it.
 
-To find the bottleneck, look for the stage with the highest ``busy`` whose
-items wait (``wait_s``, ``buffered_peak``) while the stages after it are
-idle. The report of a run lists the stages by ``busy`` and names it.
+To find the bottleneck, look for the stage with the highest ``utilization``
+whose items wait (``wait_s``, ``buffered_peak``) while the stages after it
+are idle. The report of a run lists the stages by ``utilization`` and names
+it. Maps running as Ray tasks are listed after them, by ``busy``: their
+calls compete for CPUs with everything else on the cluster.
 
 The measurements are a few clock reads per item and stage, about a
 microsecond, against the hundreds of microseconds a stage spends on the

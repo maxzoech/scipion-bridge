@@ -28,6 +28,7 @@ from scipion_bridge.core.environment.compute import (
     NUMPY_HUGEPAGE_ENV_VAR,
 )
 from scipion_bridge.core.streaming import lower
+from scipion_bridge.core.streaming import GpuMapPanel
 from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import CallbackSinkWriter
 from scipion_bridge.core.streaming import Pipeline
@@ -628,7 +629,17 @@ def test_protocols_that_do_not_fit_at_once_run_in_phases(tmp_path):
         for item in range(20):
             pipeline.send(items=item)
     stats = pipeline.stats()
-    ((_, boundary),) = pipeline.report().layer("placement").edges
+    placement = pipeline.report().layer("placement")
+    ((_, boundary),) = placement.edges
+    # The GPUs are named by the devices the executors ran on, kept on close.
+    occupied = [
+        slot
+        for panel in placement.panels
+        if isinstance(panel, GpuMapPanel)
+        for slot in panel.gpus
+        if slot.occupants
+    ]
+    assert occupied and all(slot.device in {"0", "1"} for slot in occupied)
 
     # The second protocol waited for the GPUs of the first, its items on disk.
     results = ray.get(collector.get.remote())
@@ -1573,12 +1584,44 @@ def test_the_report_shows_the_throughput_and_waits_of_the_stages():
     (model,) = [node for node in layer.nodes if "_slow_forward" in node]
     stats = layer.nodes[model]
     assert stats["throughput"] > 0
-    assert stats["s_per_item"] >= 0.1
+    # The time its calls executed: the second call in flight on the executor
+    # waits, it does not process.
+    assert 0.1 <= stats["s_per_item"] < 0.15
+    assert stats["capacity"] == 1 and stats["utilization"] <= 1.0
     # Its calls waited for the one executor of the protocol.
     assert stats["wait_s"] > 0
-    busy = {node: a["busy"] for node, a in layer.nodes.items() if "busy" in a}
-    assert max(busy, key=busy.__getitem__) == model
+    utilization = {
+        node: a["utilization"] for node, a in layer.nodes.items() if "utilization" in a
+    }
+    assert max(utilization, key=utilization.__getitem__) == model
     assert layer.panels[0].rows[0][0] == model
+
+
+def _discard(item):
+    """Sink that ignores the results."""
+
+
+def _sleep_briefly(item):
+    time.sleep(0.1)
+    return item
+
+
+def test_calls_queued_in_ray_count_as_waiting():
+    # More calls in flight than the CPUs of the cluster: Ray queues them.
+    sink = Source("x").map(_sleep_briefly).sink(_discard)
+    backend = RayBackend(init_ray=False, max_in_flight=8)
+
+    with Pipeline.from_sink(sink, backend=backend) as pipeline:
+        for item in range(8):
+            pipeline.send(x=item)
+        pipeline.flush()
+        layer = pipeline.report().layer("stats")
+
+    (calls,) = [a for node, a in layer.nodes.items() if "_sleep_briefly" in node]
+    assert 0.1 <= calls["s_per_item"] < 0.15
+    assert calls["wait_s"] > 0
+    # Ray tasks share the CPUs of the cluster: no capacity of their own.
+    assert "utilization" not in calls
 
 
 # -- min_vram ----------------------------------------------------------------
@@ -1653,10 +1696,21 @@ def _fake_nvidia_smi(output):
     return run
 
 
+_NVIDIA_SMI = "0, GPU-aaaa, 15360\n1, GPU-bbbb, 24576\n"
+
+
 def test_gpu_memory_is_read_from_nvidia_smi(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", _fake_nvidia_smi("15360\n24576\n"))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "run", _fake_nvidia_smi(_NVIDIA_SMI))
 
     assert backend.read_gpu_memory() == [15.0, 24.0]
+
+
+def test_gpu_memory_counts_only_the_visible_gpus(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setattr(subprocess, "run", _fake_nvidia_smi(_NVIDIA_SMI))
+
+    assert backend.read_gpu_memory() == [24.0]
 
 
 def test_gpu_memory_is_empty_without_nvidia_smi(monkeypatch):

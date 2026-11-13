@@ -48,16 +48,20 @@ Reading the report
 * Clicking a stage or an edge lists its annotations, per layer: what a
   feature of the library knows about it. The ``stats`` layer holds the stats
   of a run (the children of a ``group_by`` merged) and the metrics derived
-  from them: ``throughput`` (items/s), ``s_per_item``, ``busy`` and
-  ``wait_mean_s`` (see :doc:`pipelines`). Its panel *Throughput* lists the
-  stages, busiest first, and its warnings name the bottleneck.
+  from them: ``throughput`` (items/s), ``s_per_item``, ``busy``,
+  ``utilization`` and ``wait_mean_s`` (see :doc:`pipelines`). Its panel
+  *Throughput* lists the stages, the most utilized first, and its warnings
+  name the bottleneck.
 * The ``placement`` layer shows where the executors of every protocol run:
   the panel *Pools* lists them, with the GPUs each reserves and the
   protocols of earlier phases it waits for; one panel per phase draws the
   GPUs and the protocols on each, and the warnings name protocols that share
-  a GPU. ``--placement ray`` shows the plan without reservations.
-  ``--explain`` plans for the GPUs of this machine; ``--explain-gpus 4,4``
-  plans for another cluster, e.g. two nodes of four GPUs.
+  a GPU. After a run, the GPUs are named by the devices the executors ran
+  on, as ``nvidia-smi`` numbers them; before, by their index in the plan.
+  ``--placement ray`` shows the plan without reservations. ``--explain``
+  plans for the GPUs of this machine that ``CUDA_VISIBLE_DEVICES`` shows;
+  ``--explain-gpus 4,4`` plans for another cluster, e.g. two nodes of four
+  GPUs.
 * The ``provenance`` layer shows which columns of the items are still rows
   of the input files (references), as sampled from the first 3 items in and
   out of every stage. Per stage, ``reference_bytes``, ``cached_bytes`` (read
