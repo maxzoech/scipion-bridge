@@ -28,6 +28,9 @@ from .profiling import NullRecorder, Recorder
 _Barrier = asyncio.Future[None]
 # A waiting item, the port it arrived on and, for a FLUSH, its barrier.
 MailboxEntry = Tuple[Any, int, Optional[_Barrier]]
+# An entry as buffered, with the time it was buffered (a tuple: an object per
+# item would cost more than the measurement).
+_Buffered = Tuple[Any, int, Optional[_Barrier], float]
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,7 @@ class Mailbox:
         self._recorder = recorder
         self._buffer_size = buffer_size
         self._spill = spill
-        self._entries: Deque[MailboxEntry] = deque()
+        self._entries: Deque[_Buffered] = deque()
         self._in_memory = 0
         self._changed = asyncio.Condition()
 
@@ -106,7 +109,9 @@ class Mailbox:
                     waiting=len(self._entries),
                 ):
                     await self._changed.wait_for(self._has_room)
-            self._entries.append((self._admit(item), port, barrier))
+            self._entries.append(
+                (self._admit(item), port, barrier, time.perf_counter()),
+            )
             self._stats.buffered_peak = max(
                 self._stats.buffered_peak,
                 len(self._entries),
@@ -114,17 +119,22 @@ class Mailbox:
             self._changed.notify_all()
 
     async def get(self) -> MailboxEntry:
-        """Take the oldest waiting item; it is resolved with ``resolve``."""
+        """Take the oldest waiting item; it is resolved with ``resolve``.
+
+        Adds the time a data item waited to the ``wait_s`` and ``wait_max_s``
+        of the stage.
+        """
         async with self._changed:
             await self._changed.wait_for(lambda: bool(self._entries))
-            entry = self._entries.popleft()
-            match entry:
-                case (Spilled() | FlushSignal(), _, _):
-                    pass
-                case _:
-                    self._in_memory -= 1
+            item, port, barrier, buffered_at = self._entries.popleft()
+            if not isinstance(item, (Spilled, FlushSignal)):
+                self._in_memory -= 1
+            if not isinstance(item, FlushSignal):
+                waited = time.perf_counter() - buffered_at
+                self._stats.wait_s += waited
+                self._stats.wait_max_s = max(self._stats.wait_max_s, waited)
             self._changed.notify_all()
-            return entry
+            return item, port, barrier
 
     async def resolve(self, item: Any) -> Any:
         """The item of an entry taken by ``get``, read from where it waited."""

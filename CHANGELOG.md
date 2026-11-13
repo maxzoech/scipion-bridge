@@ -83,6 +83,16 @@
   `group_by`: `1:group_by[a]/2:chunk(2)` instead of `group_by[a]:2:chunk(2)`,
   also in the names of their actors.
 - `ComputeAssignment.name` names the protocol of a group.
+- Stage stats record how long items waited before a stage took them
+  (`wait_s`, `wait_max_s`: in its mailbox, or for an executor) and when the
+  stage received its first item and forwarded its last (`first_in_t`,
+  `last_out_t`). The `process_s` of a map on an executor pool no longer
+  includes the wait for an executor.
+- The stats layer derives `throughput`, `s_per_item`, `busy` and
+  `wait_mean_s` (`throughput_of`), colours by `busy`, lists the stages in a
+  *Throughput* panel and names the bottleneck; the runner's table shows
+  items/s, busy and `wait_s`. *Colour by* in the HTML report offers every
+  numeric annotation of a layer.
 
 ### Placement
 - A placement planner (`backend/ray/placement.py`) decides the executors of

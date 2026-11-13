@@ -47,8 +47,10 @@ Reading the report
   ``group_by`` sends its results: the path the items of every key take.
 * Clicking a stage or an edge lists its annotations, per layer: what a
   feature of the library knows about it. The ``stats`` layer holds the stats
-  of a run (the children of a ``group_by`` added up); later layers will
-  describe placement on GPUs, lineage and costs.
+  of a run (the children of a ``group_by`` merged) and the metrics derived
+  from them: ``throughput`` (items/s), ``s_per_item``, ``busy`` and
+  ``wait_mean_s`` (see :doc:`pipelines`). Its panel *Throughput* lists the
+  stages, busiest first, and its warnings name the bottleneck.
 * The ``placement`` layer shows where the executors of every protocol run:
   the panel *Pools* lists them, with the GPUs each reserves and the
   protocols of earlier phases it waits for; one panel per phase draws the
@@ -56,8 +58,9 @@ Reading the report
   a GPU. ``--placement ray`` shows the plan without reservations.
   ``--explain`` plans for the GPUs of this machine; ``--explain-gpus 4,4``
   plans for another cluster, e.g. two nodes of four GPUs.
-* *Colour by* colours the stages by the metric of a layer, e.g. the time the
-  stages spent processing, which shows the bottleneck.
+* *Colour by* colours the stages by any numeric annotation of a layer, e.g.
+  ``busy``, which shows the bottleneck, ``wait_max_s``, which shows where
+  items queue, or ``throughput``. The legend gives the range of the values.
 
 The page has no external resources, so it opens on machines without network
 access.

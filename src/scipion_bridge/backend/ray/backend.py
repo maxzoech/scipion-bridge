@@ -1364,7 +1364,8 @@ def _stats_of(
     """The stats of a stage: of its actor, or of the calls of a map.
 
     A map on an actor of its own also reports how items waited for the
-    actor (buffering and spilling), which its calls do not see.
+    actor (buffering and spilling), which its calls do not see: its items
+    wait in the mailbox of the actor, then for an executor.
     """
     if map_stats is None:
         return stage_stats
@@ -1375,6 +1376,8 @@ def _stats_of(
             spilled=stage_stats.spilled,
             spill_s=stage_stats.spill_s,
             fetch_s=stage_stats.fetch_s,
+            wait_s=map_stats.wait_s + stage_stats.wait_s,
+            wait_max_s=max(map_stats.wait_max_s, stage_stats.wait_max_s),
         )
     else:
         return map_stats

@@ -500,9 +500,11 @@ def test_the_executors_of_a_protocol_fill_a_gpu_before_the_next():
     protocol = RecordingPair()
     protocol.recorder = recorder
     pipeline = _compile(protocol, Collector.remote())
+    # Both executors warm up before the first item, so that both take calls.
+    pipeline.start()
 
     try:
-        for item in range(6):
+        for item in range(12):
             pipeline.send("items", item)
         pipeline.flush()
 
@@ -1388,6 +1390,42 @@ def test_maps_have_no_actors_and_report_stats():
         assert all(stats[f"{i}:map(_sleep_randomly)"].items_in == 3 for i in (1, 2, 3))
     finally:
         pipeline.close()
+
+
+def _slow_forward(item):
+    time.sleep(0.1)
+    return {"out": item}
+
+
+@B.resources(gpus=1, task=B.TaskType.LONG_RUNNING)
+class SlowModel(B.Protocol):
+    items: B.Input[int] = B.Input()
+
+    def outputs(self):
+        return {"out": int}
+
+    def steps(self):
+        return self.items.map(_slow_forward)
+
+
+def test_the_report_shows_the_throughput_and_waits_of_the_stages():
+    sink = SlowModel().get_pipeline().write_to(CallbackSinkWriter(lambda item: None))
+
+    with Pipeline.from_sink(sink, backend=RayBackend(init_ray=False)) as pipeline:
+        for item in range(8):
+            pipeline.send(items=item)
+        pipeline.flush()
+        layer = pipeline.report().layer("stats")
+
+    (model,) = [node for node in layer.nodes if "_slow_forward" in node]
+    stats = layer.nodes[model]
+    assert stats["throughput"] > 0
+    assert stats["s_per_item"] >= 0.1
+    # Its calls waited for the one executor of the protocol.
+    assert stats["wait_s"] > 0
+    busy = {node: a["busy"] for node, a in layer.nodes.items() if "busy" in a}
+    assert max(busy, key=busy.__getitem__) == model
+    assert layer.panels[0].rows[0][0] == model
 
 
 # -- min_vram ----------------------------------------------------------------

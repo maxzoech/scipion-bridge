@@ -10,8 +10,8 @@ knowing what its layers mean:
   installed, else by the built-in layout (``layout.py``).
 * ``render_html``: one HTML file without external resources: the graph, a
   panel listing the annotations of the clicked stage or edge per layer, the
-  colouring of the stages by the metric of a layer, the panels of the layers
-  and their warnings.
+  colouring of the stages by any numeric annotation of a layer (its
+  ``metric`` first), the panels of the layers and their warnings.
 
 Graphviz is optional. It is a program rather than a Python package (the
 ``graphviz`` package on PyPI only calls the program), so it is installed
@@ -242,6 +242,19 @@ def layout_name(layout: Layout) -> str:
 
 
 # -- HTML --------------------------------------------------------------------
+def _numeric_keys(layer: Layer) -> List[str]:
+    """The keys of the numeric annotations of the nodes of ``layer``, its
+    ``metric`` first, then in the order they first appear."""
+    keys = dict.fromkeys(
+        key
+        for annotations in layer.nodes.values()
+        for key, value in annotations.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    )
+    first = [layer.metric] if layer.metric in keys else []
+    return [*first, *(key for key in keys if key != layer.metric)]
+
+
 def render_html(
     report: PipelineReport,
     layout: Layout = "auto",
@@ -249,7 +262,7 @@ def render_html(
 ) -> str:
     """A self-contained HTML page of ``report``; see the module docstring."""
     drawing = drawing_of(report)
-    metrics = [layer for layer in report.layers if layer.metric is not None]
+    metrics = [(layer, key) for layer in report.layers for key in _numeric_keys(layer)]
     data = report.to_json().replace("</", "<\\/")
     return _PAGE.format(
         title=html.escape(title),
@@ -270,9 +283,10 @@ def render_html(
         )
         or '<span class="muted">no layers</span>',
         metrics="".join(
-            f'<option value="{html.escape(layer.name)}">'
-            f"{html.escape(layer.title)}: {html.escape(str(layer.metric))}</option>"
-            for layer in metrics
+            f'<option value="{index}" data-layer="{html.escape(layer.name)}" '
+            f'data-key="{html.escape(key)}">'
+            f"{html.escape(layer.title)}: {html.escape(key)}</option>"
+            for index, (layer, key) in enumerate(metrics, start=1)
         ),
         svg=render_svg(report, layout),
         panels="".join(
@@ -424,10 +438,11 @@ report.edges.forEach((e, i) => {
 });
 const shapeOf = el => el.querySelector('polygon, path, ellipse, rect');
 function colour() {
-  const name = document.getElementById('metric').value;
-  const layer = report.layers.find(l => l.name === name);
+  const option = document.getElementById('metric').selectedOptions[0];
+  const key = option.dataset.key;
+  const layer = report.layers.find(l => l.name === option.dataset.layer);
   const values = report.nodes.map(n => layer && n.id in layer.nodes
-    ? layer.nodes[n.id][layer.metric] : undefined);
+    ? layer.nodes[n.id][key] : undefined);
   const known = values.filter(v => typeof v === 'number');
   const lo = Math.min(...known), hi = Math.max(...known);
   report.nodes.forEach((n, i) => {
@@ -440,7 +455,7 @@ function colour() {
     shape.style.fill = `hsl(${50 - 50 * t}, 95%, ${88 - 30 * t}%)`;
   });
   document.getElementById('scale').textContent = layer && known.length
-    ? `${layer.metric}: ${fmt(lo)} … ${fmt(hi)}` : '';
+    ? `${key}: ${fmt(lo)} … ${fmt(hi)}` : '';
 }
 document.getElementById('metric').addEventListener('change', colour);
 document.querySelectorAll('header input[type=checkbox]').forEach(

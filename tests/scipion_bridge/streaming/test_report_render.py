@@ -87,7 +87,7 @@ def test_stats_annotate_the_stages():
     layer = stats_layer(report, {"1:map(_forward)": StageStats(items_in=3)})
 
     assert layer.nodes["1:map(_forward)"]["items_in"] == 3
-    assert layer.metric == "process_s"
+    assert layer.metric == "busy"
 
 
 def test_stats_of_group_by_children_add_up_in_the_template():
@@ -109,6 +109,88 @@ def test_stats_of_group_by_children_add_up_in_the_template():
         "children": 2,
     }
     assert set(layer.nodes) == {"2:group_by/1:refine"}
+
+
+def test_active_stages_get_throughput_busy_and_wait():
+    report = report_of(_ir())
+    stats = StageStats(
+        items_in=4,
+        items_out=4,
+        process_s=2.0,
+        wait_s=1.0,
+        wait_max_s=0.5,
+        first_in_t=100.0,
+        last_out_t=104.0,
+    )
+
+    layer = stats_layer(
+        report, {"1:map(_forward)": stats, "0:source(particles)": StageStats()}
+    )
+
+    node = layer.nodes["1:map(_forward)"]
+    assert (node["throughput"], node["s_per_item"], node["busy"]) == (1.0, 0.5, 0.5)
+    assert node["wait_mean_s"] == 0.25
+    # A stage without items has no times, so no derived metrics.
+    assert "busy" not in layer.nodes["0:source(particles)"]
+    assert "first_in_t" not in layer.nodes["0:source(particles)"]
+    (panel,) = layer.panels
+    assert panel.title == "Throughput"
+    assert [row[0] for row in panel.rows] == ["1:map(_forward)"]
+    assert any("bottleneck" in warning for warning in layer.warnings)
+
+
+def test_children_span_from_the_first_item_to_the_last():
+    report = report_of(_ir())
+    layer = stats_layer(
+        report,
+        {
+            "2:group_by[a]/1:refine": StageStats(
+                items_in=1,
+                items_out=1,
+                process_s=1.0,
+                wait_max_s=0.2,
+                first_in_t=10.0,
+                last_out_t=11.0,
+            ),
+            "2:group_by[b]/1:refine": StageStats(
+                items_in=1,
+                items_out=1,
+                process_s=1.0,
+                wait_max_s=0.7,
+                first_in_t=12.0,
+                last_out_t=14.0,
+            ),
+        },
+    )
+
+    node = layer.nodes["2:group_by/1:refine"]
+    assert (node["first_in_t"], node["last_out_t"]) == (10.0, 14.0)
+    assert node["wait_max_s"] == 0.7
+    assert node["throughput"] == 0.5
+
+
+def test_html_colours_by_any_numeric_annotation():
+    report = report_of(_ir())
+    report = report.with_layer(
+        stats_layer(
+            report,
+            {
+                "1:map(_forward)": StageStats(
+                    items_in=2,
+                    items_out=2,
+                    process_s=1.0,
+                    first_in_t=0.0,
+                    last_out_t=2.0,
+                ),
+            },
+        ),
+    )
+
+    page = render_html(report, "builtin")
+
+    options = re.findall(r'data-layer="stats" data-key="([^"]+)"', page)
+    assert options[0] == "busy"
+    assert {"throughput", "wait_max_s", "process_s", "items_in"} <= set(options)
 
 
 class _CompiledWithStats(CompiledPipeline):

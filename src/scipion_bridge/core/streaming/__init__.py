@@ -1,6 +1,12 @@
 """Declarative streaming pipelines, lowered to an IR that backends execute."""
 
-from .backend import CompiledPipeline, StageStats, StreamingBackendProvider
+from .backend import (
+    CompiledPipeline,
+    StageStats,
+    StreamingBackendProvider,
+    merge_stats,
+    throughput_of,
+)
 from .element_mapper import ElementMapConfig
 from .ir import (
     DEFAULT_GROUP_BY_WORKERS,
@@ -50,6 +56,8 @@ __all__ = [
     "Keyed",
     "ElementMapConfig",
     "StageStats",
+    "merge_stats",
+    "throughput_of",
     "SpillStore",
     "SpillStoreFactory",
     "PickleSpillStore",

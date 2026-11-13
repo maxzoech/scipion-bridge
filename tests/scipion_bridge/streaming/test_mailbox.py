@@ -49,6 +49,27 @@ async def _drain(mailbox, count):
     return [await mailbox.resolve(item) for item, _, _ in entries]
 
 
+def test_the_wait_of_data_items_is_recorded():
+    async def scenario():
+        stats = StageStats()
+        mailbox = Mailbox(stats, buffer_size=None, spill=None)
+        await mailbox.put(_ref(1), 0, None)
+        await mailbox.put(_ref(2), 0, None)
+        await asyncio.sleep(0.05)
+        await mailbox.get()
+        await mailbox.put(FLUSH, 0, None)
+        await asyncio.sleep(0.05)
+        await mailbox.get()
+        # FLUSH waited as well, but is not an item.
+        await mailbox.get()
+        return stats
+
+    stats = asyncio.run(scenario())
+
+    assert stats.wait_max_s >= 0.1
+    assert 0.15 <= stats.wait_s < 0.2 + 0.05
+
+
 def test_items_are_fetched_in_arrival_order():
     async def scenario():
         mailbox = Mailbox(StageStats(), buffer_size=None, spill=None)
@@ -98,7 +119,7 @@ def test_items_beyond_the_threshold_are_spilled_in_order():
         )
         for i in range(5):
             await mailbox.put(_ref(i), 0, None)
-        kinds = [type(item) for item, _, _ in list(mailbox._entries)]
+        kinds = [type(item) for item, _, _, _ in list(mailbox._entries)]
         return await _drain(mailbox, 5), kinds, store, stats
 
     values, kinds, store, stats = asyncio.run(scenario())
@@ -132,7 +153,7 @@ def test_spilled_items_are_no_longer_referenced(tmp_path):
         for item in items:
             await mailbox.put(item, 0, None)
         del items, item
-        for entry, _, _ in list(mailbox._entries):
+        for entry, _, _, _ in list(mailbox._entries):
             match entry:
                 case Spilled(task=task):
                     await task
@@ -160,7 +181,7 @@ def test_items_are_kept_in_memory_again_once_the_backlog_drains():
         await mailbox.put(_ref(1), 0, None)
         await _drain(mailbox, 2)
         await mailbox.put(_ref(2), 0, None)
-        return [type(item) for item, _, _ in list(mailbox._entries)]
+        return [type(item) for item, _, _, _ in list(mailbox._entries)]
 
     assert asyncio.run(scenario()) == [Ref]
 

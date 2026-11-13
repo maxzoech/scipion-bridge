@@ -90,7 +90,13 @@ Statistics
        by its upstream.
    * - ``process_s``
      - Time spent in the stage logic. For a map, the time from submitting a
-       call until its result is ready, including waiting for resources.
+       call until its result is ready; on an executor pool, without the wait
+       for an executor.
+   * - ``wait_s``, ``wait_max_s``
+     - Time items waited before the stage took them, in total and at most:
+       in the mailbox of the stage, or, for a map on an executor pool, for
+       an executor (Ray backend). High values mean the stage is slower than
+       its upstream.
    * - ``blocked_s``
      - Time spent waiting for room downstream. High values mean the stage is
        *throttled* by the maps after it.
@@ -102,9 +108,27 @@ Statistics
    * - ``spilled``, ``fetch_s``, ``spill_s``
      - Items written to the spill store, and the time spent reading waiting
        items and spilling them (Ray backend).
+   * - ``first_in_t``, ``last_out_t``
+     - When the stage received its first item and forwarded its last, in
+       seconds since the epoch (Ray backend); ``None`` before.
 
-To find the bottleneck, look for the step with high ``process_s`` that has a
-starved stage after it and a blocked stage before it.
+From these, ``throughput_of`` derives, for a stage that was active:
+
+* ``throughput``: items forwarded per second, from its first item to its
+  last;
+* ``s_per_item``: the mean time to process an item;
+* ``busy``: the items in processing at once, on average. A stage on an actor
+  of its own is at most 1 (always working); a map on an executor pool can
+  reach the calls its executors run at once;
+* ``wait_mean_s``: the mean wait of an item before the stage took it.
+
+To find the bottleneck, look for the stage with the highest ``busy`` whose
+items wait (``wait_s``, ``buffered_peak``) while the stages after it are
+idle. The report of a run lists the stages by ``busy`` and names it.
+
+The measurements are a few clock reads per item and stage, about a
+microsecond, against the hundreds of microseconds a stage spends on the
+messages of every item; they are always on.
 
 Backpressure
 ------------

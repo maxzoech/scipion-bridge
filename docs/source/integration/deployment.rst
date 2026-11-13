@@ -118,9 +118,9 @@ After a run, the runner prints one row per stage:
 
 .. code-block:: text
 
-    stage                         in    out   idle_s  process_s  blocked_s  emit_s  buffered  spilled  fetch_s  spill_s
-    0:source(particles)           40     40     0.00       0.01      12.30    0.40         0        0     0.00     0.00
-    1:chunk(512)                  40     78     1.10       0.80       9.70    0.30         4        0     0.10     0.00
+    stage                         in    out  items/s   busy   idle_s  process_s  wait_s  blocked_s  emit_s  buffered  spilled  fetch_s  spill_s
+    0:source(particles)           40     40     3.20   0.00     0.00       0.01    0.00      12.30    0.40         0        0     0.00     0.00
+    1:chunk(512)                  40     78     6.20   0.06     1.10       0.80    2.40       9.70    0.30         4        0     0.10     0.00
     ...
 
 The columns show where each stage spends its time:
@@ -130,7 +130,13 @@ The columns show where each stage spends its time:
 * ``process_s``: running the stage logic.
 * ``blocked_s``: waiting until the maps after it accept more items. A stage
   with high blocked time is *throttled* by what comes after it.
+* ``wait_s``: the time items waited before the stage took them.
 * ``buffered``: the most items that waited for the stage at once.
+* ``items/s`` and ``busy``: the throughput of the stage, and how many items
+  it processed at once on average (1.0: always working).
+
+``--report report.html`` writes the same numbers into the HTML report, where
+*Colour by* shows them on the graph.
 
 The bottleneck is usually the step that blocks the stages before it and
 starves the stages after it. For a GPU protocol that is normally the model:

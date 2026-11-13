@@ -455,6 +455,8 @@ class _PipelinedStage(abc.ABC):
 
                 case _:
                     self._stats.items_in += 1
+                    if self._stats.first_in_t is None:
+                        self._stats.first_in_t = time.time()
                     span = self._recorder.span(
                         "process",
                         "compute",
@@ -538,6 +540,7 @@ class _PipelinedStage(abc.ABC):
             case _InFlightItem():
                 self._stats.emit_s += time.perf_counter() - t_start
                 self._stats.items_out += 1
+                self._stats.last_out_t = time.time()
             case _FlushBarrier(barriers=barriers):
                 # The events up to the FLUSH are in the trace when it returns.
                 await self._recorder.flush()
@@ -1436,26 +1439,37 @@ class _MapRunner:
         transfer; the worker running it records its execution.
         """
         t_start = time.perf_counter()
+        if self.stats.first_in_t is None:
+            self.stats.first_in_t = time.time()
         with self._recorder.span(
             "call",
             f"map:{self._label}",
             overlapping=True,
             seq=self.stats.items_in + 1,
         ):
-            result = await self._call(item)
+            result, waited = await self._call(item)
 
         self.stats.items_in += 1
         self.stats.items_out += 1
-        self.stats.process_s += time.perf_counter() - t_start
+        self.stats.wait_s += waited
+        self.stats.wait_max_s = max(self.stats.wait_max_s, waited)
+        self.stats.process_s += time.perf_counter() - t_start - waited
+        self.stats.last_out_t = time.time()
         return result
 
-    async def _call(self, item: Any) -> ray.ObjectRef:
+    async def _call(self, item: Any) -> Tuple[ray.ObjectRef, float]:
+        """The result of a call, and how long it waited for an executor.
+
+        Calls without a pool queue inside Ray, which the map cannot see.
+        """
         if self._group is None:
-            return await self._completions.done(self._submit(item))
+            return await self._completions.done(self._submit(item)), 0.0
         else:
             _cancel(self._linger)
+            t_wait = time.perf_counter()
             async with self._executors.slot() as executor:
-                return await self._completions.done(
+                waited = time.perf_counter() - t_wait
+                result = await self._completions.done(
                     executor.call.remote(
                         self._functions,
                         self._label,
@@ -1463,6 +1477,7 @@ class _MapRunner:
                         item,
                     ),
                 )
+            return result, waited
 
     def _schedule_linger(self) -> None:
         """Return the leases soon, if the map is idle (ephemeral protocols)."""
