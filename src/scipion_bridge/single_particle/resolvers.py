@@ -17,8 +17,11 @@ from .proxies import (
     XmippSpiderParticleStackProxy,
 )
 from .particle import Particle
+from .sources import StackProxy, StackSource, check_rows, read_rows
 from ..core.typed.resolve import resolver
 from ..core import struct
+from ..core.struct import references
+from ..core.struct.source import Reference, RowIndex
 
 # STAR columns and the Particle fields they fill. When several columns fill
 # the same field, the last one present wins.
@@ -222,10 +225,11 @@ class resolve_particle_stack_to_particles:
         *,
         slice: Optional[slice] = None,
     ) -> struct.Set[Particle]:
-        data = value.particle_stack.read_images(slice)
-
-        particle_set = struct.Set[Particle](capacity=len(data))
-        particle_set["pixels"] = data
+        stack = value.particle_stack
+        positions = range(len(stack))[
+            slice if slice is not None else builtins.slice(None)
+        ]
+        particle_set = _particles_of(stack, positions)
 
         if not value.metadata.path.exists():
             return particle_set
@@ -237,7 +241,7 @@ class resolve_particle_stack_to_particles:
         )
         df_particles, df_optics = self._parse_star_blocks(star_data)
 
-        n = len(data)
+        n = len(positions)
 
         if df_particles is not None:
             df_sliced = (
@@ -329,12 +333,30 @@ def _xmipp_particles(
         if "enabled" in df_sliced.columns
         else np.ones(len(df_sliced), dtype=bool)
     )
-    data = stack.read_images(slice)[enabled]
-
-    particle_set = struct.Set[Particle](capacity=len(data))
-    particle_set["pixels"] = data
+    positions = np.asarray(range(len(stack))[rows], dtype=np.int64)[enabled]
+    particle_set = _particles_of(stack, positions)
     _apply_labels(particle_set, df_sliced[enabled], XMIPP_LABELS)
 
+    return particle_set
+
+
+def _particles_of(stack: StackProxy, positions: RowIndex) -> struct.Set[Particle]:
+    """Particles whose ``pixels`` are the images ``positions`` of ``stack``.
+
+    The pixels reference the stack and are read when they are first read
+    (``core/struct/source.py``); the images of temporary stacks, which may be
+    deleted before that, are read now.
+    """
+    particle_set = struct.Set[Particle](capacity=len(positions))
+    if stack.managed:
+        particle_set["pixels"] = read_rows(stack, positions)
+    else:
+        check_rows(stack, positions)
+        references.set_reference(
+            particle_set,
+            ("pixels",),
+            Reference(StackSource(stack), positions),
+        )
     return particle_set
 
 

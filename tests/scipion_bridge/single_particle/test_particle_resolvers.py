@@ -8,6 +8,7 @@ import starfile
 
 import scipion_bridge as B
 from scipion_bridge.backend import Container
+from scipion_bridge.core.struct import concat, references
 from scipion_bridge.single_particle import (
     Particle,
     MRCStackProxy,
@@ -754,3 +755,90 @@ def test_mrc_stack_proxy_reads_images(tmp_path: Path):
     assert images.dtype == np.float32
     assert np.array_equal(images, stack[1:3].astype(np.float32))
     assert np.array_equal(single, image[np.newaxis])
+
+
+# -- Pixels reference their stack (internal, core/struct/references.py) -------
+def _pixels_state(particles):
+    return references.column_states(particles)[("pixels",)].state
+
+
+def _pixels_source(particles):
+    return particles.storage.root_storage.references()[("pixels",)].source
+
+
+def test_resolved_pixels_reference_the_stack_until_read(tmp_path: Path):
+    data = np.arange(10 * 16 * 16, dtype=np.float32).reshape(10, 16, 16)
+    psp = _write_particle_stack(tmp_path, data, image_stack=True)
+
+    particles = B.resolve(psp, astype=B.Set[Particle], slice=slice(2, 6))
+
+    assert _pixels_state(particles) == "reference"
+    assert len(particles) == 4
+    np.testing.assert_array_equal(particles["pixels"], data[2:6])
+    assert _pixels_state(particles) == "cached"
+    # Only the rows of the slice were read.
+    assert _pixels_source(particles).stats.read_bytes == data[2:6].nbytes
+
+
+@pytest.mark.parametrize("stack_ext", [".mrcs", ".stk"])
+def test_xmipp_pixels_reference_only_the_enabled_rows(tmp_path: Path, stack_ext):
+    xmd_path, data = _create_xmipp_stack(
+        tmp_path,
+        n_particles=6,
+        enabled=[1, 1, -1, 1, -1, 1],
+        stack_ext=stack_ext,
+    )
+    intermediate = {
+        ".mrcs": XmippParticleStackProxy,
+        ".stk": XmippSpiderParticleStackProxy,
+    }[stack_ext]
+
+    particles = B.resolve(
+        xmd_path,
+        astype=B.Set[Particle],
+        intermediate=intermediate,
+        slice=slice(1, 5),
+    )
+
+    assert _pixels_state(particles) == "reference"
+    np.testing.assert_array_equal(particles["pixels"], data[[1, 3]])
+
+
+def test_chunks_regrouped_across_stacks_keep_their_references(tmp_path: Path):
+    data = np.arange(10 * 16 * 16, dtype=np.float32).reshape(10, 16, 16)
+    psp = _write_particle_stack(tmp_path, data, image_stack=True)
+    resolver = B.find_resolver(ParticleStackProxy, B.Set[Particle])
+
+    chunks = list(resolver.iter(psp, chunk_size=3))
+    regrouped = concat(chunks)[1:8]
+
+    assert _pixels_state(regrouped) == "reference"
+    references.prefetch(regrouped)
+    assert _pixels_state(regrouped) == "cached"
+    np.testing.assert_array_equal(regrouped["pixels"], data[1:8])
+
+
+def test_pixels_of_temporary_stacks_are_read_at_once(tmp_path: Path):
+    data = np.arange(4 * 16 * 16, dtype=np.float32).reshape(4, 16, 16)
+    original = B.resolve(
+        _write_particle_stack(tmp_path, data, image_stack=True),
+        astype=B.Set[Particle],
+    )
+    temporary = B.resolve(original, astype=ParticleStackProxy)
+    assert temporary.particle_stack.managed
+
+    particles = B.resolve(temporary, astype=B.Set[Particle])
+
+    assert _pixels_state(particles) == "owned"
+    np.testing.assert_array_equal(particles["pixels"], data)
+
+
+def test_a_truncated_stack_fails_when_resolved(tmp_path: Path):
+    data = np.ones((10, 16, 16), dtype=np.float32)
+    psp = _write_particle_stack(tmp_path, data, image_stack=True)
+    stack = tmp_path / "particles.mrcs"
+    stack.write_bytes(stack.read_bytes()[: -16 * 16 * 4 * 2])
+
+    B.resolve(psp, astype=B.Set[Particle], slice=slice(0, 8))
+    with pytest.raises(EOFError):
+        B.resolve(psp, astype=B.Set[Particle], slice=slice(0, 9))

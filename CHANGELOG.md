@@ -103,6 +103,13 @@
   (`StaleReferenceError`). Pickling sends unread references without their
   rows; spilling can drop the rows of verified references.
 - New dependency: `xxhash`.
+- The particle resolvers (RELION and Xmipp stacks, MRC and SPIDER) make
+  `pixels` reference the images of the stack instead of reading them: they
+  are read on first access, with the same values. Errors of the stack
+  (volumes, truncated files) are still raised when resolving, from the
+  header. Temporary stacks are read at once. Loaders (and the runner for a
+  single input) read the pixels before pushing a chunk, so files are still
+  read by the parallel loaders, and stages receive pixels as read references.
 
 ### Placement
 - A placement planner (`backend/ray/placement.py`) decides the executors of

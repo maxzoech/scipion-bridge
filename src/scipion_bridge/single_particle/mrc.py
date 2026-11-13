@@ -26,21 +26,7 @@ def read_stack(path: Path, selection: Optional[slice] = None) -> np.ndarray:
         ValueError: If the file holds a volume or a stack of volumes.
         EOFError: If the file ends before the images its header declares.
     """
-    with mrcfile.open(path, header_only=True) as mrc:
-        header = mrc.header
-    assert header is not None
-
-    nz, ny, nx = int(header.nz), int(header.ny), int(header.nx)
-    if nz > 1 and int(header.ispg) != IMAGE_STACK_SPACEGROUP:
-        raise ValueError(
-            f"Expected an image stack (space group {IMAGE_STACK_SPACEGROUP}) or a "
-            f"single image in MRC file '{path}', got space group {int(header.ispg)} "
-            f"with data shape {mrcfile.utils.data_shape_from_header(header)}, "
-            f"i.e. a volume or a stack of volumes.",
-        )
-
-    dtype = mrcfile.utils.data_dtype_from_header(header)
-    data_offset = header.nbytes + int(header.nsymbt)
+    nz, ny, nx, dtype, data_offset = _stack_layout(path)
     image_nbytes = ny * nx * dtype.itemsize
     indices = range(nz)[selection if selection is not None else slice(None)]
 
@@ -54,6 +40,46 @@ def read_stack(path: Path, selection: Optional[slice] = None) -> np.ndarray:
                 path,
             )
     return np.asarray(images, dtype=np.float32)
+
+
+def check_stack(path: Path, stop: int) -> None:
+    """Check, from the header, that ``read_stack`` can read images ``[0, stop)``.
+
+    Raises the errors ``read_stack`` would raise for them, without reading
+    the images.
+
+    Raises:
+        ValueError: If the file holds a volume or a stack of volumes.
+        EOFError: If the file ends before image ``stop - 1``.
+    """
+    _, ny, nx, dtype, data_offset = _stack_layout(path)
+    if (
+        stop > 0
+        and os.path.getsize(path) < data_offset + stop * ny * nx * dtype.itemsize
+    ):
+        raise EOFError(f"MRC file '{path}' ends before the images it declares.")
+
+
+def _stack_layout(path: Path) -> tuple[int, int, int, np.dtype, int]:
+    """The images, height, width, dtype and data offset of an MRC image stack.
+
+    Raises:
+        ValueError: If the file holds a volume or a stack of volumes.
+    """
+    with mrcfile.open(path, header_only=True) as mrc:
+        header = mrc.header
+    assert header is not None
+
+    nz, ny, nx = int(header.nz), int(header.ny), int(header.nx)
+    if nz > 1 and int(header.ispg) != IMAGE_STACK_SPACEGROUP:
+        raise ValueError(
+            f"Expected an image stack (space group {IMAGE_STACK_SPACEGROUP}) or a "
+            f"single image in MRC file '{path}', got space group {int(header.ispg)} "
+            f"with data shape {mrcfile.utils.data_shape_from_header(header)}, "
+            f"i.e. a volume or a stack of volumes.",
+        )
+    dtype = mrcfile.utils.data_dtype_from_header(header)
+    return nz, ny, nx, dtype, header.nbytes + int(header.nsymbt)
 
 
 def write_stack(

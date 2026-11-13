@@ -17,6 +17,7 @@ from typing import Any, Iterable, Iterator, List, Mapping, Optional, Sequence, T
 
 import ray  # type: ignore
 
+from ...core.struct import references
 from ...core.struct.set import Set, concat
 from ...core.struct.struct import Struct
 from ...core.typed.resolve import ComposedResolver, estimate_optimal_chunk_size
@@ -163,6 +164,10 @@ class RayInputLoader:
             with self._recorder.span("read", "loader") as details:
                 chunk = next(chunks, None)
                 details["items"] = 0 if chunk is None else len(chunk)
+                if chunk is not None:
+                    # Resolvers make the pixels of particles references to
+                    # their files: the loaders read them, in parallel.
+                    references.prefetch(chunk)
             stats.read_s += time.perf_counter() - start
 
             if chunk is None:

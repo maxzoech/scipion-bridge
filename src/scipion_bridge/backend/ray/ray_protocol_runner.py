@@ -23,6 +23,8 @@ from typing import (
 import ray
 
 from ...core.environment.compute import numpy_hugepage_env
+from ...core.struct import references
+from ...core.struct.set import Set
 from ...core.typed.resolve import ComposedResolver, find_resolver
 from ...core.protocol.protocol_base import Protocol
 from ...core.streaming.backend import StageStats, throughput_of
@@ -638,6 +640,8 @@ class RayPipelineRunner:
                             continue
 
                         assert isinstance(chunk, Sized)
+                        if isinstance(chunk, Set):
+                            references.prefetch(chunk)
 
                         total_chunks += 1
                         total_items += len(chunk)

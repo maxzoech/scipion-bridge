@@ -17,6 +17,7 @@ from scipion_bridge.core.typed import current_registry
 from scipion_bridge.core.streaming.ops import Source, MapOp
 from scipion_bridge.core.streaming import Pipeline
 from scipion_bridge.core.streaming import CallbackSinkWriter
+from scipion_bridge.core.struct import references
 from scipion_bridge.single_particle import XmippParticleStackProxy
 from scipion_bridge.single_particle import Particle
 from scipion_bridge.backend.ray import RayPipelineRunner
@@ -699,6 +700,35 @@ def test_ray_pipeline_runner_loads_file_lists_in_parallel(tmp_path, monkeypatch)
     # The loaders get stacks 0, 2, 4 (12 particles) and 1, 3 (3 particles),
     # which they regroup into chunks of 4.
     assert sorted(len(pixels) for pixels, _ in received) == [3, 4, 4, 4]
+
+
+def test_loaders_push_pixels_as_read_references_to_their_stacks(tmp_path, monkeypatch):
+    """The loaders read the pixels; stages receive them with their reference."""
+    monkeypatch.setenv("SCIPION_CHUNK_SIZE", "4")
+    paths = [_create_xmipp_stack(tmp_path, f"stack_{i}", 3 * i, 3) for i in range(3)]
+    collector = OutputCollector.remote()
+    sink = CallbackSinkWriter(
+        lambda out: ray.get(
+            collector.append.remote(
+                (
+                    references.column_states(out["output"])[("pixels",)].state,
+                    np.asarray(out["output"]["pixels"])[:, 0, 0].tolist(),
+                ),
+            ),
+        ),
+    )
+    runner = RayPipelineRunner(
+        StreamingParticleProtocol(),
+        intermediate_types={"particles": XmippParticleStackProxy},
+        sink=sink,
+        num_loaders=1,
+    )
+
+    runner.run(particles=paths)
+
+    received = ray.get(collector.get_items.remote())
+    assert {state for state, _ in received} == {"cached"}
+    assert sorted(i for _, pixels in received for i in pixels) == list(range(9))
 
 
 def test_ray_pipeline_runner_cli_expands_patterns(tmp_path, monkeypatch):
