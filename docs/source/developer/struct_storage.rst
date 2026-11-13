@@ -400,9 +400,13 @@ owning the same values.
   (``_restore_state``). The ``PicklingMode`` (a context variable) and the
   ``ReferencePolicy`` decide whether the rows travel too:
 
-  * ``TRANSFER`` (default): read rows travel with their reference, unread ones
-    as the reference only;
-  * ``SPILL``: verified read rows are dropped.
+  * ``TRANSFER`` (default): rows travel with their reference; unread rows are
+    read first, since the receiving process may not reach the files;
+  * ``SPILL`` (``PickleSpillStore.put``): the rows of references are dropped
+    if they match their digests and this process can read the files,
+    unchanged (``FileId.matches``). The spilling process reads the item back
+    itself, so that is where the files must be reachable. Unread rows are
+    not read. ``SCIPION_STREAM_SPILL_REFERENCES=0`` keeps the rows.
 
   ``to_arrow`` is unchanged: it exports every initialized column, reading
   references.

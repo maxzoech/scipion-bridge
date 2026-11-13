@@ -16,14 +16,25 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import enum
+import os
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Literal, Optional, Protocol, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Tuple,
+    cast,
+)
 
 import numpy as np
 
 from .key_path import KeyPath
-from .schema import ArrayEntryBase, Schema
-from .source import Reference
+from .schema import ArrayEntryBase, Schema, SchemaConvertible
+from .source import FileId, Reference
 from .storage import FieldKey, RootEngine, _BaseStorage
 
 State = Literal["reference", "cached", "owned"]
@@ -51,6 +62,7 @@ class ColumnState:
         nbytes: The bytes of the rows, read or not.
         source: A description of the source of a reference.
         domain: Where the source can be read.
+        files: The files of the source of a reference.
     """
 
     path: FieldKey
@@ -59,6 +71,7 @@ class ColumnState:
     nbytes: int
     source: str = ""
     domain: str = ""
+    files: Tuple[FileId, ...] = ()
 
 
 class PicklingMode(enum.Enum):
@@ -93,6 +106,18 @@ def current_mode() -> PicklingMode:
     return _mode.get()
 
 
+# Set to 0 to spill the rows of references as bytes, e.g. when the input
+# files may change during a run.
+SPILL_REFERENCES_ENV = "SCIPION_STREAM_SPILL_REFERENCES"
+
+
+def reference_env() -> Dict[str, str]:
+    """The environment variables of references to pass on to worker processes."""
+    return {
+        name: os.environ[name] for name in (SPILL_REFERENCES_ENV,) if name in os.environ
+    }
+
+
 class ReferencePolicy:
     """The decisions about references; the defaults of the library.
 
@@ -105,15 +130,21 @@ class ReferencePolicy:
         return True
 
     def keep_bytes_when_spilling(self, state: ColumnState) -> bool:
-        """Whether a spilled item keeps the read rows of a reference."""
-        return False
+        """Whether a spilled item keeps the rows of a reference.
+
+        The item is read back by the process spilling it, so the rows are
+        dropped if this process can read the files of the source, unchanged,
+        unless ``SCIPION_STREAM_SPILL_REFERENCES=0``.
+        """
+        enabled = os.environ.get(SPILL_REFERENCES_ENV, "1") != "0"
+        return not (enabled and all(file.matches() for file in state.files))
 
     def keep_bytes_in_transfer(self, state: ColumnState) -> bool:
-        """Whether an item sent to another process keeps the read rows."""
-        return True
+        """Whether an item sent to another process keeps the rows.
 
-    def portable(self, state: ColumnState) -> bool:
-        """Whether another process can read the source of a reference."""
+        Always: the receiving process may not reach the files. Unread rows
+        are read before sending.
+        """
         return True
 
 
@@ -173,12 +204,31 @@ def column_states(obj: Stored) -> Dict[FieldKey, ColumnState]:
 
 def prefetch(obj: Stored) -> None:
     """Read the rows of the references of ``obj`` the policy reads ahead."""
-    for path, state in column_states(obj).items():
+    engine = _root_engine(obj)
+    if engine is None or not engine.references():
+        return
+    for path, (_, state) in _reference_states(obj, engine).items():
         if state.state == "reference" and _policy.prefetch(state):
             obj.storage.read(
                 obj.storage.root.extend(_key_path(path)),
                 _entry_of(obj, path),
             )
+
+
+def prefetch_all(item: Any) -> None:
+    """Prefetch the Sets and Structs in ``item``, and in its dicts, lists and tuples."""
+    match item:
+        case dict():
+            for value in item.values():
+                prefetch_all(value)
+        case list() | tuple():
+            for value in item:
+                prefetch_all(value)
+        case SchemaConvertible(is_descriptor=False):
+            # Sets, Structs and Collections holding data have a storage.
+            prefetch(cast(Stored, item))
+        case _:
+            pass
 
 
 def verify(obj: Stored) -> None:
@@ -207,8 +257,9 @@ PickledReference = Tuple[FieldKey, Reference, bool]
 def pickled_references(obj: Stored) -> Tuple[List[PickledReference], frozenset]:
     """The references to pickle with ``obj``, and the leaves whose bytes to omit.
 
-    Decided by the current ``PicklingMode`` and the policy. Rows that are
-    not read yet are never read here if the reference is portable.
+    Decided by the current ``PicklingMode`` and the policy: when spilling,
+    the rows of references this process can reread are omitted; otherwise
+    rows are kept, and read if they were not.
     """
     engine = _root_engine(obj)
     if engine is None or not engine.references():
@@ -255,20 +306,20 @@ def _reference_states(
                 nbytes=reference.nbytes,
                 source=reference.source.describe(),
                 domain=reference.source.domain,
+                files=reference.source.files,
             ),
         )
     return found
 
 
 def _keeps_bytes(mode: PicklingMode, state: ColumnState) -> bool:
-    """Whether pickling keeps the rows of a reference column."""
-    if state.state == "reference":
-        # Unread rows travel as the reference, unless the receiver cannot
-        # read the source.
-        return not _policy.portable(state)
+    """Whether pickling keeps the rows of a reference column.
+
+    Rows that are kept but not read yet are read by the export.
+    """
     if mode is PicklingMode.SPILL:
-        return _policy.keep_bytes_when_spilling(state) or not _policy.portable(state)
-    return _policy.keep_bytes_in_transfer(state) or not _policy.portable(state)
+        return _policy.keep_bytes_when_spilling(state)
+    return _policy.keep_bytes_in_transfer(state)
 
 
 def restore_references(obj: Stored, pickled: List[PickledReference]) -> None:

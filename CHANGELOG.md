@@ -110,6 +110,12 @@
   header. Temporary stacks are read at once. Loaders (and the runner for a
   single input) read the pixels before pushing a chunk, so files are still
   read by the parallel loaders, and stages receive pixels as read references.
+- Spilling writes reference columns as references to their rows when the
+  stage can read the files again, unchanged (checked by size, mtime, and on
+  reading by the row digests): a phase boundary in front of a particle
+  stage spills metadata instead of images. `SCIPION_STREAM_SPILL_REFERENCES=0`
+  spills the bytes. Items sent between stages always carry their rows.
+- `StageStats` gain `spill_bytes` and `reread_s`.
 
 ### Placement
 - A placement planner (`backend/ray/placement.py`) decides the executors of

@@ -50,6 +50,13 @@ class FileId:
         stat = os.stat(path)
         return cls(Path(path), stat.st_size, stat.st_mtime_ns)
 
+    def matches(self) -> bool:
+        """Whether the file is readable here, unchanged since this id was taken."""
+        try:
+            return FileId.of(self.path) == self
+        except FileNotFoundError:
+            return False
+
     def check(self) -> None:
         """Raise if the file changed since this id was taken.
 

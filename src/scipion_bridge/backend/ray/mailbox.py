@@ -19,6 +19,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, Hashable, Optional, Tuple
 
+from scipion_bridge.core.struct import references
 from scipion_bridge.core.streaming.backend import StageStats
 from scipion_bridge.core.streaming.node import FlushSignal
 from scipion_bridge.core.streaming.spill import SpillStore
@@ -146,6 +147,11 @@ class Mailbox:
                     handle = await task
                     value = await asyncio.to_thread(store.get, handle)
                     await asyncio.to_thread(store.discard, handle)
+                    # Rows spilled as references are read again now, so
+                    # the stage does not wait for them in its computation.
+                    t_reread = time.perf_counter()
+                    await asyncio.to_thread(references.prefetch_all, value)
+                    self._stats.reread_s += time.perf_counter() - t_reread
                 case Ref(ref=ref):
                     details["source"] = "object_store"
                     value = await ref
@@ -191,6 +197,7 @@ class Mailbox:
                     value = item
 
             handle = await asyncio.to_thread(store.put, value)
+            self._stats.spill_bytes += await asyncio.to_thread(store.size, handle)
         self._stats.spilled += 1
         self._stats.spill_s += time.perf_counter() - t_start
         return handle

@@ -36,6 +36,10 @@ class StageStats:
             mailbox, or for an executor of its pool (maps). High values mean
             the stage is slower than its upstream.
         wait_max_s: The longest wait of an item.
+        spill_bytes: Bytes written to the spill store. Columns that
+            reference rows of input files are written as references.
+        reread_s: Time spent reading the rows of references again, for
+            items read back from the spill store.
         first_in_t: When the stage received its first item, in seconds since
             the epoch; ``None`` before.
         last_out_t: When the stage forwarded its last item so far, in
@@ -54,6 +58,8 @@ class StageStats:
     spill_s: float = 0.0
     wait_s: float = 0.0
     wait_max_s: float = 0.0
+    spill_bytes: int = 0
+    reread_s: float = 0.0
     first_in_t: Optional[float] = None
     last_out_t: Optional[float] = None
 

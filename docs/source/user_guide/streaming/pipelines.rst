@@ -108,6 +108,10 @@ Statistics
    * - ``spilled``, ``fetch_s``, ``spill_s``
      - Items written to the spill store, and the time spent reading waiting
        items and spilling them (Ray backend).
+   * - ``spill_bytes``, ``reread_s``
+     - Bytes written to the spill store, and the time spent reading the rows
+       of input files again for spilled items: columns read from input
+       files are spilled as references to their rows (Ray backend).
    * - ``first_in_t``, ``last_out_t``
      - When the stage received its first item and forwarded its last, in
        seconds since the epoch (Ray backend); ``None`` before.

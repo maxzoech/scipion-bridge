@@ -15,6 +15,7 @@ from typing import Any
 from numpy._core.multiarray import (
     _set_madvise_hugepage,  # pyright: ignore[reportAttributeAccessIssue]
 )
+import numpy as np
 import pytest
 import ray
 from ray.util.placement_group import placement_group_table
@@ -30,6 +31,8 @@ from scipion_bridge.core.streaming import lower
 from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import CallbackSinkWriter
 from scipion_bridge.core.streaming import Pipeline
+from scipion_bridge.core.struct import references
+from scipion_bridge.core.struct.source import ColumnSource, FileId, Reference
 
 # Timing assertions: run on one xdist worker, after one another.
 pytestmark = [
@@ -641,6 +644,111 @@ def test_protocols_that_do_not_fit_at_once_run_in_phases(tmp_path):
     assert all(
         stats[label].buffered_peak <= 2 for label in order[: order.index(boundary)]
     )
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
+class ImageItem(B.Struct):
+    pixels: B.Array[np.float32] = B.Array(shape=(64, 64))
+    defocus: float
+
+
+class NpySource(ColumnSource):
+    """Rows of a .npy file, as a stack of images."""
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+        self._files = (FileId.of(path),)
+
+    @property
+    def rows(self):
+        return len(np.load(self.path, mmap_mode="r"))
+
+    @property
+    def nbytes_per_row(self):
+        return 64 * 64 * 4
+
+    @property
+    def files(self):
+        return self._files
+
+    def _read(self, index):
+        return np.array(np.load(self.path, mmap_mode="r")[np.asarray(index)])
+
+
+def _image_chunks(path, chunks, size):
+    """Chunks whose pixels reference rows of ``path``, read as by a loader."""
+    np.save(path, np.random.rand(chunks * size, 64, 64).astype(np.float32))
+    source = NpySource(path)
+    result = []
+    for i in range(chunks):
+        chunk = B.Set[ImageItem](capacity=size)
+        chunk["defocus"] = np.arange(size, dtype=np.float64) + i * size
+        rows = range(i * size, (i + 1) * size)
+        references.set_reference(chunk, ("pixels",), Reference(source, rows))
+        references.prefetch(chunk)
+        result.append(chunk)
+    return result
+
+
+def _pass_on(chunk):
+    return {"out": chunk}
+
+
+def _pixel_sum(chunk):
+    return {"result": float(np.asarray(chunk["pixels"], dtype=np.float64).sum())}
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class ImagesFirst(B.Protocol):
+    items: B.Input[B.Set[ImageItem]] = B.Input()
+
+    def outputs(self):
+        return {"out": B.Set[ImageItem]}
+
+    def steps(self):
+        return self.items.map(_pass_on)
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class ImagesSecond(B.Protocol):
+    out: B.Input[B.Set[ImageItem]] = B.Input()
+
+    def outputs(self):
+        return {"result": float}
+
+    def steps(self):
+        return self.out.map(_pixel_sum)
+
+
+def _spill_at_the_boundary(chunks):
+    """The results, and the bytes the phase boundary spilled."""
+    pipeline, collector = _phased(
+        ImagesFirst(), ImagesSecond(), buffer_size=2, max_in_flight=2, spill_threshold=2
+    )
+    with pipeline:
+        for chunk in chunks:
+            pipeline.send(items=chunk)
+    ((_, boundary),) = pipeline.report().layer("placement").edges
+    results = [r["result"] for r in ray.get(collector.get.remote())]
+    return results, pipeline.stats()[boundary]
+
+
+def test_a_phase_boundary_spills_references_instead_of_images(tmp_path, monkeypatch):
+    chunks = _image_chunks(tmp_path / "stack.npy", chunks=12, size=16)
+    expected = [float(np.asarray(c["pixels"], dtype=np.float64).sum()) for c in chunks]
+
+    results, by_reference = _spill_at_the_boundary(chunks)
+    monkeypatch.setenv(references.SPILL_REFERENCES_ENV, "0")
+    results_as_bytes, as_bytes = _spill_at_the_boundary(chunks)
+
+    assert results == results_as_bytes == expected
+    assert by_reference.spilled > 0 and as_bytes.spilled > 0
+    # 256 KiB of images per spilled chunk stay in their file.
+    per_chunk = by_reference.spill_bytes / by_reference.spilled
+    assert 0 < per_chunk < 16 * 64 * 64 * 4 / 10
+    assert as_bytes.spill_bytes / as_bytes.spilled > 16 * 64 * 64 * 4
+    assert by_reference.reread_s > 0
     assert _wait_for_free_gpus() == CLUSTER_GPUS
 
 

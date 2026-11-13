@@ -283,6 +283,14 @@ The statistics table shows per stage the most items that waited
 (``fetch_s``) and spilling them (``spill_s``). A stage with many waiting items
 is the bottleneck of the pipeline.
 
+Spilled particles keep their images in the input files: the pixels that a
+resolver read from a stack are written to the spill store as a reference to
+their rows, and read again when the stage takes the item (``spill_bytes``
+and ``reread_s`` in the stats). The rows are compared with digests taken when
+they were first read, so a changed input fails the run instead of being read
+silently. Columns computed in the pipeline, and pixels written in place, are
+spilled as bytes.
+
 Environment variables
 ---------------------
 
@@ -311,6 +319,13 @@ variable, which is convenient for tuning a protocol without changing code:
      - Overrides ``spill_threshold``; ``none`` disables spilling.
    * - ``SCIPION_STREAM_SPILL_DIR``
      - Spills by pickling into this directory instead of ``spill_store``.
+   * - ``SCIPION_STREAM_SPILL_REFERENCES``
+     - ``0`` spills the pixels of particles (and other columns read from
+       input files) as bytes. By default, a spilled item keeps only a
+       reference to the rows of its input files, which are read again when
+       the stage takes the item. Set it to ``0`` if the input files may
+       change during a run: a changed file fails the run when it is read
+       again.
    * - ``SCIPION_STREAM_PROFILE``
      - Overrides ``profile``: a path for the trace, ``1`` for a timestamped
        file in the working directory, ``0`` for no profiling.

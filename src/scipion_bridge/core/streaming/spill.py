@@ -25,6 +25,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Generic, Hashable, TypeVar
 
+from ..struct import references
+
 H = TypeVar("H", bound=Hashable)
 
 
@@ -49,6 +51,10 @@ class SpillStore(abc.ABC, Generic[H]):
     def discard(self, handle: H) -> None:
         """Free the storage of a consumed item."""
         ...
+
+    def size(self, handle: H) -> int:
+        """The bytes stored for ``handle``, for the stats; 0 if unknown."""
+        return 0
 
     def close(self) -> None:
         """Free all storage of the store, once its stage has stopped.
@@ -83,11 +89,24 @@ class PickleSpillStore(SpillStore[str]):
                 return Path(tempfile.gettempdir()) / self.directory
 
     def put(self, item: Any) -> str:
+        """Pickle ``item``; the rows of references are kept only if needed.
+
+        Columns of Sets that reference rows of input files are written as
+        the reference when this process can read the files again
+        (``core/struct/references.py``), so a spilled particle stack takes
+        the bytes of its metadata, not of its images.
+        """
         self.path.mkdir(parents=True, exist_ok=True)
         handle = f"{uuid.uuid4().hex}.pkl"
-        with (self.path / handle).open("wb") as file:
+        with (
+            (self.path / handle).open("wb") as file,
+            references.pickling(references.PicklingMode.SPILL),
+        ):
             pickle.dump(item, file, protocol=pickle.HIGHEST_PROTOCOL)
         return handle
+
+    def size(self, handle: str) -> int:
+        return (self.path / handle).stat().st_size
 
     def get(self, handle: str) -> Any:
         with (self.path / handle).open("rb") as file:

@@ -77,6 +77,7 @@ from scipion_bridge.core.streaming.report.model import (
     report_of,
 )
 from scipion_bridge.core.streaming.spill import SpillStoreFactory, pickle_spill_store
+from scipion_bridge.core.struct import references
 
 from .actors import (
     DEFAULT_BUFFER_SIZE,
@@ -699,6 +700,7 @@ class RayBackend(StreamingBackendProvider):
                     "env_vars": {
                         "PYTHONPATH": python_path,
                         **numpy_hugepage_env(),
+                        **references.reference_env(),
                     },
                 },
             )
@@ -865,7 +867,9 @@ class RayBackend(StreamingBackendProvider):
         actor_map: Dict[IROp, Any] = {
             node: actor_cls.options(
                 name=f"{plan.pipeline_id}:{labels[node]}",
-                runtime_env={"env_vars": numpy_hugepage_env()},
+                runtime_env={
+                    "env_vars": {**numpy_hugepage_env(), **references.reference_env()},
+                },
             ).remote(**kwargs)
             for node in plan.nodes
             if not _is_hosted(node, plan.boundaries)
@@ -1375,6 +1379,8 @@ def _stats_of(
             buffered_peak=stage_stats.buffered_peak,
             spilled=stage_stats.spilled,
             spill_s=stage_stats.spill_s,
+            spill_bytes=stage_stats.spill_bytes,
+            reread_s=stage_stats.reread_s,
             fetch_s=stage_stats.fetch_s,
             wait_s=map_stats.wait_s + stage_stats.wait_s,
             wait_max_s=max(map_stats.wait_max_s, stage_stats.wait_max_s),

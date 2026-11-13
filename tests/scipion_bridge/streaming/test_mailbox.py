@@ -8,12 +8,17 @@ import asyncio
 import gc
 import weakref
 
+import numpy as np
 import pytest
+
+import scipion_bridge as B
 
 from scipion_bridge.backend.ray.mailbox import Mailbox, Ref, SpillPolicy, Spilled
 from scipion_bridge.core.streaming import StageStats
 from scipion_bridge.core.streaming import FLUSH, FlushSignal
 from scipion_bridge.core.streaming import PickleSpillStore, SpillStore
+from scipion_bridge.core.struct import references
+from scipion_bridge.core.struct.source import ColumnSource, FileId, Reference
 
 
 class RecordingStore(SpillStore[int]):
@@ -224,3 +229,69 @@ def test_failing_spill_store_fails_the_fetch():
 
     with pytest.raises(OSError, match="disk full"):
         asyncio.run(scenario())
+
+
+class _Image(B.Struct):
+    pixels: B.Array[np.float32] = B.Array(shape=(32, 32))
+    defocus: float
+
+
+class _NpySource(ColumnSource):
+    """Rows stored in a .npy file."""
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+        self._files = (FileId.of(path),)
+
+    @property
+    def rows(self):
+        return len(np.load(self.path))
+
+    @property
+    def nbytes_per_row(self):
+        return 32 * 32 * 4
+
+    @property
+    def files(self):
+        return self._files
+
+    def _read(self, index):
+        return np.load(self.path)[np.asarray(index)]
+
+
+def _particles_in(path, n):
+    """A chunk whose pixels are read references to rows of ``path``."""
+    np.save(path, np.random.rand(n, 32, 32).astype(np.float32))
+    chunk = B.Set[_Image](capacity=n)
+    chunk["defocus"] = np.arange(n, dtype=np.float64)
+    references.set_reference(chunk, ("pixels",), Reference(_NpySource(path), range(n)))
+    references.prefetch(chunk)
+    return {"out": chunk}
+
+
+def test_spilled_items_keep_references_instead_of_their_rows(tmp_path):
+    item = _particles_in(tmp_path / "stack.npy", 64)
+    pixels = np.array(item["out"]["pixels"])
+
+    async def scenario():
+        stats = StageStats()
+        store = PickleSpillStore(tmp_path / "spill")
+        mailbox = Mailbox(
+            stats,
+            buffer_size=None,
+            spill=SpillPolicy(threshold=0, store=store),
+        )
+        await mailbox.put(item, 0, None)
+        entry, _, _ = await mailbox.get()
+        return await mailbox.resolve(entry), stats
+
+    restored, stats = asyncio.run(scenario())
+
+    assert stats.spilled == 1
+    # The images (256 KiB) stay in their file; metadata and digests are spilled.
+    assert 0 < stats.spill_bytes < pixels.nbytes / 4
+    assert stats.reread_s > 0
+    state = references.column_states(restored["out"])[("pixels",)]
+    assert state.state == "cached"
+    np.testing.assert_array_equal(restored["out"]["pixels"], pixels)

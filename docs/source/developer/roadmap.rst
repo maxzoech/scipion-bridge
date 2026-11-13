@@ -95,8 +95,8 @@ Status
      - 2
    * - 4
      - Provenance: key paths, ``.astype``, ``.apply``, storage domains
-     - In progress: reference columns in the struct storage, and particle
-       resolvers referencing their stacks, done
+     - In progress: reference columns, particle resolvers referencing their
+       stacks, and spilling by reference done
      - 1
    * - 5
      - Lineage

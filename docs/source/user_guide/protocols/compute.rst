@@ -117,8 +117,9 @@ phase 0 and a long-running 2D classification after it in phase 1:
   (in the temporary directory of that stage's node). Within a phase,
   backpressure works as usual. The stage before the boundary therefore keeps
   up with its upstream, and the disk holds everything that arrives during the
-  earlier phase: whole items, until provenance lets it keep only what
-  changed.
+  earlier phase. Columns still holding rows of the input files, such as the
+  pixels of particles, are written as references to those rows and read
+  again in the later phase; computed columns are written as bytes.
 * A later phase starts only after FLUSH, at the end of the stream. In a live
   session, the stages of a later phase wait until the session is flushed.
 * A crash while items wait loses them; checkpointing will keep them.

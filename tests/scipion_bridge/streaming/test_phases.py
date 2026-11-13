@@ -134,10 +134,18 @@ def test_maps_without_a_pool_have_no_hosts():
 
 def test_a_map_on_its_own_actor_reports_the_buffering_of_the_actor():
     calls = StageStats(items_in=5, process_s=2.0)
-    actor = StageStats(items_in=5, buffered_peak=9, spilled=4, spill_s=0.5)
+    actor = StageStats(
+        items_in=5,
+        buffered_peak=9,
+        spilled=4,
+        spill_s=0.5,
+        spill_bytes=100,
+        reread_s=0.25,
+    )
 
     stats = _stats_of(calls, actor, own_actor=True)
 
     assert (stats.process_s, stats.buffered_peak, stats.spilled) == (2.0, 9, 4)
+    assert (stats.spill_bytes, stats.reread_s) == (100, 0.25)
     assert _stats_of(calls, actor, own_actor=False) == calls
     assert _stats_of(None, actor, own_actor=False) == actor

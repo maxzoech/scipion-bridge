@@ -195,11 +195,22 @@ def test_pickling_for_transfer_keeps_rows_and_the_reference():
     _same(restored, eager)
 
 
-def test_pickling_an_unread_reference_sends_only_the_reference():
+def test_transfer_reads_unread_references_first():
+    # The receiving process may not reach the source.
     lazy, eager, source = _referencing()
 
-    data = pickle.dumps(lazy)
-    restored = pickle.loads(data)
+    restored = pickle.loads(pickle.dumps(lazy))
+
+    assert source.reads == 1
+    assert _states(restored)[("pixels",)] == "cached"
+    _same(restored, eager)
+
+
+def test_spilling_an_unread_reference_does_not_read_it():
+    lazy, eager, source = _referencing()
+
+    with references.pickling(PicklingMode.SPILL):
+        restored = pickle.loads(pickle.dumps(lazy))
 
     assert source.reads == 0
     assert _states(restored)[("pixels",)] == "reference"
@@ -318,3 +329,37 @@ def test_set_reference_checks_the_rows():
         references.set_reference(
             s, ("pixels",), Reference(ArraySource(_rows(4)), range(4))
         )
+
+
+def test_spilling_keeps_the_rows_of_files_this_process_cannot_read(tmp_path):
+    path, _ = _file_backed(tmp_path)
+    lazy = B.Set[Image](capacity=4)
+    references.set_reference(lazy, ("pixels",), Reference(FileSource(path), range(4)))
+    references.prefetch(lazy)
+    path.rename(tmp_path / "moved.npy")
+
+    with references.pickling(PicklingMode.SPILL):
+        restored = pickle.loads(pickle.dumps(lazy))
+
+    assert _states(restored)[("pixels",)] == "cached"
+    np.testing.assert_array_equal(restored["pixels"], _rows(4))
+
+
+def test_spilling_by_reference_can_be_turned_off(tmp_path, monkeypatch):
+    monkeypatch.setenv(references.SPILL_REFERENCES_ENV, "0")
+    path, spilled = _file_backed(tmp_path)
+
+    restored = pickle.loads(spilled)
+
+    assert _states(restored)[("pixels",)] == "cached"
+    assert len(spilled) > _rows(4).nbytes
+
+
+def test_prefetch_all_reads_the_sets_inside_items():
+    lazy, _, source = _referencing()
+    item = {"out": [lazy, (lazy[1:3],)], "n": 3}
+
+    references.prefetch_all(item)
+
+    assert source.reads == 1
+    assert _states(lazy)[("pixels",)] == "cached"
