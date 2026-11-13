@@ -12,11 +12,11 @@ import pytest
 import ray
 
 import scipion_bridge as B
-from scipion_bridge.backend.ray.backend import (
+from scipion_bridge.backend.ray.actors import (
     DEFAULT_BUFFER_SIZE,
-    RayBackend,
     _DEFAULT_MAX_IN_FLIGHT,
 )
+from scipion_bridge.backend.ray.backend import RayBackend
 from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import Pipeline
 from scipion_bridge.core.streaming import CallbackSinkWriter
@@ -423,7 +423,7 @@ def _worker_tempdir():
 
 def _spill_directories(pipeline):
     """The spill directory of ``pipeline`` in the temporary directory of the workers."""
-    name = pipeline.compiled._spill_root.name
+    name = pipeline.compiled._plan.spill_root.name
     return list(Path(ray.get(_worker_tempdir.remote())).glob(f"{name}*"))
 
 

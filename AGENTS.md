@@ -220,6 +220,48 @@ def __getitem__( self, key):
 This syntax is much more readable than many isinstance(...) calls in nested
 conditionals.
 
+### Do not use match-case as if-else
+Use `match` to destructure a value or to dispatch on its type, class or
+literal values (`IROp` subclasses, enum members, the variants of a union).
+Do not use it as a verbose `if`: for booleans, `None` checks, empty
+collections and tuples of such conditions, write `if`/`else`, guard clauses
+or conditional expressions.
+
+**Avoid:**
+```
+match self.outer_keyed:
+    case True:
+        key = (outer, key_fn(value))
+    case False:
+        key = key_fn(value)
+
+match self._group:
+    case None:
+        pass
+    case group:
+        await group.return_leases.remote(leases)
+
+match (unleased, self._failure, missing > 0):
+    case ([executor_id, *_], _, _):
+        ...
+```
+
+**Prefer:**
+```
+if self.outer_keyed:
+    key = (outer, key_fn(value))
+else:
+    key = key_fn(value)
+
+if self._group is not None:
+    await self._group.return_leases.remote(leases)
+
+if unleased:
+    return self._hand_out(unleased[0])
+if self._failure is not None:
+    ...
+```
+
 ### Avoid implicit else branches
 If if-else conditional should always be explicit. Avoid creating implicit else
 branches by returning from a function that does not run.

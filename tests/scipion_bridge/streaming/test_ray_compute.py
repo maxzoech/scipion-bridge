@@ -306,6 +306,8 @@ def test_executors_build_their_resources_before_the_first_item():
     protocol = PooledInference()
     protocol.recorder = Recorder.remote()
     pipeline = _compile(protocol, Collector.remote())
+    # Starting the pipeline starts the warm-up of the executors.
+    pipeline.start()
 
     try:
         deadline = time.monotonic() + 30
@@ -1362,6 +1364,7 @@ def test_maps_have_no_actors_and_report_stats():
     (sink,) = lower([_chain(Source("x")).sink(lambda item: None)])
     existing = set(ray.util.list_named_actors())
     pipeline = RayBackend(init_ray=False).compile([sink])
+    pipeline.start()
 
     try:
         created = set(ray.util.list_named_actors()) - existing

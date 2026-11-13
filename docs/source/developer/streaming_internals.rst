@@ -240,13 +240,17 @@ A backend implements two interfaces from ``core/streaming/backend.py``:
 
 
     class CompiledPipeline(abc.ABC):
+        def start(self) -> None: ...  # optional, a no-op by default
         def send(self, source_name: str, value) -> None: ...
         def flush(self) -> None: ...
         def stats(self) -> dict[str, StageStats]: ...
         def close(self) -> None: ...
 
 ``compile`` receives the IR sinks; everything else is reachable upstream from
-them. The backend is then provided as the ``streaming_backend`` service of a
+them. A backend whose pipelines hold resources, such as the actors of Ray,
+can plan in ``compile`` and allocate in ``start``, which ``Pipeline.start()``
+and ``with pipeline:`` call; it then starts lazily on the first ``send`` or
+``flush`` too. The backend is then provided as the ``streaming_backend`` service of a
 container, or passed to ``Pipeline.from_sink(backend=...)``.
 
 A minimal, single-threaded backend shows the shape of an implementation and is

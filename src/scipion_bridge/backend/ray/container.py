@@ -1,12 +1,8 @@
 from typing import Any, Mapping, Optional
 
-from dependency_injector import containers, providers
-from ...core.environment.cmd_exec import StandaloneExecProvider
-from ...core.environment.temp_files import TemporaryFilesProvider
-from ...core.environment.storage import ArrowStorageProvider
-from ...core.environment.protocol_config import StaticProtocolConfigurationProvider
+from dependency_injector import providers
 from .backend import RayBackend
-from .resource_provider import RayResourceProvider
+from .worker_env import RayWorkerContainer
 
 
 def configure_ray_env(
@@ -28,16 +24,7 @@ def configure_ray_env(
     return container
 
 
-class RayContainer(containers.DeclarativeContainer):
-    config = providers.Configuration()
+class RayContainer(RayWorkerContainer):
+    """The services of the driver: those of the workers, and the backend."""
 
-    shell_exec = providers.Factory(StandaloneExecProvider)
-    temp_file_provider = providers.Factory(TemporaryFilesProvider)
-    storage_provider = providers.Factory(ArrowStorageProvider)
-    parameters = providers.Object({})
-    protocol_config_provider = providers.Singleton(
-        StaticProtocolConfigurationProvider,
-        values=parameters,
-    )
-    resource_provider = providers.Singleton(RayResourceProvider)
     streaming_backend = providers.Factory(RayBackend)

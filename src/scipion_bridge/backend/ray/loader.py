@@ -20,7 +20,7 @@ import ray  # type: ignore
 from ...core.struct.set import Set, concat
 from ...core.struct.struct import Struct
 from ...core.typed.resolve import ComposedResolver, estimate_optimal_chunk_size
-from .container import configure_ray_env
+from .worker_env import configure_worker_env
 from .profiling import ProfileConfig, make_recorder
 
 T = TypeVar("T")
@@ -130,7 +130,7 @@ class RayInputLoader:
         profile: Optional[ProfileConfig],
         label: str,
     ) -> None:
-        configure_ray_env(parameters=parameters)
+        configure_worker_env(parameters=parameters)
         self._resolver = resolver
         self._recorder = make_recorder(profile, label)
 

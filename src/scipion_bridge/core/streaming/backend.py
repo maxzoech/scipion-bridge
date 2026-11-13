@@ -49,6 +49,14 @@ class StageStats:
 class CompiledPipeline(abc.ABC):
     """Handle to a compiled, runnable streaming pipeline."""
 
+    def start(self) -> None:
+        """Allocate the resources of the pipeline (e.g. start its actors).
+
+        Backends that start them lazily do so on the first ``send`` or
+        ``flush`` otherwise.
+        """
+        pass
+
     @abc.abstractmethod
     def send(self, source_name: str, value: Any) -> None:
         """Push an item into the named source."""

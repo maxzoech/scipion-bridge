@@ -24,8 +24,11 @@ Modules
    * - Module
      - Contents
    * - ``backend.py``
-     - ``RayBackend``, ``RayCompiledPipeline``, the stage actors, map
-       execution, compute groups, ``group_by`` routing
+     - ``RayBackend`` (compilation: the plan of the stages and the pools),
+       ``RayCompiledPipeline`` (starting and driving the actors), routes
+   * - ``actors.py``
+     - The stage actors, map execution, compute groups, ``group_by``
+       routing
    * - ``mailbox.py``
      - ``Mailbox``: the bounded, spilling buffer in front of every stage
    * - ``profiling.py``
@@ -33,8 +36,12 @@ Modules
    * - ``resource_provider.py``
      - ``RayResourceProvider`` and the cluster-wide coordinator of shared
        resources
+   * - ``worker_env.py``
+     - ``RayWorkerContainer`` and ``configure_worker_env``: the services of
+       the worker processes
    * - ``container.py``
-     - ``RayContainer`` and ``configure_ray_env``
+     - ``RayContainer`` and ``configure_ray_env``: the services of the
+       driver, with the streaming backend
    * - ``ray_protocol_runner.py``
      - ``RayPipelineRunner``: input resolution, CLI, statistics output
    * - ``sinks/``
@@ -43,16 +50,32 @@ Modules
 Compilation
 -----------
 
-``RayBackend.compile`` (``_instantiate``) proceeds in three steps.
+Compiling a pipeline only plans it; its actors start later. This way, a
+compiled pipeline's report and stats need no cluster resources.
+
+``RayBackend.compile`` (``_plan``) returns a ``RayCompiledPipeline`` holding a
+``_PipelinePlan``. It starts no actor:
 
 1. **Discovery.** The IR graph is traversed upstream from the sinks, which
    yields the nodes in topological order. Each node gets a label
    ``<prefix><index>:<description>``, such as ``2:chunk(256)``; the prefix
    identifies nested pipelines (``group_by`` children).
+2. **Planning.** The claims of the maps are resolved, the placement of the
+   pools is planned (``_plan_pools``), and the stages behind a phase
+   boundary are marked.
+
+``RayCompiledPipeline.start`` (or ``start_async``) launches the plan
+(``RayBackend._launch``). Entering ``with pipeline:`` starts it, and so do
+the first ``send``, ``flush``, ``source_handle`` or ``profile``.
+``stats()`` of a pipeline that has not started reports empty stats, and
+``close()`` releases nothing:
+
+1. **Pools.** The function table goes into the object store, and every
+   pooled group gets a ``RayComputeGroup`` coordinator (``_start_pools``).
 2. **Actors.** Every node that is not *hosted* becomes a named actor
    (``<pipeline id>:<label>``): ``RaySourceActor``, ``RayAccumulatorActor``,
    ``RaySinkActor``, ``RayDemuxActor``, or ``RayMergeActor`` for a map with
-   several inputs, all defined in ``scipion_bridge.backend.ray.backend``. A
+   several inputs, all defined in ``scipion_bridge.backend.ray.actors``. A
    map with a single input is hosted: it has no actor of its
    own, and its calls are submitted by the actor of the nearest upstream stage
    (``_host_of``).
@@ -65,8 +88,7 @@ Compilation
 
 Compute claims are resolved during compilation: each distinct
 ``ComputeAssignment`` is translated into Ray task options (``_claim``,
-``_ray_options``), and each long-running group gets a ``RayComputeGroup``
-coordinator. A claim that exceeds the cluster fails compilation.
+``_ray_options``). A claim that exceeds the cluster fails compilation.
 
 Anatomy of a stage
 ------------------
@@ -166,7 +188,7 @@ has while the lease waits.
 built the protocol's process-scope resources (``prepare``): the protocol's
 ``_prepare_process`` travels in the ``ComputeAssignment`` to the function
 table, by compute group, and not with the routes, which every stage receives.
-When the pipeline is compiled, the coordinators of the long-running protocols
+When the pipeline starts, the coordinators of the long-running protocols
 of the first phase start their whole pools (``start``), in parallel to
 creating the stages; a failed warm-up kills the executor and surfaces on the
 first lease. Pools of later phases start executors on their first lease.
@@ -229,7 +251,7 @@ later phase wait instead of deadlocking:
 * *Boundaries*: the stage behind an edge into a later phase
   (``Plan.boundaries``) has an actor of its own, even a single-input map
   (``_is_hosted``, ``_host_of``), and a mailbox without bound that spills
-  (``boundary_config`` in ``_instantiate``). The stages of the earlier
+  (``boundary_config`` in ``_launch``). The stages of the earlier
   phase never wait for it, so the driver can send FLUSH. Within a phase,
   backpressure stays bounded. A ``group_by`` template is never split into
   phases.
@@ -242,7 +264,7 @@ pickles the arguments of every call, and a protocol's map function is a bound
 method: as an argument it would carry the whole protocol on every call, and
 for a class defined in ``__main__`` the class itself.
 
-Instead, compiling a pipeline puts one ``FunctionTable``
+Instead, starting a pipeline puts one ``FunctionTable``
 (``backend/ray/function_table.py``) in the object store: the functions of all
 its maps by label, its parameters and its profiling setup. A call carries a
 ``Ref`` to the table, its label and its item; wrapped in ``Ref``, Ray does not
@@ -302,13 +324,15 @@ because Ray treats a ``RayTaskError`` argument as a failed input.
 --------------
 
 ``RayDemuxActor`` routes items into child pipelines, compiled with a nested
-``RayBackend`` that inherits the buffering, profiling and parameter settings:
+``RayBackend``. The parent builds this backend (``_child_backend``) and passes
+it to the router. The children inherit the buffering, profiling and parameter
+settings, and the pools of the parent:
 
 * With ``workers=None``, every key gets a child compiled from
   ``clone_ir(template)``. With ``workers=n``, keys are assigned round-robin to
   up to ``n`` children compiled from ``share_keys(template)``, and items are
   sent as ``Keyed(key, item)``.
-* Children are compiled asynchronously (``compile_async``), so the router keeps
+* Children are compiled and started asynchronously (``start_async``), so the router keeps
   routing items of other keys while a child starts. Items for a starting child
   wait in its ``_Child`` queue, bounded by ``buffer_size``.
 * Each child ends in a sink whose writer hands results back to the router's

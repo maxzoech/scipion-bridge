@@ -14,6 +14,9 @@ class RecordingPipeline(CompiledPipeline):
         self.calls: List[str] = []
         self.fail_stats = fail_stats
 
+    def start(self) -> None:
+        self.calls.append("start")
+
     def send(self, source_name: str, value: Any) -> None:
         self.calls.append(f"send:{source_name}")
 
@@ -31,13 +34,30 @@ class RecordingPipeline(CompiledPipeline):
         self.calls.append("close")
 
 
-def test_the_context_manager_flushes_and_closes():
+def test_the_context_manager_starts_flushes_and_closes():
     compiled = RecordingPipeline()
 
     with Pipeline(compiled) as pipeline:
         pipeline.send(items=1)
 
-    assert compiled.calls == ["send:items", "flush", "stats", "close"]
+    assert compiled.calls == ["start", "send:items", "flush", "stats", "close"]
+
+
+def test_start_returns_the_pipeline():
+    compiled = RecordingPipeline()
+    pipeline = Pipeline(compiled)
+
+    assert pipeline.start() is pipeline
+    assert compiled.calls == ["start"]
+
+
+def test_a_closed_pipeline_cannot_start():
+    compiled = RecordingPipeline()
+    pipeline = Pipeline(compiled)
+    pipeline.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        pipeline.start()
 
 
 def test_stats_remain_available_after_closing():
@@ -46,7 +66,7 @@ def test_stats_remain_available_after_closing():
     with Pipeline(compiled) as pipeline:
         pipeline.send(items=1)
 
-    assert pipeline.stats() == {"0:map": StageStats(items_in=3)}
+    assert pipeline.stats() == {"0:map": StageStats(items_in=4)}
     assert compiled.calls.count("stats") == 1
 
 
@@ -58,7 +78,7 @@ def test_an_error_releases_the_pipeline_without_flushing():
         with pipeline:
             raise ValueError("in the block")
 
-    assert compiled.calls == ["close"]
+    assert compiled.calls == ["start", "close"]
     with pytest.raises(RuntimeError, match="released after a failure"):
         pipeline.stats()
 

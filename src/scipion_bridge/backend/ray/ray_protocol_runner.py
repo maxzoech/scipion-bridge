@@ -606,7 +606,8 @@ class RayPipelineRunner:
         total_chunks = 0
         total_items = 0
 
-        pipeline = self.pipeline
+        # The loaders push into the actors of the pipeline.
+        pipeline = self.pipeline.start()
         loaders = self._start_loaders(
             batched,
             chunk_size=env_chunk_size,

@@ -5,7 +5,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 import pytest
 
-from scipion_bridge.backend.ray.backend import _LeasedExecutors
+from scipion_bridge.backend.ray.actors import _LeasedExecutors
 
 
 class FakePool:

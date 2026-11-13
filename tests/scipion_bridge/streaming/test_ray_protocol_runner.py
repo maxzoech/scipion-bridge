@@ -123,7 +123,7 @@ def test_ray_pipeline_runner_compiles_pipeline():
     runner = RayPipelineRunner(proto)
 
     assert isinstance(runner.pipeline, Pipeline)
-    assert "particles" in runner.pipeline._compiled._sources
+    assert "particles" in runner.pipeline.compiled._plan.sources
 
 
 class InvalidOutputProtocol(Protocol):

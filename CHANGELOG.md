@@ -40,9 +40,15 @@
   `@B.resources(..., task=B.TaskType.LONG_RUNNING, replicas=n)` spreads the
   calls of their maps over `n` processes, in order. Compiling fails if the
   pools of a pipeline do not fit the cluster at once.
-- The executors of long-running protocols start when the pipeline is compiled
+- The executors of long-running protocols start when the pipeline starts
   and build the protocols' process-scope resources (e.g. load models) before
   the first item.
+- Compiling a pipeline on Ray only plans it and starts no actors, so
+  `pipeline.report()` (with the placement of its pools) and `stats()` cost
+  nothing on the cluster. The actors start with `Pipeline.start()`, when the
+  pipeline is entered with `with`, or on the first `send()` or `flush()`.
+  `RayBackend.compile_async()` is replaced by
+  `RayCompiledPipeline.start_async()`.
 - Calls of ephemeral protocols that claim GPUs run on a pool of executors
   instead of a new process per call, so models are loaded once per executor.
   Executors start on demand and stop after `RayBackend(ephemeral_idle_s=...)`
@@ -117,6 +123,11 @@
   nodes than the driver's were left behind.
 
 ### Tooling
+- The actors of the Ray backend moved from `backend/ray/backend.py` to
+  `backend/ray/actors.py`. Ray workers wire a `RayWorkerContainer`
+  (`backend/ray/worker_env.py`), without the streaming backend.
+- AGENTS.md: `match` is for destructuring and dispatch on types; booleans,
+  `None` checks and tuples of conditions use `if`/`else`.
 - Static tensor columns are read from their Arrow storage, so null cells of a
   sparse `Collection` load with pyarrow 26, whose `to_numpy_ndarray` rejects
   them.

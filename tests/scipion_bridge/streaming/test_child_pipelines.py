@@ -18,6 +18,7 @@ from scipion_bridge.core.streaming import (
 from scipion_bridge.core.streaming import lower
 from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import CallbackSinkWriter
+from scipion_bridge.core.streaming import Pipeline, StageStats
 
 pytestmark = pytest.mark.usefixtures("ray_cluster")
 
@@ -168,6 +169,45 @@ def test_compile_name_prefixes_stage_labels():
         ]
     finally:
         pipeline.close()
+
+
+def _named_actors():
+    return set(ray.util.list_named_actors())
+
+
+def test_compiling_starts_no_actors_until_the_pipeline_starts():
+    (sink,) = lower([Source("x").map(_double).sink(print)])
+    before = _named_actors()
+    pipeline = Pipeline(RayBackend(init_ray=False).compile([sink]), [sink])
+
+    try:
+        report = pipeline.report()
+        assert [layer.name for layer in report.layers] == ["stats", "placement"]
+        assert pipeline.stats() == {
+            "0:source(x)": StageStats(),
+            "1:map(_double)": StageStats(),
+            "2:sink(CallbackSinkWriter)": StageStats(),
+        }
+        assert _named_actors() == before
+
+        pipeline.start()
+
+        # The map runs on the actor of the source.
+        assert len(_named_actors() - before) == 2
+    finally:
+        pipeline.close()
+
+
+def test_closing_an_unstarted_pipeline_starts_nothing():
+    (sink,) = lower([Source("x").map(_double).sink(print)])
+    before = _named_actors()
+    pipeline = Pipeline(RayBackend(init_ray=False).compile([sink]), [sink])
+
+    pipeline.close()
+
+    assert _named_actors() == before
+    with pytest.raises(RuntimeError, match="closed"):
+        pipeline.compiled.start()
 
 
 def test_source_handle_pushes_without_send():

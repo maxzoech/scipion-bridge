@@ -91,7 +91,11 @@ From Python
     report = report_of(lower([done]))
     print(render_text(report))
 
-    # A compiled pipeline adds the stats of its stages.
+    # A compiled pipeline adds the placement of its pools; compiling starts
+    # no actors, so this costs nothing on the cluster.
+    print(render_text(Pipeline.from_sink(done).report()))
+
+    # A pipeline that ran adds the stats of its stages.
     with Pipeline.from_sink(done) as pipeline:
         ...
     Path("report.html").write_text(render_html(pipeline.report()))

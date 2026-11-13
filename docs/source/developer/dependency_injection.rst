@@ -100,7 +100,9 @@ that ``@inject`` functions receive the services when they are called.
 The containers are defined in ``backend/standalone/container.py``
 (``Container``, wired by ``configure_default_env``),
 ``backend/ray/container.py`` (``RayContainer``, wired by
-``configure_ray_env``) and ``backend/pyworkflow/workflow_container.py``
+``configure_ray_env``), ``backend/ray/worker_env.py``
+(``RayWorkerContainer``, wired by ``configure_worker_env`` in the Ray
+workers) and ``backend/pyworkflow/workflow_container.py``
 (``configure_pyworkflow_env``, which builds a standalone ``Container`` with
 overridden providers).
 
@@ -112,8 +114,10 @@ Services in Ray workers
 -----------------------
 
 Ray workers are separate processes, which do not inherit the driver's wiring.
-Every Ray actor and task therefore wires a ``RayContainer`` with the
-pipeline's parameter values before it runs user code:
+Every Ray actor and task therefore wires a ``RayWorkerContainer`` with the
+pipeline's parameter values before it runs user code. It provides the
+services of ``RayContainer`` except the streaming backend, which only the
+driver compiles with:
 
 * stage actors and ``group_by`` routers wire it in their constructor;
 * map tasks call ``_serve_parameters`` before each call, which rewires only if

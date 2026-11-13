@@ -71,6 +71,19 @@ class Pipeline:
         """The backend's compiled pipeline, for backend-specific access."""
         return self._compiled
 
+    def start(self) -> Pipeline:
+        """Start the resources of the backend, e.g. the actors of Ray.
+
+        Compiling only plans the pipeline: its report is available at no
+        cost. The backend starts it on the first ``send`` or ``flush``, or
+        when the pipeline is entered as a context manager. Starting it
+        earlier lets e.g. the models of long-running protocols load before
+        the first item arrives.
+        """
+        self._check_open()
+        self._compiled.start()
+        return self
+
     def send(self, **kwargs: Any) -> None:
         """
         Submit data into the compiled stream using named keyword arguments.
@@ -107,16 +120,15 @@ class Pipeline:
             RuntimeError: If the pipeline was released after a failure,
                 without its stats.
         """
-        match (self._closed, self._final_stats):
-            case (False, _):
-                return self._compiled.stats()
-            case (True, None):
-                raise RuntimeError(
-                    "The pipeline was released after a failure; its stats are "
-                    "not available.",
-                )
-            case (True, stats):
-                return stats
+        if not self._closed:
+            return self._compiled.stats()
+        elif self._final_stats is None:
+            raise RuntimeError(
+                "The pipeline was released after a failure; its stats are "
+                "not available.",
+            )
+        else:
+            return self._final_stats
 
     def report(self) -> PipelineReport:
         """The graph of the pipeline, annotated with the stats of its stages
@@ -139,15 +151,12 @@ class Pipeline:
         them. The stats of the stages remain available. Closing a closed
         pipeline does nothing.
         """
-        match self._closed:
-            case True:
-                pass
-            case False:
-                self._closed = True
-                try:
-                    self._final_stats = self._compiled.stats()
-                finally:
-                    self._compiled.close()
+        if not self._closed:
+            self._closed = True
+            try:
+                self._final_stats = self._compiled.stats()
+            finally:
+                self._compiled.close()
 
     def _release(self) -> None:
         """Terminate the backend's resources of a failed pipeline, without stats."""
@@ -161,17 +170,17 @@ class Pipeline:
             )
 
     def __enter__(self) -> Pipeline:
-        return self
+        """Start the pipeline (see ``start``)."""
+        return self.start()
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Flush and close the pipeline, or only release it after an error."""
-        match exc_type:
-            case None:
-                try:
-                    self.flush()
-                finally:
-                    self.close()
-            case _:
-                # The pipeline failed: flushing it would only raise again and
-                # hide the original error.
-                self._release()
+        if exc_type is None:
+            try:
+                self.flush()
+            finally:
+                self.close()
+        else:
+            # The pipeline failed: flushing it would only raise again and
+            # hide the original error.
+            self._release()
