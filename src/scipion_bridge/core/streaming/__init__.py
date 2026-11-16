@@ -24,6 +24,7 @@ from .ir import (
     stage_labels,
     topological_order,
 )
+from .fusion import FusionPolicy, NoFusion
 from .keyed import share_keys
 from .node import FLUSH, FlushSignal, LoweringContext, lower
 from .ops import Op, Source
@@ -77,6 +78,8 @@ __all__ = [
     "CompiledPipeline",
     "lower",
     "LoweringContext",
+    "FusionPolicy",
+    "NoFusion",
     "IROp",
     "IRSource",
     "IRMap",

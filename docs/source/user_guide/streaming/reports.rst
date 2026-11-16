@@ -70,7 +70,9 @@ Reading the report
   ``computed_here`` the paths that arrive as references and leave as owned
   columns. Edges into such a stage are drawn red, and a warning gives the
   bytes per item a spill after it writes, and whether the values were only
-  copied (then keeping the input's columns keeps the reference). The panel
+  copied (then keeping the input's columns keeps the reference). Telling
+  copies apart hashes the copied columns of the first sampled items, so it
+  only runs when Python runs without ``-O`` (``__debug__``). The panel
   *Key paths* lists the state of every referenced path at every stage
   (``ref``, ``ref*`` read, ``own``, ``C`` lost here), and *Spill estimate*
   the bytes per item spilled at every phase boundary. A lost reference

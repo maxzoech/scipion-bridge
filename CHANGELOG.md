@@ -59,6 +59,14 @@
   new.
 
 ### Streaming
+- Lowering ends with an operator-fusion pass (`core/streaming/fusion.py`):
+  maps marked `IRMap(fusable=True)` (cheap, pure, without resources; only
+  set by operators of the library) run inside the stage upstream of them,
+  or else the map downstream of them, instead of as a Ray task of their
+  own. The fused stage keeps the host's fingerprint; its name lists the
+  operators it runs (`chunk(256) → astype(...)`), and `IROp.fused` and
+  `ReportNode.fused` hold their titles. A `FusionPolicy` decides on every
+  legal move; `lower(nodes, fusion=NoFusion())` keeps every stage.
 - Long-running protocols run on a pool of executors:
   `@B.resources(..., task=B.TaskType.LONG_RUNNING, replicas=n)` spreads the
   calls of their maps over `n` processes, in order. Compiling fails if the
@@ -155,7 +163,8 @@
 - Reports have a `provenance` layer: per stage, the bytes per item that are
   references to input files, read references or owned; where files are read
   (`read_here`) and where columns lose their reference (`computed_here`,
-  with red edges and a warning, which says when the values are only copied).
+  with red edges and a warning, which says when the values are only copied;
+  that check hashes the columns and only runs with `__debug__`).
   The panels *Key paths* and *Spill estimate* show the state of the
   referenced paths at every stage and the bytes a spill writes at every
   phase boundary. Stages sample their first 3 items in and out.

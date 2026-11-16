@@ -414,7 +414,8 @@ function select(element, html) {
 function showNode(i) {
   const n = report.nodes[i];
   let html = `<h2>${esc(n.title)}</h2>` + table({id: n.id, kind: n.kind,
-    group: n.group_name, group_id: n.group, 'group_by': n.parent, stage_fp: n.stage_fp});
+    group: n.group_name, group_id: n.group, 'group_by': n.parent, stage_fp: n.stage_fp,
+    fused: n.fused.length ? n.fused.join(' → ') : null});
   for (const l of enabled()) {
     if (n.id in l.nodes) html += `<h3>${esc(l.title)}</h3>` + table(l.nodes[n.id]);
     if (n.group && n.group in l.groups)

@@ -6,6 +6,7 @@ import abc
 from typing import Any, List, Dict, Optional
 
 
+from .fusion import DEFAULT_FUSION, FusionPolicy, fuse
 from .ir import IROp, IRSource
 
 
@@ -92,11 +93,21 @@ def replace_node(old: Node, new: Node) -> None:
     old.downstream = []
 
 
-def lower(nodes: List["Node"]) -> List[IROp]:
-    """Lower one or more DAG root/sink nodes into lowered IR nodes.
+def lower(
+    nodes: List["Node"],
+    *,
+    fusion: FusionPolicy = DEFAULT_FUSION,
+) -> List[IROp]:
+    """Lower one or more DAG root/sink nodes into lowered IR nodes, and fuse
+    the fusable maps (see ``fusion.py``).
+
+    Args:
+        nodes: The exit nodes of the DAG.
+        fusion: Decides which fusable maps run inside a neighbouring stage;
+            ``NoFusion()`` keeps every stage.
 
     Returns:
         List of lowered IROp nodes corresponding to the input nodes.
     """
     ctx = LoweringContext()
-    return [ctx.lower_node(node) for node in nodes]
+    return fuse([ctx.lower_node(node) for node in nodes], fusion)

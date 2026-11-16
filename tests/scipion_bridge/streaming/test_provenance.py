@@ -74,6 +74,12 @@ def _samples(fn, items):
     return sampler.samples
 
 
+# Telling copies apart hashes columns, only with __debug__ (no ``python -O``).
+needs_debug = pytest.mark.skipif(
+    not __debug__, reason="copies are checked with __debug__"
+)
+
+
 def _states(sample):
     return {(s.where, c.path): c.state for s in sample for c in s.columns}
 
@@ -113,6 +119,7 @@ def test_items_emitted_on_flush_are_sampled_as_outputs():
     assert (len(sampler.samples.inputs), len(sampler.samples.outputs)) == (SAMPLES, 2)
 
 
+@needs_debug
 def test_copied_references_are_found_unchanged():
     s = _particles()
     changed = np.zeros((8, 4, 4), dtype=np.float32)
@@ -174,6 +181,7 @@ def _chain_samples(ids):
     }
 
 
+@needs_debug
 def test_the_layer_shows_where_references_are_lost():
     report, ids = _chain()
     source, keep, rebuild, sink = ids

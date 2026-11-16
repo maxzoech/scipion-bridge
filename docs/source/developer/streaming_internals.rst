@@ -33,6 +33,9 @@ and ``downstream`` edges and a ``lower(ctx)`` method. Chaining methods on an
 * a node that receives the same stream on two inputs is rejected, because
   ports would be ambiguous.
 
+Lowering ends with the fusion pass (`Fusing cheap maps`_), which runs the
+fusable maps inside a neighbouring stage.
+
 Only nodes reachable upstream from the given sinks are lowered. This is why a
 ``checkpoint`` sink must be passed to ``Pipeline.from_sink`` explicitly, and
 why dangling branches are silently absent from a compiled pipeline.
@@ -76,10 +79,12 @@ The IR (``core/streaming/ir.py``) consists of dataclasses with edge lists.
 ``IRSource(name)``
    An ingestion point. Items arrive through ``CompiledPipeline.send(name, item)``.
 
-``IRMap(func, name, compute)``
+``IRMap(func, name, compute, fusable)``
    A stateless 1:1 transformation. ``compute`` is the ``ComputeAssignment``
    (resources plus the group of the protocol) that every call requires, or
-   ``None``.
+   ``None``. ``fusable`` marks a cheap, pure map without resources that the
+   fusion pass may run inside a neighbouring stage; only operators of the
+   library set it.
 
 ``IRAccumulate(accumulate_fn, initial_state_fn, flush_fn, tag_inputs)``
    A stateful N:M transformation. The backend keeps one ``state`` per stage:
@@ -128,6 +133,48 @@ digest of the protocol's fingerprint (code, parameter values, sealed state;
 in a chain keep the fingerprint of their own protocol; pipelines built
 outside of protocols have ``None``. ``clone_ir`` and ``share_keys`` keep the
 field, so the copies of a template share the identity of its stages.
+
+Fusing cheap maps
+-----------------
+
+On Ray, a map without resources runs as a task submitted from the actor of
+the stage upstream of it, so every item travels to the task and back. For a
+cheap operator of the library (e.g. a change of type) that round trip costs
+more than the operator. ``lower`` therefore ends with a pass
+(``core/streaming/fusion.py``) that runs every ``fusable`` map inside a
+neighbouring stage. It rewrites the IR before any backend, ``report_of`` or
+the stats see it, so all of them see the same stages.
+
+A fusable map is fused, in order of preference:
+
+1. **into the stage upstream of it**, if that is an ``IRMap`` or an
+   ``IRAccumulate`` emitting only into the fusable map. A map composes its
+   function with the fusable one; an accumulator maps the items it emits,
+   from ``accumulate_fn`` and from ``flush_fn``. The host takes over the
+   downstream stages of the fusable map, on the same ports. This is the
+   preferred move: the item leaves the host already transformed, before a
+   spill or a transfer to an executor;
+2. **into the map downstream of it**, if that map has no other input. It
+   keeps its ``compute``, so the fused function runs where it runs (e.g. on
+   the executor of a protocol).
+
+Maps are never fused into sources, sinks or ``group_by`` stages, nor across
+the boundary of a ``group_by`` template; the maps inside a template fuse among
+themselves. A fusable map without a legal move stays a stage of its own.
+Fused functions are picklable dataclasses (``Then``, ``MapEmissions``), and
+``share_keys`` wraps them like any other function.
+
+A ``FusionPolicy`` decides whether a legal move is made; the default makes
+every one, and ``lower(nodes, fusion=NoFusion())`` keeps every stage. The
+policy is the only place that decides on fusion, so a cost model can replace
+it. Maps written by users are never fusable: separate stages are how users
+overlap work on the CPU and the GPU.
+
+The host keeps its identity and its ``stage_fp``, so executors lock and
+profiles are keyed as before. Its name lists the operators it runs in
+pipeline order, e.g. ``chunk(256) → astype(Set[Particle])``; stage labels,
+stats keys and actor names follow it. ``IROp.fused`` holds their titles (empty
+for a stage nothing was fused into), and so does ``ReportNode.fused``.
 
 The execution contract
 ----------------------

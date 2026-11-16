@@ -68,6 +68,10 @@ class IROp:
     # Fingerprint of the computation of the stage, set for the stages of a
     # protocol; None outside of protocols.
     stage_fp: Optional[str] = field(default=None, kw_only=True, repr=False)
+    # Titles of the operators of a stage the fusion pass fused, itself
+    # included, in pipeline order; empty if nothing was fused into it (see
+    # ``fusion.py``).
+    fused: Tuple[str, ...] = field(default=(), kw_only=True)
 
     def __hash__(self) -> int:
         return id(self)
@@ -99,6 +103,17 @@ class IRMap(IROp):
     name: Optional[str] = None
     # Resources every call of ``func`` requires; None requires no resources.
     compute: Optional[ComputeAssignment] = None
+    # A cheap, pure map without resources, which the fusion pass may run
+    # inside a neighbouring stage (see ``fusion.py``). Only operators of the
+    # library set it.
+    fusable: bool = False
+
+    def __post_init__(self) -> None:
+        if self.fusable and self.compute is not None:
+            raise ValueError(
+                f"The fusable map {self.name or self.func!r} requires resources; "
+                "fusable maps run inside the stage they are fused into.",
+            )
 
 
 @dataclass(eq=False)

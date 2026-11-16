@@ -53,6 +53,8 @@ class ReportNode:
             protocol; its id if it has none.
         parent: The id of the ``group_by`` whose template holds the node.
         stage_fp: The fingerprint of a stage of a protocol.
+        fused: The operators of a stage the fusion pass fused, in pipeline
+            order; empty if nothing was fused into it.
     """
 
     id: str
@@ -62,6 +64,7 @@ class ReportNode:
     group_name: Optional[str] = None
     parent: Optional[str] = None
     stage_fp: Optional[str] = None
+    fused: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -245,7 +248,10 @@ class PipelineReport:
         """Read a report written by ``to_json``."""
         data = json.loads(text)
         return PipelineReport(
-            nodes=tuple(ReportNode(**node) for node in data["nodes"]),
+            nodes=tuple(
+                ReportNode(**{**node, "fused": tuple(node["fused"])})
+                for node in data["nodes"]
+            ),
             edges=tuple(ReportEdge(**edge) for edge in data["edges"]),
             layers=tuple(_layer_from_json(layer) for layer in data["layers"]),
         )
@@ -293,6 +299,7 @@ def _add_graph(
                 group_name=_group_name(node),
                 parent=parent,
                 stage_fp=node.stage_fp,
+                fused=node.fused,
             ),
         )
         edges.extend(
@@ -355,6 +362,7 @@ def _node_json(node: ReportNode) -> Dict[str, Any]:
         "group_name": node.group_name,
         "parent": node.parent,
         "stage_fp": node.stage_fp,
+        "fused": list(node.fused),
     }
 
 

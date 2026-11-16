@@ -3,8 +3,13 @@
 Every stage records which columns of the Sets in its first ``SAMPLES``
 items in and out are references to rows of input files, read references or
 owned (``references.column_states``). Sampling reads no rows and stops after
-``SAMPLES`` items each way, so it costs nothing measurable. The provenance
-layer of the report (``report/provenance.py``) draws them.
+``SAMPLES`` items each way, so it costs nothing measurable.
+
+When ``__debug__`` is set (Python runs without ``-O``), the sampled outputs
+are also checked for owned columns that copy a reference of the item the
+stage received (``references.unchanged_columns``). The check hashes those
+columns, about 3 ms per 32 MiB, so optimized runs skip it. The provenance
+layer of the report (``report/provenance.py``) draws the samples.
 """
 
 from __future__ import annotations
@@ -32,7 +37,8 @@ class SetSample:
             empty for the item itself.
         columns: The state of every initialized leaf.
         unchanged: Owned leaves whose rows equal the rows of a reference in
-            the item the stage received (``references.unchanged_columns``).
+            the item the stage received (``references.unchanged_columns``);
+            empty when ``__debug__`` is not set.
     """
 
     where: str
@@ -78,13 +84,13 @@ class ProvenanceSampler:
 
 
 def sample_of(item: Any, received: Sequence[Stored] = ()) -> ItemSample:
-    """The sample of ``item``; owned copies of the references of ``received``
-    are marked unchanged."""
+    """The sample of ``item``; with ``__debug__``, owned copies of the
+    references of ``received`` are marked unchanged."""
     return tuple(
         SetSample(
             where,
             tuple(references.column_states(s).values()),
-            references.unchanged_columns(received, s),
+            references.unchanged_columns(received, s) if __debug__ else (),
         )
         for where, s in sets_of(item)
     )
