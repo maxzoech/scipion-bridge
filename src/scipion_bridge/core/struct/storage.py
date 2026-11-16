@@ -46,7 +46,7 @@ from .schema import (
     SchemaEntry,
     SchemaSetEntry,
 )
-from .key_path import IndexType, KeyPath
+from .key_path import AxisIndex, IndexType, KeyPath
 from .source import Reference
 
 FieldKey = Tuple[str, ...]
@@ -85,17 +85,19 @@ class _BaseStorage(abc.ABC):
             parent=self,
         )
 
-    def append(self, name: str) -> StorageView:
+    def append(self, name: str, *, axis: bool) -> StorageView:
         """Create a child storage view targeting a nested attribute, struct field, or column.
 
         Args:
             name: The field, attribute, or column name to append to the path.
+            axis: Whether the field opens an axis of its own (a nested Set
+                field); see ``KeyPath.append``.
 
         Returns:
             StorageView: A view into the parent storage rooted at the appended path.
         """
 
-        return self.view(self.root.append(name))
+        return self.view(self.root.append(name, axis=axis))
 
     def narrow_index(self, index: int, length: Optional[int] = None) -> StorageView:
         """Create a child storage view focused on a single scalar item along the active dimension.
@@ -107,8 +109,9 @@ class _BaseStorage(abc.ABC):
         Returns:
             StorageView: A view focused on the indexed element.
         """
-        effective_len = length if length is not None else self.get_length()
-        return self.view(self.root.narrow_index(index, length=effective_len))
+        return self.view(
+            self.root.narrow_index(index, length=self._narrowing_length(length)),
+        )
 
     def narrow_slice(self, index: slice, length: Optional[int] = None) -> StorageView:
         """Create a child storage view restricted to a sub-slice along the active dimension.
@@ -120,8 +123,9 @@ class _BaseStorage(abc.ABC):
         Returns:
             StorageView: A view restricted to the sub-sliced window.
         """
-        effective_len = length if length is not None else self.get_length()
-        return self.view(self.root.narrow_slice(index, length=effective_len))
+        return self.view(
+            self.root.narrow_slice(index, length=self._narrowing_length(length)),
+        )
 
     def narrow_indices(
         self,
@@ -129,8 +133,9 @@ class _BaseStorage(abc.ABC):
         length: Optional[int] = None,
     ) -> StorageView:
         """Create a child storage view restricted to specified integer indices along the active dimension."""
-        effective_len = length if length is not None else self.get_length()
-        return self.view(self.root.narrow_indices(indices, length=effective_len))
+        return self.view(
+            self.root.narrow_indices(indices, length=self._narrowing_length(length)),
+        )
 
     def narrow_mask(
         self,
@@ -138,8 +143,20 @@ class _BaseStorage(abc.ABC):
         length: Optional[int] = None,
     ) -> StorageView:
         """Create a child storage view filtered by a boolean mask along the active dimension."""
-        effective_len = length if length is not None else self.get_length()
-        return self.view(self.root.narrow_mask(mask, length=effective_len))
+        return self.view(
+            self.root.narrow_mask(mask, length=self._narrowing_length(length)),
+        )
+
+    def _narrowing_length(self, length: Optional[int]) -> Optional[int]:
+        """The length of the selected axis: ``length``, else the stored one.
+
+        A view spanning several axes has none: the lengths of its inner
+        axis differ per outer element.
+        """
+        if length is not None or self.root.spans_several_axes():
+            return length
+        else:
+            return self.get_length()
 
     @property
     def is_view(self) -> bool:
@@ -249,6 +266,31 @@ class _BaseStorage(abc.ABC):
                 )
 
         return result_storage
+
+
+def _is_full(index: AxisIndex) -> bool:
+    return isinstance(index, slice) and index == slice(None)
+
+
+def _select(column: Any, effective_idx: Tuple[AxisIndex, ...]) -> Any:
+    """``column`` selected along its axes, one axis after the other.
+
+    Indexing with the whole tuple at once would pair index arrays on
+    different axes (NumPy's advanced indexing) instead of selecting along
+    each axis; an int removes its axis.
+    """
+    for axis, idx in _axes(effective_idx):
+        column = column[(slice(None),) * axis + (idx,)]
+    return column
+
+
+def _axes(effective_idx: Tuple[AxisIndex, ...]) -> List[Tuple[int, AxisIndex]]:
+    """Every index with the axis it selects along once the earlier ones did."""
+    axis, placed = 0, []
+    for idx in effective_idx:
+        placed.append((axis, idx))
+        axis += 0 if isinstance(idx, (int, np.integer)) else 1
+    return placed
 
 
 def _reference_of(storage: _BaseStorage, key: KeyPath) -> Optional[Reference]:
@@ -371,13 +413,17 @@ class RootEngine(_BaseStorage):
         return path[1:], key.indices
 
     @staticmethod
-    def _compute_index(index_tuple: Tuple[IndexType, ...]) -> Tuple[IndexType, ...]:
-        """Strip slice(None) no-ops to form a clean index tuple for array storage."""
-        return tuple(
-            idx
-            for idx in index_tuple
-            if not (isinstance(idx, slice) and idx == slice(None))
-        )
+    def _compute_index(key: KeyPath) -> Tuple[AxisIndex, ...]:
+        """The selection of ``key`` along the axes of its column, by position.
+
+        The i-th index selects along the i-th axis: the root of a Set, then
+        every nested Set field. Trailing full slices select nothing and are
+        dropped, so a path selecting a whole column has no index.
+        """
+        indices = list(key.axis_indices())
+        while indices and _is_full(indices[-1]):
+            indices.pop()
+        return tuple(indices)
 
     @staticmethod
     def _is_under(field_key: FieldKey, prefix: FieldKey) -> bool:
@@ -424,7 +470,7 @@ class RootEngine(_BaseStorage):
     @staticmethod
     def _get_item_from_index(
         container: Any,
-        effective_idx: Tuple[IndexType, ...],
+        effective_idx: Tuple[AxisIndex, ...],
     ) -> Any:
         """Index nested row lists level by level; None if a level is missing."""
         curr = container
@@ -438,13 +484,13 @@ class RootEngine(_BaseStorage):
     def _element_at(
         cls,
         column: Union[Column, List[Any]],
-        effective_idx: Tuple[IndexType, ...],
+        effective_idx: Tuple[AxisIndex, ...],
     ) -> Any:
         match column:
             case list():
                 return cls._get_item_from_index(column, effective_idx)
             case _:
-                return column[effective_idx]
+                return _select(column, effective_idx)
 
     # --------------------------------------------------------------------------
     # Queries
@@ -496,8 +542,8 @@ class RootEngine(_BaseStorage):
         is taken from the first column found. A missing element has length 0.
         """
         target_key = key if key is not None else self.root
-        prefix, index_tuple = self._decompose(target_key)
-        effective_idx = self._compute_index(index_tuple)
+        prefix, _ = self._decompose(target_key)
+        effective_idx = self._compute_index(target_key)
 
         for field_key, column in self._columns():
             if not self._is_under(field_key, prefix):
@@ -516,8 +562,8 @@ class RootEngine(_BaseStorage):
     # --------------------------------------------------------------------------
 
     def read(self, key: KeyPath, entry: Entry) -> Any:
-        field_key, index_tuple = self._decompose(key)
-        effective_idx = self._compute_index(index_tuple)
+        field_key, _ = self._decompose(key)
+        effective_idx = self._compute_index(key)
         if self._refs and field_key in self._refs and field_key not in self._data:
             self._read_reference(field_key)
 
@@ -546,7 +592,7 @@ class RootEngine(_BaseStorage):
         if not effective_idx:
             return buffer
 
-        return self._initialized(buffer[effective_idx], key)
+        return self._initialized(_select(buffer, effective_idx), key)
 
     @staticmethod
     def _initialized(value: Any, key: KeyPath) -> Any:
@@ -597,9 +643,9 @@ class RootEngine(_BaseStorage):
         ``None`` if the column is not a reference, or ``key`` selects in a
         way a reference cannot follow (a single element, nested indices).
         """
-        field_key, index_tuple = self._decompose(key)
+        field_key, _ = self._decompose(key)
         reference = self._refs.get(field_key)
-        effective_idx = self._compute_index(index_tuple)
+        effective_idx = self._compute_index(key)
         match (reference, effective_idx):
             case (None, _):
                 return None
@@ -643,8 +689,8 @@ class RootEngine(_BaseStorage):
         assert isinstance(entry, ArrayEntryBase)
         self._validate_dtype(data, entry.dtype, key)
 
-        field_key, index_tuple = self._decompose(key)
-        effective_idx = self._compute_index(index_tuple)
+        field_key, _ = self._decompose(key)
+        effective_idx = self._compute_index(key)
         if self._refs and field_key in self._refs:
             # A written column holds what was written, not rows of a source.
             if effective_idx:
@@ -653,7 +699,10 @@ class RootEngine(_BaseStorage):
                 with self._lock:
                     self._refs.pop(field_key, None)
 
-        match (effective_idx, entry.is_static):
+        # The leaves of a nested Set (a column below more than one axis) are
+        # ragged: their rows have the lengths of the nested Sets.
+        static = entry.is_static and len(key.axis_indices()) <= 1
+        match (effective_idx, static):
             case ((), _):
                 self._write_full_column(field_key, entry, data, key)
             case (_, True):
@@ -818,7 +867,7 @@ class RootEngine(_BaseStorage):
         self,
         field_key: FieldKey,
         entry: ArrayEntryBase,
-        effective_idx: Tuple[IndexType, ...],
+        effective_idx: Tuple[AxisIndex, ...],
         data: Any,
         key: KeyPath,
     ) -> None:
@@ -836,7 +885,7 @@ class RootEngine(_BaseStorage):
         self,
         field_key: FieldKey,
         entry: ArrayEntryBase,
-        effective_idx: Tuple[IndexType, ...],
+        effective_idx: Tuple[AxisIndex, ...],
     ) -> np.ndarray:
         """Return a writable buffer of a static column that covers ``effective_idx``.
 
@@ -878,7 +927,7 @@ class RootEngine(_BaseStorage):
     @staticmethod
     def _is_writable_for(
         buffer: Optional[Column],
-        effective_idx: Tuple[IndexType, ...],
+        effective_idx: Tuple[AxisIndex, ...],
     ) -> bool:
         return (
             isinstance(buffer, np.ndarray)
@@ -890,7 +939,7 @@ class RootEngine(_BaseStorage):
         self,
         field_key: FieldKey,
         entry: ArrayEntryBase,
-        effective_idx: Tuple[IndexType, ...],
+        effective_idx: Tuple[AxisIndex, ...],
         data: Any,
     ) -> None:
         """Indexed write on a dynamic field, staged as rows for deferred materialization."""
@@ -901,7 +950,7 @@ class RootEngine(_BaseStorage):
         self,
         field_key: FieldKey,
         entry: ArrayEntryBase,
-        effective_idx: Tuple[IndexType, ...],
+        effective_idx: Tuple[AxisIndex, ...],
     ) -> List[Any]:
         """Return the per-row chunk list of a dynamic column that covers ``effective_idx``.
 
@@ -940,7 +989,7 @@ class RootEngine(_BaseStorage):
             return chunks
 
     @staticmethod
-    def _covers(chunks: List[Any], effective_idx: Tuple[IndexType, ...]) -> bool:
+    def _covers(chunks: List[Any], effective_idx: Tuple[AxisIndex, ...]) -> bool:
         match effective_idx:
             case (int(idx), *_):
                 return idx < len(chunks)

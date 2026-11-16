@@ -1,8 +1,13 @@
-from typing import Any, Optional, Sequence, Tuple, Union, TypeAlias
+from typing import Any, Callable, Optional, Sequence, Tuple, Union, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-IndexType: TypeAlias = Union[slice, int, NDArray[np.int64]]
+# The selection along the axis a component opens.
+AxisIndex: TypeAlias = Union[slice, int, NDArray[np.int64]]
+# The index of a component: an axis selection, or None for a component that
+# opens no axis (a field of a struct, a slot of a Collection, the root of a
+# Struct).
+IndexType: TypeAlias = Optional[AxisIndex]
 
 
 class KeyPath(Sequence[Tuple[str, IndexType]]):
@@ -14,9 +19,16 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
 
     Each path segment is stored as a `(name, index)` tuple where:
         - `name`: The name in the corresponding schema.
-        - `index`: An `IndexType` indicating the selection across that dimension.
-          This is typically initialized as an unbounded slice (`slice(None)`),
-          which can subsequently be narrowed to a subslice or a concrete integer index.
+        - `index`: An `IndexType` indicating the selection across the axis the
+          component opens: the root of a Set and every nested Set field. It
+          starts as an unbounded slice (`slice(None)`), which can subsequently
+          be narrowed to a subslice or a concrete integer index. Components
+          that open no axis (fields of a struct, slots of a Collection, the
+          root of a Struct) have the index `None`.
+
+    Narrowing selects along the innermost axis of the path, so the fields of
+    a struct share the axis of the Set holding them: ``s["ctf"][1:3]``
+    selects rows 1 and 2 of ``s``.
 
     The path functions as an immutable sequence of components, supporting operations
     like chaining, relative slice composition, and offset projection without requiring
@@ -30,23 +42,38 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             each step of the path.
 
     Examples:
-        Constructing and narrowing an attribute path:
+        The frames of movie 3 of a Set of movies, a nested Set field:
 
-        >>> path = KeyPath().append("users").append("orders")
+        >>> path = KeyPath().narrow_index(3).append("frames", axis=True)
         >>> path.path
-        ('root', 'users', 'orders')
+        ('root', 'frames')
 
-        Narrowing ranges along the path:
+        Narrowing ranges along the innermost axis, the frames:
 
         >>> narrowed = path.narrow_slice(slice(0, 10)).narrow_slice(slice(2, 5))
         >>> narrowed.indices[-1]
         slice(2, 5, 1)
 
-        Pinning the tail component to a scalar record index:
+        Pinning it to a scalar record index:
 
         >>> scalar_item = narrowed.narrow_index(1)
         >>> scalar_item.indices[-1]
         3
+
+        Fields of a struct open no axis, so narrowing selects rows of the
+        Set holding them:
+
+        >>> KeyPath().append("ctf", axis=False).narrow_slice(slice(1, 3))
+        KeyPath('root[1:3].ctf')
+
+        A path whose outer axis is not pinned spans several axes; narrowing
+        selects along the innermost, here frame 0 of every movie:
+
+        >>> frames = KeyPath().append("frames", axis=True)
+        >>> frames.spans_several_axes()
+        True
+        >>> frames.narrow_index(0)
+        KeyPath('root[:].frames[0]')
     """
 
     def __init__(
@@ -72,6 +99,19 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         """Returns the tuple of active index/slice components along the path."""
         return tuple([i for (_, i) in self.components])
 
+    def axis_indices(self) -> Tuple[AxisIndex, ...]:
+        """The indices of the components that open an axis, in order.
+
+        Full slices are kept: the i-th index selects along the i-th axis of
+        the column the path addresses.
+
+        Examples:
+            >>> path = KeyPath().narrow_index(2).append("ctf", axis=False)
+            >>> path.axis_indices()
+            (2,)
+        """
+        return tuple(idx for _, idx in self.components if idx is not None)
+
     def extend(self, path: "KeyPath") -> "KeyPath":
         """Concatenates another `KeyPath` onto this key path.
 
@@ -85,7 +125,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             KeyPath: A new `KeyPath` instance containing the combined components.
 
         Examples:
-            >>> p1 = KeyPath().append("users")
+            >>> p1 = KeyPath().append("users", axis=True)
             >>> p2 = KeyPath((("orders", slice(0, 5)),))
             >>> combined = p1.extend(p2)
             >>> combined.path
@@ -95,33 +135,67 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         """
         return KeyPath([*self.components, *path.components])
 
-    def append(self, name: str) -> "KeyPath":
+    def append(self, name: str, *, axis: bool) -> "KeyPath":
         """Appends an attribute or field name to the key path.
 
-        Extends the path to target a child attribute on an object, a struct field,
-        or a set column. The new component is initialized with an unbounded
-        slice (`slice(None)`), representing the entire range or collection until
-        further narrowed.
+        Extends the path to target a child attribute on an object, a struct
+        field, or a set column.
 
         Args:
             name: The name of the attribute, field, or column to append.
+            axis: Whether the field opens an axis of its own: a nested Set
+                field does, starting as an unbounded slice (`slice(None)`);
+                a field of a struct, a leaf or a slot of a Collection does
+                not, and gets the index `None`.
 
         Returns:
             KeyPath: A new `KeyPath` instance containing the existing path
-                components followed by `(name, slice(None))`.
+                components followed by the new component.
 
         Examples:
-            >>> path = KeyPath().append("user")
+            >>> path = KeyPath().append("user", axis=False)
             >>> path.components[-1]
-            ('user', slice(None, None, None))
+            ('user', None)
 
-            >>> nested = path.append("address").append("city")
-            >>> nested.path
-            ('root', 'user', 'address', 'city')
+            >>> KeyPath().append("frames", axis=True).components[-1]
+            ('frames', slice(None, None, None))
         """
-        return KeyPath([*self.components, (name, slice(None))])
+        return KeyPath([*self.components, (name, slice(None) if axis else None)])
+
+    def spans_several_axes(self) -> bool:
+        """Whether the path selects along several axes at once: an axis other
+        than the innermost is not pinned to one element, e.g. the members of
+        every group of a Set of groups. Such a selection has no single
+        length; the selections of its inner axis differ per outer element.
+        """
+        *outer, _ = self.axis_indices() or (None,)
+        return any(not isinstance(idx, int) for idx in outer)
+
+    def _at_axis(self, narrow: Callable[["KeyPath"], "KeyPath"]) -> "KeyPath":
+        """``narrow`` applied to the innermost axis component of the path.
+
+        Components after it open no axis and are kept as they are. Outer
+        axes keep their selection: narrowing the members of every group
+        selects the same members of each group.
+
+        Raises:
+            ValueError: If no component opens an axis (the path addresses a
+                Struct, which cannot be indexed).
+        """
+        axes = [i for i, (_, idx) in enumerate(self.components) if idx is not None]
+        if not axes:
+            raise ValueError(f"Cannot index {self}: it has no axis to select along.")
+        inner = axes[-1]
+        narrowed = narrow(KeyPath(self.components[: inner + 1]))
+        return KeyPath([*narrowed.components, *self.components[inner + 1 :]])
 
     def narrow_index(self, index: int, length: Optional[int] = None) -> "KeyPath":
+        """Narrows the innermost axis of the path; see ``_narrow_index_terminal``."""
+        return self._at_axis(lambda path: path._narrow_index_terminal(index, length))
+
+    def _narrow_index_terminal(
+        self, index: int, length: Optional[int] = None
+    ) -> "KeyPath":
         """Narrows the terminal component's slice or index array to a concrete integer index.
 
         Composes a relative scalar index with the component currently held at the tail
@@ -166,7 +240,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
 
         Examples:
-            >>> path = KeyPath().append("users")  # root.users[:]
+            >>> path = KeyPath()  # root[:]
             >>> path.narrow_index(3).indices[-1]
             3
 
@@ -233,6 +307,12 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
                 )
 
     def narrow_slice(self, index: slice, length: Optional[int] = None) -> "KeyPath":
+        """Narrows the innermost axis of the path; see ``_narrow_slice_terminal``."""
+        return self._at_axis(lambda path: path._narrow_slice_terminal(index, length))
+
+    def _narrow_slice_terminal(
+        self, index: slice, length: Optional[int] = None
+    ) -> "KeyPath":
         """Narrows the terminal component by composing it with a subslice.
 
         Projects a relative `slice` into the coordinate frame of the component
@@ -272,7 +352,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
 
         Examples:
-            >>> path = KeyPath().append("items")  # items[:]
+            >>> path = KeyPath()  # root[:]
             >>> path.narrow_slice(slice(2, 8)).indices[-1]
             slice(2, 8, 1)
 
@@ -335,6 +415,16 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         indices: Union[Sequence[int], NDArray[np.integer]],
         length: Optional[int] = None,
     ) -> "KeyPath":
+        """Narrows the innermost axis of the path; see ``_narrow_indices_terminal``."""
+        return self._at_axis(
+            lambda path: path._narrow_indices_terminal(indices, length)
+        )
+
+    def _narrow_indices_terminal(
+        self,
+        indices: Union[Sequence[int], NDArray[np.integer]],
+        length: Optional[int] = None,
+    ) -> "KeyPath":
         """Narrows the terminal component to an array of integer indices (gather/take).
 
         Composes relative integer indices with the component currently held at the tail
@@ -377,7 +467,7 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
 
         Examples:
-            >>> path = KeyPath().append("values")  # values[:]
+            >>> path = KeyPath()  # root[:]
             >>> path.narrow_indices([0, 2, 4], length=5).indices[-1]
             array([0, 2, 4])
 
@@ -435,6 +525,14 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         mask: Union[Sequence[bool], NDArray[np.bool_]],
         length: Optional[int] = None,
     ) -> "KeyPath":
+        """Narrows the innermost axis of the path; see ``_narrow_mask_terminal``."""
+        return self._at_axis(lambda path: path._narrow_mask_terminal(mask, length))
+
+    def _narrow_mask_terminal(
+        self,
+        mask: Union[Sequence[bool], NDArray[np.bool_]],
+        length: Optional[int] = None,
+    ) -> "KeyPath":
         """Narrows the terminal component using a boolean mask (filtering).
 
         Converts the boolean mask to active integer indices via `np.flatnonzero`
@@ -478,11 +576,11 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
             NotImplementedError: If the parent slice has a non-unit step (`step != 1`).
 
         Examples:
-            >>> path = KeyPath().append("items")
+            >>> path = KeyPath()  # root[:]
             >>> path.narrow_mask([True, False, True]).indices[-1]
             array([0, 2])
 
-            >>> slice_path = path.narrow_slice(slice(2, 7))  # items[2:7], span=5
+            >>> slice_path = path.narrow_slice(slice(2, 7))  # root[2:7], span=5
             >>> slice_path.narrow_mask([True, False, False, True, False]).indices[-1]
             array([2, 5])
 
@@ -622,6 +720,10 @@ class KeyPath(Sequence[Tuple[str, IndexType]]):
         return hash(tuple(hashed_components))
 
 
+# The root of a Struct or a Collection: it opens no axis.
+STRUCT_ROOT = KeyPath((("root", None),))
+
+
 def _add_bound(base: int | None, delta: int | None) -> int | None:
     """Adds a relative index bound delta to an existing base bound.
 
@@ -655,6 +757,9 @@ def _add_bound(base: int | None, delta: int | None) -> int | None:
 def _format_index(index: IndexType) -> str:
     """Formats an index component (slice, integer, or array) for string display."""
     match index:
+        case None:
+            return ""
+
         case slice(start=start, stop=stop, step=step):
             start_str = "" if start is None else str(start)
             stop_str = "" if stop is None else str(stop)

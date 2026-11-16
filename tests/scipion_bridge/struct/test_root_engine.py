@@ -77,7 +77,7 @@ def test_unwritten_element_raises_while_pending_and_after_materialization():
 
 def test_empty_rows_write_to_static_field_is_padded_to_capacity():
     engine = RootEngine()
-    key = KeyPath().append("image")
+    key = KeyPath().append("image", axis=False)
 
     engine.write(key, ArraySetEntry(dtype=np.dtype(np.float32), shape=(2, 2)), [])
     assert engine.read(
@@ -91,7 +91,7 @@ def test_empty_rows_write_to_static_field_is_padded_to_capacity():
 
 def test_empty_rows_write_to_dynamic_field():
     engine = RootEngine()
-    key = KeyPath().append("embedding")
+    key = KeyPath().append("embedding", axis=False)
     entry = RaggedArraySetEntry(dtype=np.dtype(float), shape=(None,))
 
     engine.write(key, entry, [])
@@ -103,7 +103,7 @@ def test_empty_rows_write_to_dynamic_field():
 def test_is_initialized_follows_columns_and_their_containers():
     engine = RootEngine()
     score = ArraySetEntry(dtype=np.dtype(float), shape=(1,))
-    nested = KeyPath().append("inner").append("score")
+    nested = KeyPath().append("inner", axis=False).append("score", axis=False)
 
     assert not engine.is_initialized(KeyPath())
     assert not engine.is_initialized(nested)
@@ -111,11 +111,11 @@ def test_is_initialized_follows_columns_and_their_containers():
     engine.write(nested, score, np.ones((2, 1)))
     # The first query cached the empty state; the write must invalidate it
     assert engine.is_initialized(KeyPath())
-    assert engine.is_initialized(KeyPath().append("inner"))
+    assert engine.is_initialized(KeyPath().append("inner", axis=False))
     assert engine.is_initialized(nested)
-    assert not engine.is_initialized(KeyPath().append("other"))
+    assert not engine.is_initialized(KeyPath().append("other", axis=False))
 
-    engine.clear(KeyPath().append("inner"))
+    engine.clear(KeyPath().append("inner", axis=False))
     assert not engine.is_initialized(nested)
     assert not engine.is_initialized(KeyPath())
 
@@ -123,11 +123,11 @@ def test_is_initialized_follows_columns_and_their_containers():
 def test_is_initialized_counts_pending_rows():
     engine = RootEngine()
     embedding = RaggedArraySetEntry(dtype=np.dtype(float), shape=(None,))
-    key = KeyPath().narrow_index(1, length=3).append("embedding")
+    key = KeyPath().narrow_index(1, length=3).append("embedding", axis=False)
 
     engine.write(key, embedding, np.zeros(2))
 
-    assert engine.is_initialized(KeyPath().append("embedding"))
+    assert engine.is_initialized(KeyPath().append("embedding", axis=False))
 
 
 def test_full_column_length_is_checked_against_pending_sibling():
@@ -136,13 +136,13 @@ def test_full_column_length_is_checked_against_pending_sibling():
     score = ArraySetEntry(dtype=np.dtype(float), shape=(1,))
 
     engine.write(
-        KeyPath().narrow_index(2, length=3).append("embedding"),
+        KeyPath().narrow_index(2, length=3).append("embedding", axis=False),
         embedding,
         np.zeros(2),
     )
 
     with pytest.raises(ValueError, match="Length mismatch"):
-        engine.write(KeyPath().append("score"), score, np.ones((5, 1)))
+        engine.write(KeyPath().append("score", axis=False), score, np.ones((5, 1)))
 
 
 def test_full_column_length_is_checked_against_capacity():
@@ -150,7 +150,7 @@ def test_full_column_length_is_checked_against_capacity():
     score = ArraySetEntry(dtype=np.dtype(float), shape=(1,), capacity=2)
 
     with pytest.raises(ValueError, match="exceeds capacity"):
-        engine.write(KeyPath().append("score"), score, np.ones((3, 1)))
+        engine.write(KeyPath().append("score", axis=False), score, np.ones((3, 1)))
 
 
 def test_storage_without_all_operations_cannot_be_instantiated():

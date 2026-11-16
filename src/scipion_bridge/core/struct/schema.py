@@ -325,6 +325,12 @@ class SchemaSetEntry(SchemaEntry, SetEntryBase):
         )
 
 
+def opens_axis(entry: Entry) -> bool:
+    """Whether the field of ``entry`` opens an axis of its own: a nested Set
+    does; a struct, a leaf or a Collection does not (see ``KeyPath``)."""
+    return isinstance(entry, SchemaSetEntry)
+
+
 @dataclass
 class CollectionEntry(Entry):
     """Wraps a statically-sized Collection container entry."""
@@ -405,7 +411,7 @@ class Schema:
         for field_name, entries in _common_entries(
             self.fields, *(other.fields for other in others)
         ):
-            path = root.append(field_name)
+            path = root.append(field_name, axis=opens_axis(entries[0]))
             has_children = [e.children is not None for e in entries]
 
             if any(has_children):

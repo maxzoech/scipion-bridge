@@ -437,7 +437,163 @@ def test_nested_struct_set_slicing(as_engine):
     assert np.allclose(sub_buffer[5].metadata.latent, latent_data[15])
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
+class Member(B.Struct):
+    value: float
+
+
+class Group(B.Struct):
+    members: B.Set[Member]
+    group_id: int
+
+
+def _group(group_id: int, size: int) -> Group:
+    """A group whose members have the values 10 * group_id + k."""
+    return Group(
+        members=B.Set[Member]([Member(value=10 * group_id + k) for k in range(size)]),
+        group_id=group_id,
+    )
+
+
+def _member_values(groups, sizes, selected, members):
+    """The values of ``members`` of the groups ``selected`` (see _group)."""
+    return [[[10.0 * g + k] for k in range(sizes[g])[members]] for g in selected]
+
+
+def test_a_nested_selection_does_not_depend_on_a_full_outer_slice():
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate([2, 3, 1])])
+
+    # groups[0:] is the same Set as groups; both select the first 2 members
+    # of every group.
+    direct = groups["members"][:2]
+    sliced = groups[0:]["members"][:2]
+
+    expected = [[[0.0], [1.0]], [[10.0], [11.0]], [[20.0]]]
+    assert direct["value"].tolist() == expected
+    assert sliced["value"].tolist() == expected
+
+
+def test_the_members_of_every_group_are_selected_per_group():
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate([2, 3, 1])])
+
+    assert groups[1:]["members"][:1]["value"].tolist() == [[[10.0]], [[20.0]]]
+    # Member 0 of every group: one value per group.
+    assert groups["members"][0].value.tolist() == [[0.0], [10.0], [20.0]]
+
+
+@pytest.mark.parametrize("use", [len, list, bool], ids=["len", "iteration", "truth"])
+def test_the_members_of_every_group_have_no_single_length(use):
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate([2, 3, 1])])
+
+    with pytest.raises(TypeError, match="no single length"):
+        use(groups["members"])
+
+
+def test_a_negative_member_index_needs_a_length():
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate([2, 3, 1])])
+
+    with pytest.raises(ValueError, match="without knowing sequence length"):
+        groups["members"][-1]
+
+
+@pytest.mark.parametrize("sizes", [[2, 3, 1], [2, 2, 2]])
+def test_a_batch_is_written_into_the_members_of_every_group(sizes):
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate(sizes)])
+
+    groups["members"][:1]["value"] = [np.array([[100.0 * (g + 1)]]) for g in range(3)]
+
+    assert groups["members"]["value"].tolist() == [
+        [[100.0 * (g + 1)] if k == 0 else [10.0 * g + k] for k in range(n)]
+        for g, n in enumerate(sizes)
+    ]
+
+
+def test_a_member_of_one_group_is_written_in_place():
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate([2, 3, 1])])
+
+    groups[1].members[0].value = 5.0
+
+    assert groups["members"]["value"].tolist() == [
+        [[0.0], [1.0]],
+        [[5.0], [11.0], [12.0]],
+        [[20.0]],
+    ]
+
+
+def test_the_members_of_one_group_can_be_indexed():
+    sizes = [2, 3, 1]
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate(sizes)])
+
+    assert groups[1].members[:2]["value"].tolist() == [[10.0], [11.0]]
+    assert groups[1:][1].members[0].value == 20.0
+    assert groups[[2, 0]][1].members["value"].tolist() == [[0.0], [1.0]]
+    assert groups[1].members[[2, 0]]["value"].tolist() == [[12.0], [10.0]]
+    # Reading a leaf of every group still returns the ragged column.
+    assert groups["members"]["value"].tolist() == [
+        [[0.0], [1.0]],
+        [[10.0], [11.0], [12.0]],
+        [[20.0]],
+    ]
+
+
+class Defocus(B.Struct):
+    defocus: float
+
+
+class Image(B.Struct):
+    ctf: Defocus
+    score: float
+
+
+def _images(n=5):
+    images = B.Set[Image](capacity=n)
+    images["ctf"]["defocus"] = np.arange(n, dtype=np.float64)
+    images["score"] = np.arange(n, dtype=np.float64) * 10
+    return images
+
+
+@pytest.mark.parametrize(
+    "nested, rows_first",
+    [
+        (lambda s: s[1:]["ctf"][:1], lambda s: s[1:][:1]["ctf"]),
+        (lambda s: s[1:]["ctf"][[1, 0]], lambda s: s[1:][[1, 0]]["ctf"]),
+        (lambda s: s[[4, 0, 2]]["ctf"][1:], lambda s: s[[4, 0, 2]][1:]["ctf"]),
+        (
+            lambda s: s[np.array([True, False, True, True, False])]["ctf"][1:],
+            lambda s: s[np.array([True, False, True, True, False])][1:]["ctf"],
+        ),
+        (lambda s: s["ctf"][1:3], lambda s: s[1:3]["ctf"]),
+    ],
+    ids=["slice", "positions", "positions-then-slice", "mask", "whole"],
+)
+def test_selecting_rows_of_a_struct_field_selects_rows_of_the_set(nested, rows_first):
+    images = _images()
+
+    selected = nested(images)
+
+    expected = rows_first(images)
+    assert len(selected) == len(expected)
+    np.testing.assert_array_equal(selected["defocus"], expected["defocus"])
+
+
+def test_an_element_of_a_struct_field_after_a_slice_is_one_row():
+    images = _images()
+
+    assert images[1:]["ctf"][0].defocus == 1.0
+    assert images[2:]["ctf"][-1].defocus == 4.0
+
+
+@pytest.mark.parametrize("sizes", [[2, 3, 1], [2, 2, 2], [1, 1, 1]])
+def test_structs_with_nested_sets_can_be_assigned_into_a_preallocated_set(sizes):
+    expected = B.Set[Group]([_group(i, n) for i, n in enumerate(sizes)])
+
+    groups = B.Set[Group](capacity=len(sizes))
+    for i, n in enumerate(sizes):
+        groups[i] = _group(i, n)
+
+    assert groups["group_id"].tolist() == expected["group_id"].tolist()
+    assert groups["members"]["value"].tolist() == expected["members"]["value"].tolist()
+
+
 def test_multidimensional_nested_set_slicing_and_indexing(as_engine):
     # 20 movies, each with 10 frames -> total (20, 10, ...)
     dataset = B.Set[Movie](capacity=20)
@@ -582,7 +738,6 @@ def test_nested_set_unbounded_write_dimension_overflow():
         dataset["frames"]["pixels"] = np.ones((20, 15, 64, 64))
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_multidimensional_2d_slice_both_axes(as_engine):
     # 20 movies, each with 10 frames -> total tensor (20, 10, 64, 64)
     dataset = B.Set[Movie](capacity=20)
@@ -610,7 +765,6 @@ def test_multidimensional_2d_slice_both_axes(as_engine):
     assert np.allclose(extracted_pixels, noise_frames[2:7, 1:4])
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_multidimensional_2d_slice_both_axes_ragged(as_engine):
     class Foo(B.Struct):
         bar: int
@@ -676,7 +830,6 @@ def test_set_storage_incompatible_dtype_raises():
         data["foo"] = np.array([1.0 + 2.0j], dtype=np.complex128)
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_ragged_set_operations_supported(as_engine):
     class DynamicItem(B.Struct):
         dim = B.Dim()
@@ -747,7 +900,6 @@ def test_dynamic_set_len_and_indexing():
     assert sliced[0].val == 2.0
 
 
-@pytest.mark.skip(reason="Pending storage engine implementation")
 def test_basic_ragged_set_assign(as_engine):
 
     class Sample(B.Struct):

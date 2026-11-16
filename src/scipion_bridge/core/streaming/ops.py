@@ -606,6 +606,12 @@ def _flatten(state: None, item: Any) -> Tuple[None, List[Any]]:
                 ".items() instead.",
             )
 
+        case Set():
+            raise TypeError(
+                "FlattenOp does not flatten Sets: a Set is a batch of rows; use "
+                ".chunk(n) to change the batch size instead.",
+            )
+
         case Iterable():
             return (state, list(item))
 

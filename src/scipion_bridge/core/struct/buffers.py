@@ -357,7 +357,7 @@ def assign_rows(
             rows[i] = data
 
         case (int() as i, *rest):
-            assign_rows(rows[i], tuple(rest), data)
+            _assign_row(rows, i, tuple(rest), data)
 
         case (slice() | np.ndarray() as idx, *rest):
             positions = _positions(idx, len(rows))
@@ -388,8 +388,28 @@ def _assign_row(
     rest: Tuple[IndexType, ...],
     element: Any,
 ) -> None:
-    match rest:
-        case ():
+    """Write ``element`` into row ``position`` at ``rest``, its own indices.
+
+    A row is a list of nested rows, or the members of a nested Set: a NumPy
+    row is written in place; an Awkward row (of a ragged column) is
+    replaced by a NumPy copy holding the write.
+    """
+    match (rest, rows[position]):
+        case ((), _):
             rows[position] = element
-        case _:
-            assign_rows(rows[position], rest, element)
+        case (_, list() as nested):
+            assign_rows(nested, rest, element)
+        case (_, np.ndarray() as row):
+            row[rest] = element
+        case (_, ak.Array() as row):
+            values = ak.to_numpy(row).copy()
+            values[rest] = element
+            rows[position] = values
+        case (_, None):
+            raise ValueError(
+                f"Cannot write into row {position}: it was never written.",
+            )
+        case (_, row):
+            raise TypeError(
+                f"Cannot write into a row of type '{type(row).__name__}'.",
+            )

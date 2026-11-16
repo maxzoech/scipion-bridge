@@ -510,7 +510,7 @@ if HAS_PWEM:
         """Return True if the given nested key path has been written into *s*."""
         kp = s._storage.root
         for part in path:
-            kp = kp.append(part)
+            kp = kp.append(part, axis=False)
         return kp in s._storage
 
     @resolver

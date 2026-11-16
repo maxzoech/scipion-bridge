@@ -21,7 +21,7 @@ from .schema import (
 )
 from ..utils.marker import Marker
 from .storage import _BaseStorage, RootEngine
-from .key_path import KeyPath
+from .key_path import STRUCT_ROOT, KeyPath
 from .utils.arrow_utils import (
     find_nested_column,
     is_regular_awkward,
@@ -281,15 +281,18 @@ class Array(Marker[T], SchemaConvertible):
         if self.name is None:
             raise AttributeError("Array descriptor name is not set.")
 
-        path = instance.storage.root.append(self.name)
+        path = instance.storage.root.append(self.name, axis=False)
         val = instance.storage.read(
             path,
             self.entry,
         )
-        if self.is_scalar:
-            return val.item()
-
-        return val
+        # A scalar of one element is a Python value (a member of a nested Set
+        # is read from Awkward). An element of the members of every group
+        # (groups["members"][0]) holds one value per group.
+        if self.is_scalar and all(isinstance(i, int) for i in path.axis_indices()):
+            return np.asarray(val).item()
+        else:
+            return val
 
     def __set__(self, instance: Struct, value: Any) -> None:
         if not isinstance(instance, Struct):
@@ -302,7 +305,7 @@ class Array(Marker[T], SchemaConvertible):
 
         # TODO: Validate the shape against the array spec
 
-        path = instance.storage.root.append(self.name)
+        path = instance.storage.root.append(self.name, axis=False)
         instance.storage.write(
             path,
             self.entry,
@@ -451,14 +454,14 @@ class Struct(Trait, SchemaConvertible):
             )
 
         self._storage = storage
-        self._storage = storage if storage is not None else RootEngine()
+        self._storage = storage if storage is not None else RootEngine(root=STRUCT_ROOT)
 
         for k, v in kwargs.items():
             setattr(self, k, v)
 
     def is_initialized(self, field_name: str) -> bool:
         """Check if a field has been initialized in storage."""
-        path = self.storage.root.append(field_name)
+        path = self.storage.root.append(field_name, axis=False)
         return self.storage.is_initialized(path)
 
     def initialized_fields(self) -> list[str]:
@@ -485,7 +488,7 @@ class Struct(Trait, SchemaConvertible):
                 f"Cannot read Array field '{self.name}' on non-Struct instance of type {type(instance).__name__}."
             )
 
-        return type(self)(storage=instance.storage.append(self.name))
+        return type(self)(storage=instance.storage.append(self.name, axis=False))
 
     def __set__(self, instance: Optional["Struct"], value: Any) -> None:
         if not isinstance(instance, Struct):
@@ -509,7 +512,7 @@ class Struct(Trait, SchemaConvertible):
         if not isinstance(value, dtype):
             raise ValueError
 
-        target_root = instance.storage.root.append(self.name)
+        target_root = instance.storage.root.append(self.name, axis=False)
         if (
             value.storage.root == target_root
             and value.storage.root_storage is instance.storage.root_storage

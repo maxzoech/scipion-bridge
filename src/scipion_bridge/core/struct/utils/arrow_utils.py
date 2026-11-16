@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 import pyarrow as pa
 import pyarrow.compute as _pc
 
-from ..schema import Schema, ArrayEntryBase, RaggedArraySetEntry
+from ..schema import Schema, ArrayEntryBase, RaggedArraySetEntry, opens_axis
 from ..key_path import IndexType, KeyPath
 
 pc: Any = _pc
@@ -497,7 +497,7 @@ def nest_columns(
     """
     columns: Dict[str, pa.Array] = {}
     for name, entry in schema.fields.items():
-        path = root.append(name)
+        path = root.append(name, axis=opens_axis(entry))
         match entry.children:
             case None if path in leaves:
                 columns[name] = leaves[path]

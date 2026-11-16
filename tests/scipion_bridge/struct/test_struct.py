@@ -521,7 +521,7 @@ class TestStructStorageInference:
         assert len(foo.storage.writes) == 1  # type: ignore
         written_key, written_entry, written_data = foo.storage.writes[0]  # type: ignore
 
-        expected_key = KeyPath().append("pixels")
+        expected_key = KeyPath().append("pixels", axis=False)
         assert written_key == expected_key
         assert isinstance(written_entry, ArrayEntry)
         assert written_entry.dtype == np.dtype(np.float32)
@@ -532,7 +532,7 @@ class TestStructStorageInference:
     def test_storage_inference_array_read(self):
         """Verify that reading an Array attribute calls storage.read with correct KeyPath."""
         foo = self.Foo(storage=MockStorage())
-        expected_key = KeyPath().append("pixels")
+        expected_key = KeyPath().append("pixels", axis=False)
         seeded_data = np.ones((128, 128), dtype=np.float32)
         foo.storage.data[str(expected_key)] = seeded_data  # type: ignore
 
@@ -553,7 +553,7 @@ class TestStructStorageInference:
 
         assert isinstance(bar, self.Bar)
         assert isinstance(bar.storage, StorageView)
-        expected_substruct_path = KeyPath().append("bar")
+        expected_substruct_path = KeyPath().append("bar", axis=False)
         assert bar.storage.root == expected_substruct_path
         assert bar.storage.parent is foo.storage
         assert bar.storage.root_storage is foo.storage
@@ -561,7 +561,7 @@ class TestStructStorageInference:
     def test_storage_inference_substruct_field_read(self):
         """Verify that reading a field from a substruct view resolves the nested path."""
         foo = self.Foo(storage=MockStorage())
-        target_path = KeyPath().append("bar").append("data_1")
+        target_path = KeyPath().append("bar", axis=False).append("data_1", axis=False)
         foo.storage.data[str(target_path)] = 42  # type: ignore
 
         val = foo.bar.data_1
@@ -588,13 +588,17 @@ class TestStructStorageInference:
 
         # Source storage should have been read for all leaf fields
         source_read_paths = [key for key, _ in source_bar.storage.reads]  # type: ignore
-        assert KeyPath().append("data_1") in source_read_paths
-        assert KeyPath().append("data_2") in source_read_paths
+        assert KeyPath().append("data_1", axis=False) in source_read_paths
+        assert KeyPath().append("data_2", axis=False) in source_read_paths
 
         # Target storage should have written all leaf fields under the 'bar' prefix
         target_write_paths = [key for key, _, _ in target_foo.storage.writes]  # type: ignore
-        expected_target_d1 = KeyPath().append("bar").append("data_1")
-        expected_target_d2 = KeyPath().append("bar").append("data_2")
+        expected_target_d1 = (
+            KeyPath().append("bar", axis=False).append("data_1", axis=False)
+        )
+        expected_target_d2 = (
+            KeyPath().append("bar", axis=False).append("data_2", axis=False)
+        )
         assert expected_target_d1 in target_write_paths
         assert expected_target_d2 in target_write_paths
 
@@ -615,7 +619,12 @@ class TestStructStorageInference:
             mid: Level2
 
         root_struct = Level1(storage=MockStorage())
-        deep_path = KeyPath().append("mid").append("child").append("val")
+        deep_path = (
+            KeyPath()
+            .append("mid", axis=False)
+            .append("child", axis=False)
+            .append("val", axis=False)
+        )
         root_struct.storage.data[str(deep_path)] = 777  # type: ignore
 
         # Reading through 3 tiers of Structs
@@ -645,8 +654,8 @@ class TestStructStorageInference:
         # Validate that foo1 received the data under 'bar' prefix
         assert foo1.bar.data_1 == 123
         assert foo1.bar.data_2 == 456
-        assert foo1.storage.data[str(KeyPath().append("bar").append("data_1"))] == 123  # type: ignore
-        assert foo1.storage.data[str(KeyPath().append("bar").append("data_2"))] == 456  # type: ignore
+        assert foo1.storage.data[str(KeyPath().append("bar", axis=False).append("data_1", axis=False))] == 123  # type: ignore
+        assert foo1.storage.data[str(KeyPath().append("bar", axis=False).append("data_2", axis=False))] == 456  # type: ignore
 
     def test_struct_init_kwargs_write_to_storage(self):
         """Verify that passing kwargs during Struct initialization routes to storage.write."""
@@ -655,7 +664,7 @@ class TestStructStorageInference:
 
         foo = self.Foo(storage=mock_storage, pixels=sample_pixels)
 
-        expected_key = KeyPath().append("pixels")
+        expected_key = KeyPath().append("pixels", axis=False)
         assert len(mock_storage.writes) == 1
         assert mock_storage.writes[0][0] == expected_key
         assert np.array_equal(mock_storage.writes[0][2], sample_pixels)

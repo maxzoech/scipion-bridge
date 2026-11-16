@@ -113,7 +113,7 @@ def test_joint_tree_iter_set_and_struct():
 
     # 1. pixels
     path1, set_entry1, struct_entry1 = results[0]
-    assert path1 == KeyPath(root=()).append("pixels")
+    assert path1 == KeyPath(root=()).append("pixels", axis=False)
     assert isinstance(set_entry1, ArraySetEntry)
     assert isinstance(struct_entry1, ArrayEntry)
     assert set_entry1.shape == (4, 4)
@@ -121,7 +121,7 @@ def test_joint_tree_iter_set_and_struct():
 
     # 2. embeddings
     path2, set_entry2, struct_entry2 = results[1]
-    assert path2 == KeyPath(root=()).append("embeddings")
+    assert path2 == KeyPath(root=()).append("embeddings", axis=False)
     assert isinstance(set_entry2, ArraySetEntry)
     assert isinstance(struct_entry2, ArrayEntry)
     assert set_entry2.shape == (8,)
@@ -142,14 +142,14 @@ def test_joint_tree_iter_set_and_set():
     assert len(results) == 2
 
     path1, target_entry1, source_entry1 = results[0]
-    assert path1 == KeyPath(root=()).append("pixels")
+    assert path1 == KeyPath(root=()).append("pixels", axis=False)
     assert isinstance(target_entry1, ArraySetEntry)
     assert isinstance(source_entry1, ArraySetEntry)
     assert target_entry1.capacity == 10
     assert source_entry1.capacity == 5
 
     path2, target_entry2, source_entry2 = results[1]
-    assert path2 == KeyPath(root=()).append("embeddings")
+    assert path2 == KeyPath(root=()).append("embeddings", axis=False)
     assert isinstance(target_entry2, ArraySetEntry)
     assert isinstance(source_entry2, ArraySetEntry)
 
@@ -175,14 +175,16 @@ def test_joint_tree_iter_nested():
     # header.version
     assert ("header", "version") in by_path
     p_header, set_v, struct_v = by_path[("header", "version")]
-    assert p_header == KeyPath(root=()).append("header").append("version")
+    assert p_header == KeyPath(root=()).append("header", axis=False).append(
+        "version", axis=False
+    )
     assert isinstance(set_v, ArraySetEntry)
     assert isinstance(struct_v, ArrayEntry)
 
     # pixels
     assert ("pixels",) in by_path
     p_pixels, set_p, struct_p = by_path[("pixels",)]
-    assert p_pixels == KeyPath(root=()).append("pixels")
+    assert p_pixels == KeyPath(root=()).append("pixels", axis=False)
     assert isinstance(set_p, ArraySetEntry)
     assert isinstance(struct_p, ArrayEntry)
 
@@ -235,7 +237,7 @@ def test_joint_tree_iter_three_schemas():
     results = list(s1.tree_iter(s2, s3))
     assert len(results) == 1
     path, e1, e2, e3 = results[0]
-    assert path == KeyPath(root=()).append("data")
+    assert path == KeyPath(root=()).append("data", axis=False)
     assert isinstance(e1, ArrayEntry)
     assert isinstance(e2, ArrayEntry)
     assert isinstance(e3, ArraySetEntry)

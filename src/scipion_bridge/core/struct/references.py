@@ -168,7 +168,7 @@ def set_reference(obj: Stored, path: FieldKey, reference: Reference) -> None:
     reference must have as many rows as ``obj``.
     """
     engine = _engine_of(obj)
-    key = obj.storage.root.extend(KeyPath(root=tuple((n, slice(None)) for n in path)))
+    key = obj.storage.root.extend(_key_path(obj, path))
     field_key = RootEngine._decompose(key)[0]
     length = obj.storage.get_length()
     if length is not None and length != len(reference):
@@ -210,7 +210,7 @@ def prefetch(obj: Stored) -> None:
     for path, (_, state) in _reference_states(obj, engine).items():
         if state.state == "reference" and _policy.prefetch(state):
             obj.storage.read(
-                obj.storage.root.extend(_key_path(path)),
+                obj.storage.root.extend(_key_path(obj, path)),
                 _entry_of(obj, path),
             )
 
@@ -260,7 +260,7 @@ def unchanged_columns(sources: Sequence[Stored], obj: Stored) -> Tuple[FieldKey,
             row_digests(
                 np.asarray(
                     storage.read(
-                        storage.root.extend(_key_path(path)), _entry_of(obj, path)
+                        storage.root.extend(_key_path(obj, path)), _entry_of(obj, path)
                     )
                 ),
             ),
@@ -315,7 +315,7 @@ def _reference_states(
         if field_key[: len(prefix)] != prefix:
             continue
         path = field_key[len(prefix) :]
-        reference = engine.reference_at(obj.storage.root.extend(_key_path(path)))
+        reference = engine.reference_at(obj.storage.root.extend(_key_path(obj, path)))
         if reference is None:
             continue
         found[path] = (
@@ -347,15 +347,17 @@ def restore_references(obj: Stored, pickled: List[PickledReference]) -> None:
     """Restore the references of an unpickled ``obj``."""
     engine = _engine_of(obj)
     for path, reference, has_rows in pickled:
-        key = obj.storage.root.extend(_key_path(path))
+        key = obj.storage.root.extend(_key_path(obj, path))
         field_key = RootEngine._decompose(key)[0]
         rows = engine._data[field_key] if has_rows else None
         engine.set_reference(field_key, reference, rows=rows)
 
 
 # -- Helpers -------------------------------------------------------------------
-def _key_path(path: FieldKey) -> KeyPath:
-    return KeyPath(root=tuple((name, slice(None)) for name in path))
+def _key_path(obj: Stored, path: FieldKey) -> KeyPath:
+    """The path of the leaf ``path`` of ``obj``, relative to its root, with
+    the axes its fields open (see ``KeyPath``)."""
+    return next(p for p, _ in obj.schema().tree_iter() if p.path == path)
 
 
 def _entry_of(obj: Stored, path: FieldKey) -> Any:

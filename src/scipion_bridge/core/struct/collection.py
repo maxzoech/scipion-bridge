@@ -24,6 +24,7 @@ from .schema import (
     SchemaConvertible,
     SchemaEntry,
 )
+from .key_path import STRUCT_ROOT
 from .storage import _BaseStorage, RootEngine
 from .struct import Struct, leaf_columns, struct_leaf_arrays, write_struct_row
 from .set import Set
@@ -65,7 +66,7 @@ class Collection(Marker[T], SchemaConvertible):
                 )
 
         self.size = size
-        self._storage = storage if storage is not None else RootEngine()
+        self._storage = storage if storage is not None else RootEngine(root=STRUCT_ROOT)
         self._owner_cls: Optional[type] = None
 
         if items is not None:
@@ -101,7 +102,7 @@ class Collection(Marker[T], SchemaConvertible):
 
     def is_initialized(self, index: int) -> bool:
         self._check_bounds(index)
-        slot_path = self._storage.root.append(str(index))
+        slot_path = self._storage.root.append(str(index), axis=False)
         return self._storage.is_initialized(slot_path)
 
     def initialized_indices(self) -> list[int]:
@@ -186,7 +187,7 @@ class Collection(Marker[T], SchemaConvertible):
             )
 
         assert self._dtype is not None, "Collection element type is not set."
-        slot_storage = self._storage.append(str(index))
+        slot_storage = self._storage.append(str(index), axis=False)
         return self._dtype(storage=slot_storage)
 
     def __setitem__(self, index: int, value: T) -> None:
@@ -202,7 +203,7 @@ class Collection(Marker[T], SchemaConvertible):
                 f"Expected instance of {self._dtype.__name__}, got {type(value).__name__}.",
             )
 
-        slot_storage = self._storage.append(str(index))
+        slot_storage = self._storage.append(str(index), axis=False)
         if (
             value.storage.root == slot_storage.root
             and value.storage.root_storage is slot_storage.root_storage
@@ -233,7 +234,7 @@ class Collection(Marker[T], SchemaConvertible):
             return self
 
         assert self.name is not None, "Collection descriptor name is not set."
-        slot_storage = instance.storage.append(self.name)
+        slot_storage = instance.storage.append(self.name, axis=False)
         return type(self)(
             size=self.size,
             storage=slot_storage,
@@ -260,7 +261,7 @@ class Collection(Marker[T], SchemaConvertible):
             )
 
         bound: Collection[T] = self.__get__(instance, type(instance))
-        target_root = instance.storage.root.append(self.name)
+        target_root = instance.storage.root.append(self.name, axis=False)
         if (
             value._storage.root == target_root
             and value._storage.root_storage is instance.storage.root_storage
@@ -296,7 +297,9 @@ class Collection(Marker[T], SchemaConvertible):
         """
         schema = self._element_type().schema()
         slots = {
-            index: struct_leaf_arrays(self._storage.append(str(index)), schema)
+            index: struct_leaf_arrays(
+                self._storage.append(str(index), axis=False), schema
+            )
             for index in self.initialized_indices()
         }
         null_rows = {
@@ -319,7 +322,7 @@ class Collection(Marker[T], SchemaConvertible):
         columns = leaf_columns(batch, collection._element_type().schema())
         for index in range(batch.num_rows):
             write_struct_row(
-                collection._storage.append(str(index)),
+                collection._storage.append(str(index), axis=False),
                 columns,
                 row=index,
             )

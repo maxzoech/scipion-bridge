@@ -10,6 +10,7 @@ import dataclasses
 from typing import (
     Any,
     Dict,
+    Iterator,
     FrozenSet,
     Optional,
     Sequence,
@@ -34,6 +35,7 @@ from .schema import (
     SchemaEntry,
     SchemaSetEntry,
     SetEntryBase,
+    opens_axis,
 )
 from .exceptions import UninitializedFieldError
 from .storage import _BaseStorage, RootEngine
@@ -158,7 +160,7 @@ class Set(Marker[T], SchemaConvertible):
             _schema = self.schema()
             assert isinstance(_schema.dtype, type) and issubclass(_schema.dtype, Struct)
 
-            subview = instance.storage.append(self.name)
+            subview = instance.storage.append(self.name, axis=True)
             st_len = subview.get_length()
             active_capacity = st_len if st_len is not None else self.capacity
             return type(self)(storage=subview, capacity=active_capacity)
@@ -186,7 +188,7 @@ class Set(Marker[T], SchemaConvertible):
         if not isinstance(field_entry, (SchemaEntry, SchemaSetEntry)):
             raise AttributeError
 
-        target_root = instance.storage.root.append(self.name)
+        target_root = instance.storage.root.append(self.name, axis=True)
         if (
             value._storage.root == target_root
             and value._storage.root_storage is instance.storage.root_storage
@@ -241,22 +243,56 @@ class Set(Marker[T], SchemaConvertible):
 
         return cls._dtype
 
+    def _selected(self, count: int) -> Optional[int]:
+        """The capacity of a selection of ``count`` elements: none for a view
+        spanning several axes, whose elements select per outer element."""
+        return None if self._spans_axes else count
+
+    @property
+    def _spans_axes(self) -> bool:
+        """Whether the Set views the members of every element of an outer
+        Set (``groups["members"]``), which have no single length."""
+        return self._storage.root.spans_several_axes()
+
     @property
     def _active_span(self) -> Optional[int]:
-        """Return the active indexable span: fixed capacity if set, otherwise storage data length."""
-        if self._capacity is not None:
+        """Return the active indexable span: fixed capacity if set, otherwise
+        storage data length; ``None`` for a view spanning several axes."""
+        if self._spans_axes:
+            return None
+        elif self._capacity is not None:
             return self._capacity
-
-        return self._storage.get_length()
+        else:
+            return self._storage.get_length()
 
     def __bool__(self) -> bool:
         """A Set is truthy if and only if it contains populated data."""
         return len(self) > 0
 
     def __len__(self) -> int:
-        """The actual length of the set queried directly from data."""
+        """The actual length of the set queried directly from data.
+
+        Raises:
+            TypeError: For a view of the members of every element of an
+                outer Set (``groups["members"]``): each element has its own
+                number of members.
+        """
+        if self._spans_axes:
+            raise TypeError(
+                "A view of the members of every element of a Set has no single "
+                "length; index the outer Set first, e.g. len(groups[i].members).",
+            )
         st_len = self._storage.get_length()
         return st_len if st_len is not None else 0
+
+    def __iter__(self) -> Iterator[T]:
+        """The elements, in order.
+
+        Raises:
+            TypeError: For a view of the members of every element of an
+                outer Set, which has no single length (see ``__len__``).
+        """
+        return (self[i] for i in range(len(self)))
 
     def __length_hint__(self) -> int:
         """The capacity of the set if fixed; returns 0 for unsized sets (PEP 424 fast estimate)."""
@@ -407,7 +443,7 @@ class Set(Marker[T], SchemaConvertible):
                             f"Writing data of length {len(value)} exceeds capacity {self.capacity} for Set field '{field_name}'."
                         )
 
-                    path = self._storage.root.append(field_name)
+                    path = self._storage.root.append(field_name, axis=False)
                     self._storage.write(path, schema_entry, value)
 
                 elif isinstance(schema_entry, SchemaEntry):
@@ -424,7 +460,9 @@ class Set(Marker[T], SchemaConvertible):
                         source_path = value._storage.root.extend(path)
                         data = value._storage.read(source_path, source_entry)
 
-                        target_path = self._storage.root.append(field_name).extend(path)
+                        target_path = self._storage.root.append(
+                            field_name, axis=opens_axis(schema_entry)
+                        ).extend(path)
                         self._storage.write(target_path, target_entry, data)
 
                 else:
@@ -475,32 +513,32 @@ class Set(Marker[T], SchemaConvertible):
                     raise TypeError("Cannot index Set with unspecified element type.")
 
                 span = self._active_span
-                if span is None:
+                if span is None and not self._spans_axes:
                     raise IndexError("Cannot index into a Set with dynamic capacity.")
 
                 _dt = self.dtype
                 assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
                 view = self._storage.narrow_mask(key, length=span)
-                return Set[_dt](capacity=int(np.sum(key)), storage=view)
+                return Set[_dt](capacity=self._selected(int(np.sum(key))), storage=view)
 
             case _ if _is_int_sequence(key):
                 if self.dtype is None:
                     raise TypeError("Cannot index Set with unspecified element type.")
 
                 span = self._active_span
-                if span is None:
+                if span is None and not self._spans_axes:
                     raise IndexError("Cannot index into a Set with dynamic capacity.")
 
                 _dt = self.dtype
                 assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
                 view = self._storage.narrow_indices(key, length=span)
-                return Set[_dt](capacity=len(key), storage=view)
+                return Set[_dt](capacity=self._selected(len(key)), storage=view)
 
             case int(index):
                 span = self._active_span
-                if span is None:
+                if span is None and not self._spans_axes:
                     raise IndexError("Cannot index into a Set with dynamic capacity.")
 
                 _dt = self.dtype
@@ -529,17 +567,17 @@ class Set(Marker[T], SchemaConvertible):
                 entry = fields[field_name]
 
                 if isinstance(entry, ArrayEntryBase):
-                    path = self._storage.root.append(field_name)
+                    path = self._storage.root.append(field_name, axis=False)
                     return self._storage.read(path, entry)
 
                 elif isinstance(entry, SchemaEntry):
                     _dt = entry.schema.dtype
                     assert isinstance(_dt, type) and issubclass(_dt, Struct)
 
-                    return Set[_dt](
-                        capacity=self.capacity,
-                        storage=self._storage.append(field_name),
-                    )
+                    view = self._storage.append(field_name, axis=opens_axis(entry))
+                    # The members of every element have no single capacity.
+                    capacity = None if view.root.spans_several_axes() else self.capacity
+                    return Set[_dt](capacity=capacity, storage=view)
 
                 else:
                     raise NotImplementedError(

@@ -45,13 +45,36 @@ the chain:
     particles[1:3][0]                      └─ StorageView   root[1]
     particles[1:3][0].ctf                     └─ StorageView root[1].ctf
 
-Views are created with ``append(name)`` for a field and with ``narrow_index``,
-``narrow_slice``, ``narrow_indices`` and ``narrow_mask`` for a selection. The
-narrowing composes with the index already on the path, so the view always holds
-an absolute position in the root's columns: row 0 of ``particles[1:3]`` is
-``root[1]``. A boolean mask is turned into an index array
+Views are created with ``append(name, axis=...)`` for a field and with
+``narrow_index``, ``narrow_slice``, ``narrow_indices`` and ``narrow_mask`` for a
+selection. The narrowing composes with the index already on the path, so the
+view always holds an absolute position in the root's columns: row 0 of
+``particles[1:3]`` is ``root[1]``. A boolean mask is turned into an index array
 (``particles[mask]`` has the root ``root[[0, 2]]``), so the engine never sees
 masks.
+
+**Axes.** Only some components of a path open an axis of the columns: the
+root of a Set, and every nested ``Set`` field. Their index starts as
+``slice(None)``. The other components (a field of a struct, a slot of a
+``Collection``, a leaf, the root of a standalone Struct) have the index
+``None``: ``particles[1:3]["ctf"]`` is ``root[1:3].ctf``. Narrowing always
+selects along the **innermost axis** of the path, so a struct field shares the
+axis of the Set holding it: ``particles["ctf"][1:3]`` is
+``particles[1:3]["ctf"]``, ``root[1:3].ctf``. ``tree_iter`` and the accessors
+of Set, Struct and Collection set the axis of each component from the schema
+(``schema.opens_axis``: a ``SchemaSetEntry`` opens one).
+
+**Views over several axes.** In a ``Set[Class2D]``, ``classes["particles"]``
+is ``root[:].particles[:]``: the particles of every class. Narrowing it selects
+along the particles of each class, not along the classes:
+``classes["particles"][:2]`` is the first two particles of every class
+(``root[:].particles[0:2]``), and ``classes["particles"][0]`` particle 0 of
+every class. Such a view reads ragged columns and accepts batch writes, one
+value per class. It has no single length, so ``len()``, iteration and ``bool``
+raise ``TypeError``, its capacity is ``None``, and selections that need a
+length (negative indices, bounds checks) raise ``ValueError``.
+``KeyPath.spans_several_axes`` tells these views apart. Pinning the outer
+axis first (``classes[1].particles[:2]``) gives an ordinary view.
 
 ``_BaseStorage`` defines the interface. ``read``, ``write``, ``clear``,
 ``get_length`` and ``is_initialized`` are abstract. ``__contains__``
@@ -66,8 +89,11 @@ A ``KeyPath`` is a sequence of ``(name, index)`` components that starts with
 ``root``. ``RootEngine`` splits it into two parts:
 
 * the **field key**, the names without ``root``, which identifies the column;
-* the **effective index**, the indices of the components with the no-op
-  ``slice(None)`` entries removed, which selects the part of the column.
+* the **effective index**, the indices of the components that open an axis
+  (``KeyPath.axis_indices``), with trailing ``slice(None)`` entries removed.
+  The i-th index selects along the i-th axis of the column; ``_select`` applies
+  them one axis after the other, so index arrays on two axes select along
+  each axis instead of being paired by NumPy.
 
 .. list-table::
    :header-rows: 1
@@ -91,12 +117,21 @@ A ``KeyPath`` is a sequence of ``(name, index)`` components that starts with
    * - ``classes[1].particles["pixels"]``
      - ``("particles", "pixels")``
      - ``(1,)``
+   * - ``particles[1:]["ctf"][:1]["defocus_u"]``
+     - ``("ctf", "defocus_u")``
+     - ``(slice(1, 2),)``
+   * - ``classes["particles"][:2]["pixels"]``
+     - ``("particles", "pixels")``
+     - ``(slice(None), slice(0, 2))``
 
 Every leaf field of the schema is one column, stored under its field key.
 Nested structs add their field names to the key. A nested ``Set`` adds a
 dimension: in a ``Set[Class2D]``, the column ``("particles", "pixels")`` has
 one entry per class, and each entry holds the pixels of all particles of that
-class. A ``Collection`` stores each slot under its own key
+class. A column below more than one axis is written as ragged rows (one per
+class), whatever its leaf entry says: its rows have the lengths of the nested
+Sets. Allocating the columns of fixed-capacity nested Sets statically is still
+pending. A ``Collection`` stores each slot under its own key
 (``("0", "pixels")``, ``("1", "pixels")``, ...), which makes it row-wise.
 
 The type of a column follows from the **data**, not from the schema. This is

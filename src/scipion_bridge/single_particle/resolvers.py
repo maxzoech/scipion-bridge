@@ -134,16 +134,16 @@ def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackPr
         "rlnImageName": [f"{i + 1:06d}@{mrc_name}" for i in range(num_el)],
     }
 
-    if value._storage.root.append("sampling_rate") in value._storage:
+    if value._storage.root.append("sampling_rate", axis=False) in value._storage:
         df_data["rlnDetectorPixelSize"] = np.asarray(value["sampling_rate"]).flatten()
 
-    coord_root = value._storage.root.append("coordinate")
-    if coord_root.append("x") in value._storage:
+    coord_root = value._storage.root.append("coordinate", axis=False)
+    if coord_root.append("x", axis=False) in value._storage:
         df_data["rlnCoordinateX"] = np.asarray(value["coordinate"]["x"]).flatten()
-    if coord_root.append("y") in value._storage:
+    if coord_root.append("y", axis=False) in value._storage:
         df_data["rlnCoordinateY"] = np.asarray(value["coordinate"]["y"]).flatten()
 
-    ctf_root = value._storage.root.append("ctf")
+    ctf_root = value._storage.root.append("ctf", axis=False)
     ctf_export_map = {
         "defocus_u": "rlnDefocusU",
         "defocus_v": "rlnDefocusV",
@@ -153,10 +153,10 @@ def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackPr
         "fit_quality": "rlnCtfFigureOfMerit",
     }
     for field_name, star_col in ctf_export_map.items():
-        if ctf_root.append(field_name) in value._storage:
+        if ctf_root.append(field_name, axis=False) in value._storage:
             df_data[star_col] = np.asarray(value["ctf"][field_name]).flatten()
 
-    acq_root = value._storage.root.append("acquisition")
+    acq_root = value._storage.root.append("acquisition", axis=False)
     acq_export_map = {
         "magnification": "rlnMagnification",
         "voltage": "rlnVoltage",
@@ -166,7 +166,7 @@ def resolve_particle_stack_proxy(value: struct.Set[Particle]) -> ParticleStackPr
         "dose_per_frame": "rlnDosePerFrame",
     }
     for field_name, star_col in acq_export_map.items():
-        if acq_root.append(field_name) in value._storage:
+        if acq_root.append(field_name, axis=False) in value._storage:
             df_data[star_col] = np.asarray(value["acquisition"][field_name]).flatten()
 
     df = pd.DataFrame(df_data)
@@ -261,7 +261,7 @@ class resolve_particle_stack_to_particles:
         if df_optics is not None and len(df_optics) > 0:
             optics_row = df_optics.iloc[0]
             if (
-                particle_set._storage.root.append("sampling_rate")
+                particle_set._storage.root.append("sampling_rate", axis=False)
                 not in particle_set._storage
             ):
                 for col in ("rlnImagePixelSize", "rlnDetectorPixelSize"):
@@ -273,7 +273,7 @@ class resolve_particle_stack_to_particles:
                         )
                         break
 
-            acq_root = particle_set._storage.root.append("acquisition")
+            acq_root = particle_set._storage.root.append("acquisition", axis=False)
             optics_acq_map = {
                 "rlnVoltage": "voltage",
                 "rlnSphericalAberration": "spherical_aberration",
@@ -283,7 +283,8 @@ class resolve_particle_stack_to_particles:
             for star_col, acq_field in optics_acq_map.items():
                 if (
                     star_col in optics_row
-                    and acq_root.append(acq_field) not in particle_set._storage
+                    and acq_root.append(acq_field, axis=False)
+                    not in particle_set._storage
                 ):
                     particle_set["acquisition"][acq_field] = np.full(
                         n,

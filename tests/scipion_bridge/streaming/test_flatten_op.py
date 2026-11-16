@@ -74,7 +74,7 @@ def test_flatten_rejects_non_flattenable_items(item, message):
 
 def test_flatten_rejects_sets():
     # A Set is a batch of rows; its rows are not sent as separate items.
-    with pytest.raises(TypeError, match="expected an iterable"):
+    with pytest.raises(TypeError, match="does not flatten Sets"):
         _flatten(None, _make_set([1]))
 
 

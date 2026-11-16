@@ -1,39 +1,40 @@
+import numpy as np
 import pytest
 from scipion_bridge.core.struct import KeyPath
 
 
+def _bar():
+    """root.foo.bar[:]: the nested Set ``bar`` of the struct field ``foo`` of
+    a Struct, the only component with an axis."""
+    return KeyPath((("root", None),)).append("foo", axis=False).append("bar", axis=True)
+
+
+def _single(name):
+    """root.<name>[:]: a nested Set field of a Struct."""
+    return KeyPath((("root", None),)).append(name, axis=True)
+
+
 def test_basic_key_path():
 
-    key = KeyPath()
-
-    key = key.append("foo").append("bar")
+    key = _bar()
     assert key.path == ("root", "foo", "bar")
-    assert key.indices == (
-        slice(None),
-        slice(None),
-        slice(None),
-    )
+    assert key.indices == (None, None, slice(None))
 
 
 def test_narrow_by_int():
 
-    key = KeyPath()
-    key = key.append("foo").append("bar")
+    key = _bar()
 
     key_narrowed = key.narrow_index(5)
     assert key_narrowed.path == ("root", "foo", "bar")
-    assert key_narrowed.indices == (
-        slice(None),
-        slice(None),
-        5,
-    )
+    assert key_narrowed.indices == (None, None, 5)
 
     with pytest.raises(ValueError):
         key_narrowed.narrow_index(10)
 
 
 def test_narrow_slice_by_int_known_span():
-    key = KeyPath().append("foo").append("bar")
+    key = _bar()
 
     # Parent slice is [3:10] -> span of 7 items (relative indices 0..6)
     slice_key = key.narrow_slice(slice(3, 10))
@@ -52,7 +53,7 @@ def test_narrow_slice_by_int_known_span():
 
 
 def test_narrow_slice_by_int_out_of_bounds():
-    key = KeyPath().append("foo").append("bar")
+    key = _bar()
     slice_key = key.narrow_slice(slice(3, 8))  # span of 5 items (relative 0..4)
 
     # Positive index out of bounds (relative index 5 on length 5)
@@ -65,7 +66,7 @@ def test_narrow_slice_by_int_out_of_bounds():
 
 
 def test_narrow_slice_by_int_open_ended():
-    key = KeyPath().append("foo").append("bar")
+    key = _bar()
 
     # Parent slice is [4:] -> positive relative indices offset from 4
     open_key = key.narrow_slice(slice(4, None))
@@ -78,7 +79,7 @@ def test_narrow_slice_by_int_open_ended():
 
 
 def test_narrow_slice_by_int_right_anchored_stop():
-    key = KeyPath().append("foo").append("bar")
+    key = _bar()
 
     # Parent slice is [:-2] -> negative index offsets further from the end
     # index -1 inside [:-2] means the item right before -2 -> -3
@@ -93,15 +94,14 @@ def test_narrow_slice_by_int_right_anchored_stop():
 
 def test_narrow_by_slice():
 
-    key = KeyPath()
-    key = key.append("foo").append("bar")
+    key = _bar()
 
     narrowed_key = key.narrow_slice(slice(3, 10)).narrow_slice(slice(1, 10))
     assert narrowed_key.components[-1] == ("bar", slice(4, 10, 1))
 
 
 def test_narrow_by_slice_clamping_and_bounds():
-    key = KeyPath().append("foo").append("bar")
+    key = _bar()
 
     # Case 1: Within bounds -> [0:10][1:3] => [1:3]
     k1 = key.narrow_slice(slice(0, 10)).narrow_slice(slice(1, 3))
@@ -117,7 +117,7 @@ def test_narrow_by_slice_clamping_and_bounds():
 
 
 def test_narrow_by_slice_invalid_anchors():
-    key = KeyPath().append("foo").append("bar")
+    key = _bar()
 
     # Mixed-sign anchors raise ValueError without concrete sequence length
     with pytest.raises(ValueError):
@@ -129,23 +129,21 @@ def test_narrow_by_slice_invalid_anchors():
 
 
 def test_str_and_repr():
-    key = KeyPath().append("foo").append("bar")
-    assert str(key) == "root[:].foo[:].bar[:]"
-    assert repr(key) == "KeyPath('root[:].foo[:].bar[:]')"
+    key = _bar()
+    assert str(key) == "root.foo.bar[:]"
+    assert repr(key) == "KeyPath('root.foo.bar[:]')"
 
     narrowed = key.narrow_slice(slice(3, 10)).narrow_index(2)
-    assert str(narrowed) == "root[:].foo[:].bar[5]"
-    assert repr(narrowed) == "KeyPath('root[:].foo[:].bar[5]')"
+    assert str(narrowed) == "root.foo.bar[5]"
+    assert repr(narrowed) == "KeyPath('root.foo.bar[5]')"
 
     array_key = key.narrow_indices([0, 2, 5])
-    assert str(array_key) == "root[:].foo[:].bar[[0, 2, 5]]"
-    assert repr(array_key) == "KeyPath('root[:].foo[:].bar[[0, 2, 5]]')"
+    assert str(array_key) == "root.foo.bar[[0, 2, 5]]"
+    assert repr(array_key) == "KeyPath('root.foo.bar[[0, 2, 5]]')"
 
 
 def test_narrow_indices():
-    import numpy as np
-
-    key = KeyPath().append("foo")
+    key = _single("foo")
 
     # 1. On unbounded slice with length
     k1 = key.narrow_indices([0, -1, 2], length=5)
@@ -192,9 +190,7 @@ def test_narrow_indices():
 
 
 def test_narrow_mask():
-    import numpy as np
-
-    key = KeyPath().append("foo")
+    key = _single("foo")
 
     # 1. On unbounded slice with length
     k1 = key.narrow_mask([True, False, True, False, True], length=5)
@@ -235,9 +231,7 @@ def test_narrow_mask():
 
 
 def test_keypath_eq_and_hash():
-    import numpy as np
-
-    key = KeyPath().append("foo")
+    key = _single("foo")
 
     k1 = key.narrow_indices([0, 2, 4])
     k2 = key.narrow_indices(np.array([0, 2, 4]))
@@ -256,7 +250,7 @@ def test_keypath_eq_and_hash():
 
 
 def test_narrow_slice_by_int_with_length():
-    key = KeyPath().append("items")
+    key = _single("items")
 
     # Parent slice [4:] with view length 6 (e.g. underlying buffer of 10)
     open_key = key.narrow_slice(slice(4, None))
@@ -273,7 +267,7 @@ def test_narrow_slice_by_int_with_length():
 
 
 def test_narrow_by_slice_with_length_mixed_signs():
-    key = KeyPath().append("items")
+    key = _single("items")
 
     # Parent slice [4:] with view length 6
     open_key = key.narrow_slice(slice(4, None))
@@ -288,9 +282,7 @@ def test_narrow_by_slice_with_length_mixed_signs():
 
 
 def test_narrow_indices_with_length_open_slice():
-    import numpy as np
-
-    key = KeyPath().append("items")
+    key = _single("items")
 
     # Parent slice [4:] with view length 6
     open_key = key.narrow_slice(slice(4, None))
@@ -304,9 +296,7 @@ def test_narrow_indices_with_length_open_slice():
 
 
 def test_narrow_mask_with_length_open_slice():
-    import numpy as np
-
-    key = KeyPath().append("items")
+    key = _single("items")
 
     open_key = key.narrow_slice(slice(4, None))
     k = open_key.narrow_mask([True, False, True, False, False, True], length=6)
@@ -316,5 +306,69 @@ def test_narrow_mask_with_length_open_slice():
         open_key.narrow_mask([True, False], length=6)
 
 
-if __name__ == "__main__":
-    test_narrow_by_slice_invalid_anchors()
+# -- Axes --------------------------------------------------------------------
+def test_append_requires_declaring_the_axis():
+    with pytest.raises(TypeError, match="axis"):
+        KeyPath().append("foo")  # type: ignore[call-arg]
+
+
+def test_narrowing_selects_along_the_innermost_axis():
+    # The fields of a struct share the axis of the Set holding them.
+    key = KeyPath().append("ctf", axis=False).append("defocus", axis=False)
+
+    narrowed = key.narrow_slice(slice(1, 3)).narrow_index(1)
+
+    assert narrowed.indices == (2, None, None)
+    assert str(narrowed) == "root[2].ctf.defocus"
+
+
+def test_a_pinned_outer_axis_lets_a_nested_axis_be_narrowed():
+    # The members of group 1 of a Set of groups.
+    key = KeyPath().narrow_index(1).append("members", axis=True)
+
+    narrowed = key.narrow_slice(slice(0, 2))
+
+    assert narrowed.indices == (1, slice(0, 2, 1))
+
+
+def test_a_path_without_an_axis_cannot_be_narrowed():
+    struct_field = KeyPath((("root", None),)).append("ctf", axis=False)
+
+    with pytest.raises(ValueError, match="no axis"):
+        struct_field.narrow_index(0)
+
+
+@pytest.mark.parametrize(
+    "outer",
+    [slice(None), slice(0, 3, 1), np.array([2, 0])],
+    ids=["full", "slice", "positions"],
+)
+def test_a_path_over_several_free_axes_narrows_its_inner_axis(outer):
+    # The members of every selected group of a Set of groups.
+    key = KeyPath((("root", outer),)).append("members", axis=True)
+
+    narrowed = key.narrow_slice(slice(0, 1))
+
+    assert key.spans_several_axes()
+    assert narrowed.components[0] == key.components[0]
+    assert narrowed.components[-1] == ("members", slice(0, 1, 1))
+
+
+def test_a_pinned_outer_axis_spans_one_axis():
+    assert (
+        not KeyPath().narrow_index(1).append("members", axis=True).spans_several_axes()
+    )
+    assert not KeyPath().append("ctf", axis=False).spans_several_axes()
+
+
+def test_axis_indices_keep_the_axes_in_order():
+    key = (
+        KeyPath()
+        .narrow_index(4)
+        .append("ctf", axis=False)
+        .append("members", axis=True)
+        .narrow_slice(slice(1, 3))
+        .append("value", axis=False)
+    )
+
+    assert key.axis_indices() == (4, slice(1, 3, 1))

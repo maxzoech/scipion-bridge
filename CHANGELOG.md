@@ -35,6 +35,29 @@
   `backend.ray` no longer exports its actor classes, `RayResourceCoordinator`
   and the alias `configure_ray_container`.
 
+### Indexing of nested fields
+- Fixed: selecting rows of a struct field after an outer selection selects
+  rows of the Set: `s[1:]["ctf"][:1]` is one row (it was three),
+  `s[1:]["ctf"][[1, 0]]` and `s[1:]["ctf"][0]` no longer raise.
+- Fixed: assigning a Struct with a nested Set into a preallocated Set
+  (`groups[i] = Group(...)`) writes its members; it raised for more than one
+  member and silently dropped the members axis for one.
+- Fixed: a scalar of a member of a ragged nested Set
+  (`groups[1].members[0].value`) reads as a number.
+- Views over the members of every element of a Set (`groups["members"]`)
+  select along the members of each element: `groups["members"][:2]` is the
+  first two members of every group, also after a full outer slice
+  (`groups[0:]["members"][:2]`, which selected the first two groups before).
+  They read ragged columns and accept batch writes. They have no single
+  length: `len()`, iteration and `bool` raise `TypeError`, and negative
+  indices raise `ValueError`.
+- **Breaking:** `KeyPath` records which components open an axis (the root of
+  a Set and nested Set fields): `append(name, *, axis)` requires the keyword,
+  and a component without an axis has the index `None` (`IndexType` includes
+  `None`; its string omits the brackets, `root[1:3].ctf`). Narrowing selects
+  along the innermost axis; `axis_indices()` and `spans_several_axes()` are
+  new.
+
 ### Streaming
 - Long-running protocols run on a pool of executors:
   `@B.resources(..., task=B.TaskType.LONG_RUNNING, replicas=n)` spreads the
