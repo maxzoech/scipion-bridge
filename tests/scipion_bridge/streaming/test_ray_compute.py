@@ -808,6 +808,47 @@ def test_the_report_shows_where_references_are_lost(tmp_path):
     assert _wait_for_free_gpus() == CLUSTER_GPUS
 
 
+class ScoredImageItem(ImageItem):
+    score: float
+
+
+def _scored(chunk):
+    # Written into the received Set: its pixels stay references.
+    chunk["score"] = np.asarray(chunk["defocus"]) * 2
+    return {"result": chunk}
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class ImagesTyped(B.Protocol):
+    out: B.Input[B.Set[ImageItem]] = B.Input()
+
+    def outputs(self):
+        return {"result": B.Set[ScoredImageItem]}
+
+    def steps(self):
+        return self.out.chunk(4).astype(B.Set[ScoredImageItem]).map(_scored)
+
+
+def test_astype_keeps_the_references_through_every_stage(tmp_path):
+    chunks = _image_chunks(tmp_path / "stack.npy", chunks=4, size=16)
+    pipeline, collector = _phased(ImagesFirst(), ImagesTyped(), spill_threshold=2)
+    with pipeline:
+        for chunk in chunks:
+            pipeline.send(items=chunk)
+
+    results = [r["result"] for r in ray.get(collector.get.remote())]
+    assert sum(len(r) for r in results) == 64
+    scores = np.concatenate([np.asarray(r["score"]).ravel() for r in results])
+    assert sorted(scores.tolist()) == [2.0 * i for i in range(64)]
+    report = pipeline.report()
+    layer = report.layer("provenance")
+    assert "chunk(4) → astype(Set[ScoredImageItem])" in {n.title for n in report.nodes}
+    assert all(not values["computed_here"] for values in layer.nodes.values())
+    assert not any(values.get("lost") for values in layer.edges.values())
+    assert layer.warnings == ()
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
 def test_phases_start_over_with_every_stream():
     pipeline, collector = _phased(AllGpusFirst(), AllGpusSecond())
 

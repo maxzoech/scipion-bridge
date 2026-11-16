@@ -163,6 +163,46 @@ def test_pickle_roundtrip_nested_set(serializer):
     assert np.array_equal(restored["frames"]["pixels"], movies["frames"]["pixels"])
 
 
+class Member(B.Struct):
+    value: float
+
+
+class Group(B.Struct):
+    members: B.Set[Member]
+    group_id: int
+
+
+# Documented in docs/source/user_guide/known_issues.rst.
+@pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason=(
+        "A static leaf of nested Sets of different sizes is a ragged column, "
+        "which leaf_to_arrow does not export; when this passes, the bug is fixed."
+    ),
+)
+@pytest.mark.parametrize("serializer", list(_SERIALIZERS))
+def test_pickle_roundtrip_nested_sets_of_different_sizes(serializer):
+    dumps, loads = _SERIALIZERS[serializer]
+    sizes = [2, 3, 1]
+    groups = B.Set[Group](
+        [
+            Group(
+                members=B.Set[Member]([Member(value=10.0 * g + k) for k in range(n)]),
+                group_id=g,
+            )
+            for g, n in enumerate(sizes)
+        ],
+    )
+
+    restored = loads(dumps(groups))
+
+    for g, n in enumerate(sizes):
+        assert np.asarray(restored[g].members["value"]).ravel().tolist() == [
+            10.0 * g + k for k in range(n)
+        ]
+
+
 def test_pickled_slice_does_not_include_parent_storage():
     # Large enough that the fixed size of the pickled schema does not matter.
     samples = _make_samples(2500)

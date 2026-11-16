@@ -4,8 +4,8 @@ Sources and Maps
 .. currentmodule:: scipion_bridge.core.streaming
 
 Every graph starts at one or more sources, and most of its work happens in
-maps. This article covers both: how data enters a graph, and the two
-stateless operations that transform it, ``map`` and ``map_element``.
+maps. This article covers both: how data enters a graph, and the stateless
+operations that transform it, ``map``, ``map_element`` and ``astype``.
 
 .. contents:: On this page
    :local:
@@ -146,3 +146,44 @@ Options
 
 The worker pools are created on the first call in each process and reused for
 later calls, so their startup cost is paid once per process, not per batch.
+
+``astype()``
+------------
+
+.. code-block:: python
+
+    stream.astype(target)
+
+Changes the type of every item to ``target`` without copying its columns:
+a ``Set`` to a Set type (``B.Set[FlexParticle]``), a ``Struct`` to a Struct
+class. Fields are matched by name, not by class hierarchy:
+
+* fields of ``target`` that the item lacks stay uninitialized, ready to be
+  written by a later stage;
+* fields ``target`` lacks are dropped;
+* fields of both must have the same kind, dtype and shape. Values are never
+  converted; a mismatch raises ``TypeError``, as do types without a common
+  field. Collections cannot be cast yet (``NotImplementedError``).
+
+The new item shares the columns of the old one, read-only: writing a field
+through the item (``s["score"] = ...``, ``s[0] = ...``) copies or replaces
+its column, and writing in place into an array read from it raises.
+Columns that are rows of input files (for example the pixels of particles)
+stay references to the files, so a spill after the stage does not write
+them, and the provenance report shows them as references. This is the way to
+add fields to the items of a stream:
+
+.. code-block:: python
+
+    def embed(particles: B.Set[FlexParticle]) -> B.Set[FlexParticle]:
+        particles["embeddings"] = model(particles["pixels"])
+        return particles
+
+    particles.chunk(256).astype(B.Set[FlexParticle]).map(embed)
+
+Building a new Set and copying the fields into it gives the same values, but
+the copies are computed columns: their bytes are spilled and transferred.
+
+``astype`` runs inside the stage before it (here ``chunk``), or else inside
+the map after it; it costs about a millisecond per batch and no transfer of
+the item. It takes no resources of the protocol.

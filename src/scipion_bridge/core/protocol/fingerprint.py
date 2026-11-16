@@ -21,7 +21,7 @@ import cloudpickle  # type: ignore
 import numpy as np
 
 from ..streaming.node import Node
-from ..streaming.ops import MapElementOp, MapOp
+from ..streaming.ops import AsTypeOp, MapElementOp, MapOp
 
 
 @runtime_checkable
@@ -97,6 +97,8 @@ def _stage_label(node: Node) -> str:
         case MapOp(func=func) | MapElementOp(func=func):
             func_name = getattr(func, "__qualname__", type(func).__name__)
             return f"{type(node).__name__}({func_name})"
+        case AsTypeOp(target=target):
+            return f"{type(node).__name__}({target.__name__})"
         case _:
             return type(node).__name__
 

@@ -3,7 +3,8 @@ Sharp Bits
 
 This page collects behaviors that often surprise new users. Most of them
 follow from two facts: **graphs are built once and run elsewhere**, and
-**data lives in columns, not in objects**.
+**data lives in columns, not in objects**. Bugs and missing features are
+listed in :doc:`known_issues`.
 
 .. contents::
    :local:

@@ -59,6 +59,25 @@
   new.
 
 ### Streaming
+- `Op.astype(T)` changes the type of the Sets or Structs of a stream
+  without copying their columns: fields `T` adds stay uninitialized, fields
+  it lacks are dropped, and fields of both must match in kind, dtype and
+  shape. Columns are shared read-only and references to input files stay
+  references, so a spill after it does not write them. It lowers to a
+  fusable map: after `chunk` it runs inside the chunk stage
+  (`chunk(256) → astype(Set[FlexParticle])`). Casting Collections raises
+  `NotImplementedError`. The provenance warning for copied values now points
+  to it.
+- A whole-column write of the leaf of a nested Set accepts ragged data.
+
+### Documentation
+- New page *Known Issues* (`user_guide/known_issues.rst`): Sets of structs
+  with nested Sets of different sizes cannot be pickled, the capacity of
+  nested Sets is not checked on whole-column writes, Sets assigned into
+  Struct fields or Collection slots lose their references (and reports do
+  not flag it), Struct specialization is not implemented, and `astype` does
+  not cast Collections. The two bugs
+  have strict xfail tests.
 - Lowering ends with an operator-fusion pass (`core/streaming/fusion.py`):
   maps marked `IRMap(fusable=True)` (cheap, pure, without resources; only
   set by operators of the library) run inside the stage upstream of them,

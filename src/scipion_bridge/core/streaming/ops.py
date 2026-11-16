@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+from dataclasses import dataclass
 from collections.abc import Hashable, Iterable, Mapping
 from typing import (
     Any,
@@ -20,6 +21,9 @@ from typing import (
 
 from ..environment.compute import ComputeAssignment
 from ..struct import Set, concat
+from ..struct.cast import cast, check_target
+from ..struct.collection import Collection
+from ..struct.struct import Struct
 from .node import Node, LoweringContext
 from .sink import Sink
 from .sink_writer import SinkWriter, CallbackSinkWriter
@@ -142,6 +146,28 @@ class Op(Node):
                 cpu_only=cpu_only,
             )
         )
+
+    def astype(self, target: type) -> AsTypeOp:
+        """Change the type of every item to ``target`` without copying its columns.
+
+        Items are Sets (``target`` a Set type) or Structs (``target`` a Struct
+        class). Fields of ``target`` that an item lacks stay uninitialized,
+        and fields ``target`` lacks are dropped; fields of both must have the
+        same kind, dtype and shape, since values are never converted. Columns
+        are shared read-only, and rows that reference input files stay
+        references, so a spill after the stage does not write them::
+
+            particles.chunk(256).astype(B.Set[FlexParticle]).map(embed)
+
+        The operation runs inside the stage before it (here ``chunk``), or
+        else inside the map after it, so it costs no transfer of the item.
+
+        Raises:
+            TypeError: If ``target`` is not a Set type or a Struct class.
+            NotImplementedError: If ``target`` is a Collection type.
+        """
+        check_target(target)
+        return self.op(AsTypeOp(target))
 
     def chunk(self, n: int, drop_last: bool = False) -> ChunkOp:
         """Accumulate Set[T] instances into batches of target size `n`.
@@ -409,6 +435,43 @@ class MapOp(Op):
     def lower(self, ctx: LoweringContext) -> IROp:
         func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
         return IRMap(func=self.func, name=f"map({func_name})", compute=self.compute)
+
+
+@dataclass(frozen=True)
+class Cast:
+    """The function of ``astype``: casts every item to ``target``."""
+
+    target: type
+
+    def __call__(self, item: Any) -> Any:
+        match item:
+            case Set() | Struct() | Collection():
+                return cast(item, self.target)
+            case _:
+                raise TypeError(
+                    f"astype({self.target.__name__}) expected a Set or a Struct, "
+                    f"got '{type(item).__name__}'.",
+                )
+
+
+class AsTypeOp(Op):
+    """Operation node changing the type of items (``astype``).
+
+    It lowers to a fusable map, which the fusion pass runs inside a
+    neighbouring stage. It is not a ``MapOp``: protocols assign it no compute
+    resources.
+    """
+
+    def __init__(self, target: type) -> None:
+        super().__init__(upstream=None)
+        self.target = target
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        return IRMap(
+            func=Cast(self.target),
+            name=f"astype({self.target.__name__})",
+            fusable=True,
+        )
 
 
 class MapElementOp(Op):

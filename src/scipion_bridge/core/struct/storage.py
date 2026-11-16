@@ -704,7 +704,7 @@ class RootEngine(_BaseStorage):
         static = entry.is_static and len(key.axis_indices()) <= 1
         match (effective_idx, static):
             case ((), _):
-                self._write_full_column(field_key, entry, data, key)
+                self._write_full_column(field_key, entry, data, key, static)
             case (_, True):
                 self._write_indexed_static(field_key, entry, effective_idx, data, key)
             case (_, False):
@@ -739,13 +739,18 @@ class RootEngine(_BaseStorage):
         entry: ArrayEntryBase,
         data: Any,
         key: KeyPath,
+        static: bool,
     ) -> None:
-        """Replace a whole column, validating its length for Set fields."""
+        """Replace a whole column, validating its length for Set fields.
+
+        ``static`` is False for a column with rows of different shapes,
+        including the leaves of nested Sets (see ``write``).
+        """
         if isinstance(entry, SetEntryBase):
             self._check_column_length(field_key, entry, len(data), key)
 
         self._chunks.pop(field_key, None)
-        self._data[field_key] = self._allocate_buffer(data, entry, key)
+        self._data[field_key] = self._allocate_buffer(data, entry, key, static)
 
     def _check_column_length(
         self,
@@ -782,6 +787,7 @@ class RootEngine(_BaseStorage):
         data: Any,
         entry: ArrayEntryBase,
         key: KeyPath,
+        static: bool,
     ) -> Column:
         """Build the buffer of a whole column from the written data.
 
@@ -794,7 +800,7 @@ class RootEngine(_BaseStorage):
         capacity = entry.capacity if isinstance(entry, SetEntryBase) else None
 
         match data:
-            case ak.Array() if entry.is_static:
+            case ak.Array() if static:
                 raise ValueError(f"Shape mismatch for static field '{key}'.")
 
             case ak.Array() if has_numpy_layout(data):
@@ -807,10 +813,10 @@ class RootEngine(_BaseStorage):
                 return pad_to_capacity(self._empty_column(entry), capacity, entry.dtype)
 
             case list() | tuple():
-                return self._allocate_from_rows(data, entry, capacity, key)
+                return self._allocate_from_rows(data, entry, capacity, key, static)
 
             case _:
-                return self._allocate_from_array(data, entry, key)
+                return self._allocate_from_array(data, entry, key, static)
 
     @staticmethod
     def _empty_column(entry: ArrayEntryBase) -> np.ndarray:
@@ -824,6 +830,7 @@ class RootEngine(_BaseStorage):
         entry: ArrayEntryBase,
         capacity: Optional[int],
         key: KeyPath,
+        static: bool,
     ) -> Column:
         """Allocate a buffer from a list or tuple of rows."""
         stacked = stack_sequence(rows)
@@ -837,7 +844,7 @@ class RootEngine(_BaseStorage):
 
         arr = as_regular_numpy(rows, entry.dtype)
         match arr:
-            case None if entry.is_static:
+            case None if static:
                 raise ValueError(f"Shape mismatch for static field '{key}'.")
             case None:
                 return ak.Array(rows)
@@ -845,15 +852,20 @@ class RootEngine(_BaseStorage):
                 return pad_to_capacity(arr, capacity, entry.dtype)
 
     @staticmethod
-    def _allocate_from_array(data: Any, entry: ArrayEntryBase, key: KeyPath) -> Column:
+    def _allocate_from_array(
+        data: Any,
+        entry: ArrayEntryBase,
+        key: KeyPath,
+        static: bool,
+    ) -> Column:
         """Allocate a buffer from a scalar or an array."""
         arr = as_regular_numpy(data, entry.dtype)
         match arr:
-            case None if entry.is_static:
+            case None if static:
                 raise ValueError(f"Shape mismatch for static field '{key}'.")
             case None:
                 return ak.Array(data)
-            case _ if entry.is_static:
+            case _ if static:
                 return coerce_static_shape(
                     arr,
                     entry.shape,

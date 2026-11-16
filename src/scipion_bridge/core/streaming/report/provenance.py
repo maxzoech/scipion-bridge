@@ -246,8 +246,9 @@ def _lost_warning(title: str, stage: _Stage) -> str:
     if stage.unchanged:
         unchanged = ", ".join(_name(p) for p in stage.unchanged)
         warning += (
-            f" The values of {unchanged} are unchanged (copied): keeping the "
-            "columns of the input keeps the reference."
+            f" The values of {unchanged} are unchanged (copied): change the "
+            "type of the input with .astype(T) before the stage and write the "
+            "new fields into it, which keeps the reference."
         )
     return warning
 

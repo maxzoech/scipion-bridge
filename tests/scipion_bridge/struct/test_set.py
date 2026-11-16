@@ -731,6 +731,21 @@ def test_nested_set_slice_write_on_uninitialized_buffer():
     assert np.allclose(sub_frames["pixels"], slice_data)
 
 
+# Documented in docs/source/user_guide/known_issues.rst.
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Whole-column writes do not check the capacity of nested Sets; when "
+        "this passes, the bug is fixed."
+    ),
+)
+def test_a_nested_set_column_longer_than_its_capacity_is_rejected():
+    dataset = B.Set[Movie](capacity=2)
+
+    with pytest.raises(ValueError, match="capacity"):
+        dataset["frames"]["pixels"] = np.ones((2, 15, 64, 64))
+
+
 @pytest.mark.skip(reason="Pending storage engine implementation")
 def test_nested_set_unbounded_write_dimension_overflow():
     dataset = B.Set[Movie](capacity=20)

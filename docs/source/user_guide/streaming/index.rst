@@ -70,6 +70,10 @@ Operations at a glance
    * - ``map_element(func, ...)``
      - 1 → 1
      - Apply ``func`` to every *element* of every item, in parallel.
+   * - ``astype(target)``
+     - 1 → 1
+     - Change the type of every ``Set`` or ``Struct`` without copying its
+       columns; references to input files are kept.
    * - ``chunk(n, drop_last=False)``
      - N → M
      - Re-batch incoming ``Set`` items into sets of exactly ``n`` elements.

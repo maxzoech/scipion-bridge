@@ -90,7 +90,8 @@ The documentation follows the order in which most readers need it.
    </user_guide/structs/index>` to the :doc:`backends </user_guide/backends/index>`. The
    integration guide links to these pages where it needs them. The
    :doc:`/user_guide/sharp_bits` page collects behaviors that commonly
-   surprise new users.
+   surprise new users, and :doc:`/user_guide/known_issues` the bugs and gaps of
+   the current version.
 
 **Tutorials**
    :doc:`/tutorials/2d_classification` builds a complete, stateful streaming
@@ -154,6 +155,7 @@ Which path to take
    user_guide/shell_commands
    user_guide/backends/index
    user_guide/sharp_bits
+   user_guide/known_issues
 
 .. toctree::
    :maxdepth: 1

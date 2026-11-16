@@ -461,6 +461,29 @@ the ``column_states`` that every stage samples from its first items
 Sets without references skip all of this: ``_refs`` is empty, and the checks
 on it are guarded.
 
+Casting
+^^^^^^^
+
+``cast(value, T)`` (``cast.py``, internal; ``Op.astype`` is built on it)
+returns a ``T`` whose engine shares the columns of ``value``. It compares the
+two schemas field by field first: a field of both must have the same kind
+(leaf, nested Struct, nested Set, Collection of the same size), dtype and
+shape, or it raises ``TypeError``. Then, for every leaf of ``T`` that
+``value`` has initialized:
+
+* a reference column gets the same reference, narrowed to the rows of the
+  view (``references._reference_states``), with its read rows as a read-only
+  view if it was cached, and unread otherwise;
+* an owned column is read (a view for full columns and slices, a copy of
+  the selected rows for positions and masks) and adopted by a whole-column
+  ``write`` as a read-only view, as ``from_arrow`` adopts Arrow buffers.
+
+Copy-on-write (``_writable_static_buffer``) and the write path of reference
+columns then keep writes to the result from reaching ``value``. A cast costs
+about 55 µs per leaf and reads no rows of files. A whole-column write of a
+leaf below more than one axis (a nested Set) allocates a ragged column, as
+indexed writes do.
+
 Thread safety
 ^^^^^^^^^^^^^
 

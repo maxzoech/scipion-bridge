@@ -70,7 +70,8 @@ Reading the report
   ``computed_here`` the paths that arrive as references and leave as owned
   columns. Edges into such a stage are drawn red, and a warning gives the
   bytes per item a spill after it writes, and whether the values were only
-  copied (then keeping the input's columns keeps the reference). Telling
+  copied (then cast the input with ``.astype(T)`` and write the new fields
+  into it, which keeps the reference; see :doc:`sources_and_maps`). Telling
   copies apart hashes the copied columns of the first sampled items, so it
   only runs when Python runs without ``-O`` (``__debug__``). The panel
   *Key paths* lists the state of every referenced path at every stage
