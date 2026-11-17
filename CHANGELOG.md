@@ -41,7 +41,46 @@
   `identity.py`, internal). Ids are compact segments (a namespace plus a
   range or positions), follow the rows through views, `concat`, `astype`,
   row writes, `Set([...])`, Struct fields and Collection slots, and survive
-  pickling. Resolvers do not set them yet.
+  pickling.
+- Resolvers set element ids: particles of input stacks are `(stack, row)`
+  (the stack's path, size and mtime), particles of Scipion sets
+  `(table, item id)`. Particles of temporary stacks have none.
+- On Ray, every item between stages carries a deterministic 16-byte item id
+  (`core/streaming/lineage.py`): sources name items by their element ids,
+  maps by their parent, accumulators by the items since their last emission
+  and their previous emission. Rows a stage creates get element ids from the
+  item they are emitted in. Ids survive spills, phase boundaries and
+  `group_by`; `RayCompiledPipeline.received_ids()` lists the ids of a sink.
+- Run stores (`core/streaming/run_store.py`): with `run_store=FileRunStore(path)`
+  (`RayPipelineRunner`, `RayBackend`) or `--run-dir PATH`, a run records its
+  manifest (protocols and fingerprints, parameters, inputs, chunking), its
+  stages with their `stage_fp`, and a lineage record per item a stage made
+  (Parquet, written in the background every 2000 records or 30 s, and at
+  every FLUSH). Stats have a `lineage_s` column. `LineageGraph` answers
+  `ancestry(item_id)` (input files, stages) and
+  `trace_element(namespace, position)` (an input row, or the item a stage
+  created the element in).
+- A lineage viewer: `python -m scipion_bridge.core.streaming.report.lineage_view RUN_DIR`
+  serves a page browsing the run, its stages (with the share of input rows
+  their items hold), the outputs, the ancestry of every item, the members of
+  every class down to their input file and row, every item holding an
+  element, and the rows read from every input file. `LineageGraph` is
+  columnar and indexes element ids by namespace: a run of a million
+  particles (435K records, 57 MiB) loads in about 4 s and answers every page
+  in under 0.3 s (`benchmarks/bench_lineage.py`).
+- The lineage viewer takes a directory of runs, like TensorBoard's
+  `--logdir`: it lists every run below it (running ones marked, new ones
+  appear) and browses the one picked; its API is `/api/runs` and
+  `/api/run/<name>/...`.
+- The lineage viewer draws the graph of the pipeline (the runner records its
+  report in the run directory) and overlays the ancestry or descendants of an
+  item, or the items holding an element: items per stage as badges, and the
+  edges and pass-through stages (`group_by` routers, the sources of their
+  children) they went along.
+- Element ids of short runs (rows of small stacks, members of classes) are
+  stored as mixed segments, keeping the segments of a column a fraction of
+  its elements. Maps that keep the element ids of their item record
+  `inherited` instead of repeating them.
 - `Set.tag(name, discriminator)` and `Struct.tag(...)` give elements derived
   from others (e.g. augmented views) ids of their own, linked to theirs.
   `B.ids_rng(elements, salt)` returns random generators seeded from the ids,

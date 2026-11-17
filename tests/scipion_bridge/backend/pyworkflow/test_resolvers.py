@@ -19,7 +19,7 @@ from scipion_bridge.single_particle import (
     Class2D as BClass2D,
     FlexParticle as BFlexParticle,
 )
-from scipion_bridge.core.struct import UninitializedFieldError
+from scipion_bridge.core.struct import UninitializedFieldError, identity
 from scipion_bridge.backend.pyworkflow import resolvers as res
 from scipion_bridge.backend.pyworkflow.utils.resolve_graph import (
     find_pointer_class,
@@ -206,6 +206,22 @@ def test_set_of_particles_to_bridge_no_ctf_raises_on_access(tmp_path):
 
     with pytest.raises(UninitializedFieldError):
         _ = bridge[0].coordinate.x
+
+
+def _scipion_ids(obj):
+    """The Scipion item ids of the elements of ``obj``, and their namespaces."""
+    elements = identity.element_ids(obj).elements()
+    return {namespace for namespace, _ in elements}, [i for _, i in elements]
+
+
+def test_particles_of_a_set_have_its_item_ids(tmp_path):
+    sop = _make_set_of_particles(tmp_path, n=4, add_ctf=False, add_coord=False)
+
+    bridge = res.resolve_set_of_particles_to_bridge_particles(sop)
+
+    namespaces, ids = _scipion_ids(bridge)
+    assert ids == [1, 2, 3, 4]
+    assert len(namespaces) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1292,3 +1308,16 @@ def test_class2d_sqlite_table_initialization_on_resolution_and_reduction(tmp_pat
 
         assert "Class001_Classes" in tables
         assert "Class002_Classes" in tables
+
+
+def test_particles_of_classes_have_the_item_ids_of_their_class(tmp_path):
+    soc = _make_set_of_classes2d(tmp_path, n_classes=2, particles_per_class=3)
+
+    bridge = res.resolve_set_of_classes2d_to_collection_classes2d(soc)
+
+    (first, ids), (second, other_ids) = (
+        _scipion_ids(bridge[k].particles) for k in range(2)
+    )
+    # Every class is a table of its own, whose item ids may repeat.
+    assert ids == other_ids == [1, 2, 3]
+    assert first != second

@@ -1,12 +1,15 @@
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections.abc import Sized
 from enum import Enum
+import datetime
 import glob
+import importlib.metadata
 import logging
 import os
 from pathlib import Path
 import re
 import time
+import uuid
 from typing import (
     Any,
     Callable,
@@ -26,11 +29,12 @@ from ...core.environment.compute import numpy_hugepage_env
 from ...core.struct import references
 from ...core.struct.set import Set
 from ...core.typed.resolve import ComposedResolver, find_resolver
-from ...core.protocol.protocol_base import Protocol
+from ...core.protocol.protocol_base import ChainedProtocol, Protocol
 from ...core.streaming.backend import StageStats, throughput_of
 from ...core.streaming.ir import IROp
 from ...core.streaming.node import lower
 from ...core.streaming.pipeline import Pipeline
+from ...core.streaming.run_store import FileRunStore, RunStore
 from ...core.streaming.report.model import Layer, PipelineReport, report_of
 from ...core.streaming.report.render import render_dot, render_html, render_text
 from ...core.streaming.sink import Sink
@@ -63,7 +67,7 @@ def _format_stats(stats: Dict[str, StageStats]) -> str:
         f"{'stage':<40} {'in':>6} {'out':>6} {'items/s':>8} {'busy':>6} {'util':>6} "
         f"{'idle_s':>8} {'process_s':>10} {'wait_s':>8} {'blocked_s':>10} "
         f"{'emit_s':>8} {'buffered':>8} {'spilled':>8} {'fetch_s':>8} "
-        f"{'spill_s':>8}"
+        f"{'spill_s':>8} {'lineage_s':>9}"
     )
     rows = [
         f"{label:<40} {s.items_in:>6} {s.items_out:>6} "
@@ -71,7 +75,7 @@ def _format_stats(stats: Dict[str, StageStats]) -> str:
         f"{_derived(s, 'utilization', 6, 2)} "
         f"{s.idle_s:>8.2f} {s.process_s:>10.2f} {s.wait_s:>8.2f} "
         f"{s.blocked_s:>10.2f} {s.emit_s:>8.2f} {s.buffered_peak:>8} "
-        f"{s.spilled:>8} {s.fetch_s:>8.2f} {s.spill_s:>8.2f}"
+        f"{s.spilled:>8} {s.fetch_s:>8.2f} {s.spill_s:>8.2f} {s.lineage_s:>9.2f}"
         for label, s in stats.items()
     ]
     return "\n".join([header, *rows])
@@ -286,6 +290,19 @@ def _cli_parameters(config: Any, args: Any) -> Dict[str, Any]:
     }
 
 
+def _protocols_of(protocol: Protocol) -> List[Dict[str, str]]:
+    """The protocols of ``protocol`` in order, with their fingerprints."""
+    if isinstance(protocol, ChainedProtocol):
+        return [*_protocols_of(protocol.first), *_protocols_of(protocol.second)]
+    else:
+        return [
+            {
+                "protocol": type(protocol).__qualname__,
+                "fingerprint": protocol.fingerprint(),
+            },
+        ]
+
+
 def _write_report(report: PipelineReport, path: Path) -> None:
     """Write ``report`` to ``path`` as HTML and next to it as DOT."""
     path.write_text(render_html(report))
@@ -320,6 +337,7 @@ class RayPipelineRunner:
         num_loaders: int = 4,
         loader_cpus: float = 0,
         placement: PlacementMode = "managed",
+        run_store: Optional[RunStore] = None,
     ) -> None:
         """
         Every buffering option is overridden by an environment variable, see
@@ -362,6 +380,8 @@ class RayPipelineRunner:
                 every long-running protocol; ``"ray"`` lets Ray place them,
                 for clusters shared with other jobs
                 (``SCIPION_STREAM_PLACEMENT``).
+            run_store: Where the run records its manifest and the lineage
+                of its items (``--run-dir``); ``None`` records nothing.
         """
         self.protocol = protocol
         self.parameters = _validate_parameters(protocol, parameters or {})
@@ -390,6 +410,7 @@ class RayPipelineRunner:
             profile_log_level,
         )
         self.sink = sink
+        self.run_store = run_store
         self._input_resolvers: Dict[str, ComposedResolver] = {}
         self._pipeline: Optional[Pipeline] = None
         self._ir_sinks: Optional[List[IROp]] = None
@@ -428,6 +449,7 @@ class RayPipelineRunner:
             profile=self.profile,
             profile_log_level=self.profile_log_level,
             placement=self.placement,
+            run_store=self.run_store,
         )
         return Pipeline.from_ir(self.ir_sinks, backend=backend)
 
@@ -617,6 +639,12 @@ class RayPipelineRunner:
             if name not in batched
         }
 
+        if self.run_store is not None:
+            self.run_store.write_manifest(
+                self.manifest(all_inputs, env_chunk_size, env_target_bytes),
+            )
+            self.run_store.write_report(self.report().to_json())
+
         t_start = time.perf_counter()
         total_chunks = 0
         total_items = 0
@@ -669,6 +697,9 @@ class RayPipelineRunner:
             f"{throughput:.1f} items/s)",
         )
         print(_format_stats(pipeline.stats()))
+        if self.run_store is not None:
+            # The graph again, with the stats of its stages.
+            self.run_store.write_report(self.report().to_json())
         if loader_stats:
             print(_format_loader_stats(loader_stats))
         match self.profile:
@@ -676,6 +707,38 @@ class RayPipelineRunner:
                 pass
             case path:
                 print(f"Profiling trace: {path.resolve()}")
+
+    def manifest(
+        self,
+        inputs: Mapping[str, Any],
+        chunk_size: Optional[int],
+        target_bytes: Optional[int],
+    ) -> Dict[str, Any]:
+        """What a run of the pipeline on ``inputs`` computes: the manifest of
+        its run store."""
+        # The protocol is sealed once its pipeline is built.
+        _ = self.ir_sinks
+        return {
+            "run_id": uuid.uuid4().hex,
+            "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "library_version": importlib.metadata.version("scipion-bridge"),
+            "protocols": _protocols_of(self.protocol),
+            "parameters": dict(self.parameters),
+            # The values as given; the files the run read, with their size
+            # and modification time, are in the records of its sources.
+            "inputs": {
+                name: {
+                    "value": value,
+                    "count": len(value) if isinstance(value, (list, tuple)) else 1,
+                }
+                for name, value in inputs.items()
+            },
+            "chunking": {
+                "chunk_size": chunk_size,
+                "target_bytes": target_bytes,
+                "num_loaders": self.num_loaders,
+            },
+        }
 
     def close(self) -> None:
         """Terminate all actors allocated for the pipeline."""
@@ -759,6 +822,14 @@ class RayPipelineRunner:
             ),
         )
         parser.add_argument(
+            "--run-dir",
+            type=Path,
+            help=(
+                "Record the manifest of the run and the lineage of its items "
+                "in this directory, readable while the run goes."
+            ),
+        )
+        parser.add_argument(
             "--report",
             type=Path,
             help=(
@@ -808,6 +879,8 @@ class RayPipelineRunner:
             self.set_profile(args.profile)
         if args.num_loaders is not None:
             self.num_loaders = args.num_loaders
+        if args.run_dir is not None:
+            self.run_store = FileRunStore(args.run_dir)
 
         inputs = {
             name: _parse_inputs(val) if isinstance(val, list) else val

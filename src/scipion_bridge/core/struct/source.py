@@ -26,6 +26,8 @@ import numpy as np
 import xxhash
 from numpy.typing import NDArray
 
+from ..utils.hashing import item_id
+
 # The rows of a source a reference holds: a range, or absolute positions.
 RowIndex = Union[range, NDArray[np.int64]]
 
@@ -49,6 +51,25 @@ class FileId:
     def of(cls, path: Path) -> FileId:
         stat = os.stat(path)
         return cls(Path(path), stat.st_size, stat.st_mtime_ns)
+
+    @property
+    def namespace(self) -> bytes:
+        """The namespace of the element ids of the file's rows.
+
+        A file rewritten in place (another size or mtime) is another input,
+        whose rows are other elements.
+        """
+        return FileId.namespace_of(str(self.path), self.size, self.mtime_ns)
+
+    @staticmethod
+    def namespace_of(path: str, size: int, mtime_ns: int) -> bytes:
+        """The namespace of the file ``path`` (see ``namespace``)."""
+        return item_id(
+            b"file",
+            path.encode(),
+            size.to_bytes(8, "little"),
+            mtime_ns.to_bytes(16, "little"),
+        )
 
     def matches(self) -> bool:
         """Whether the file is readable here, unchanged since this id was taken."""

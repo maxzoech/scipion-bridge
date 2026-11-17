@@ -104,6 +104,78 @@ def test_other_tags_are_hashed_per_element():
     assert len(set(tagged.elements())) == 3
 
 
+def _fragments(n_stacks, rows=3):
+    """Short runs of ``n_stacks`` stacks: ``rows`` rows of each."""
+    return [IdColumn.of(bytes([k]) * 16, range(rows)) for k in range(n_stacks)]
+
+
+def _elements_of(columns):
+    return [e for column in columns for e in column.elements()]
+
+
+def test_short_runs_of_many_namespaces_are_one_mixed_segment():
+    fragments = _fragments(100)
+
+    column = IdColumn.concat(fragments)
+
+    assert len(column.segments) == 1 and column.segments[0].mixed
+    assert column.elements() == _elements_of(fragments)
+
+
+def test_long_runs_stay_positional_between_mixed_segments():
+    long_run = IdColumn.of(F, range(100))
+
+    column = IdColumn.concat([*_fragments(5), long_run, *_fragments(5)])
+
+    assert [s.mixed for s in column.segments] == [True, False, True]
+    assert column.elements()[15:115] == long_run.elements()
+
+
+def test_mixed_segments_narrow_assign_and_join():
+    fragments = _fragments(10)
+    column = IdColumn.concat(fragments)
+    elements = column.elements()
+    mask = np.arange(len(column)) % 3 == 0
+
+    assert column.narrow(mask).elements() == [e for e, m in zip(elements, mask) if m]
+    assert column.narrow(np.array([29, 0, 4])).elements() == [
+        elements[29],
+        elements[0],
+        elements[4],
+    ]
+    assert IdColumn.concat([column, column]).elements() == elements * 2
+    assigned = column.assign(slice(3, 6), IdColumn.of(G, range(3)))
+    assert assigned.elements()[3:6] == [(G, 0), (G, 1), (G, 2)]
+    assert len(assigned.segments) == 1
+
+
+def test_equal_ids_have_equal_digests_however_they_are_stored():
+    fragments = _fragments(10)
+    mixed = IdColumn.concat(fragments)
+    as_runs = IdColumn(tuple(s for f in fragments for s in f.segments))
+
+    assert mixed.digest_parts() == as_runs.digest_parts()
+
+
+def test_tags_of_mixed_segments_equal_the_tags_of_positional_ones():
+    fragments = _fragments(10)
+    values = np.arange(30) % 2
+
+    mixed = tag_column(IdColumn.concat(fragments), "view", values)
+    one_by_one = [
+        tag_column(fragment, "view", values[3 * k : 3 * k + 3])
+        for k, fragment in enumerate(fragments)
+    ]
+
+    assert mixed.elements() == _elements_of(one_by_one)
+
+
+def test_mixed_segments_survive_pickling():
+    column = IdColumn.concat(_fragments(10))
+
+    assert pickle.loads(pickle.dumps(column)).elements() == column.elements()
+
+
 # -- Ids follow the rows -------------------------------------------------------
 @pytest.mark.parametrize(
     "select, expected",

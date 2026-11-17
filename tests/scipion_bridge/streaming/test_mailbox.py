@@ -51,18 +51,18 @@ def _ref(value):
 
 async def _drain(mailbox, count):
     entries = [await mailbox.get() for _ in range(count)]
-    return [await mailbox.resolve(item) for item, _, _ in entries]
+    return [await mailbox.resolve(item) for item, _, _, _ in entries]
 
 
 def test_the_wait_of_data_items_is_recorded():
     async def scenario():
         stats = StageStats()
         mailbox = Mailbox(stats, buffer_size=None, spill=None)
-        await mailbox.put(_ref(1), 0, None)
-        await mailbox.put(_ref(2), 0, None)
+        await mailbox.put(_ref(1), 0, None, None)
+        await mailbox.put(_ref(2), 0, None, None)
         await asyncio.sleep(0.05)
         await mailbox.get()
-        await mailbox.put(FLUSH, 0, None)
+        await mailbox.put(FLUSH, 0, None, None)
         await asyncio.sleep(0.05)
         await mailbox.get()
         # FLUSH waited as well, but is not an item.
@@ -79,7 +79,7 @@ def test_items_are_fetched_in_arrival_order():
     async def scenario():
         mailbox = Mailbox(StageStats(), buffer_size=None, spill=None)
         for i in range(5):
-            await mailbox.put(_ref(i), 0, None)
+            await mailbox.put(_ref(i), 0, None, None)
         return await _drain(mailbox, 5)
 
     assert asyncio.run(scenario()) == list(range(5))
@@ -90,7 +90,7 @@ def test_put_does_not_wait_with_an_unbounded_buffer():
         stats = StageStats()
         mailbox = Mailbox(stats, buffer_size=None, spill=None)
         for i in range(100):
-            await asyncio.wait_for(mailbox.put(_ref(i), 0, None), timeout=1.0)
+            await asyncio.wait_for(mailbox.put(_ref(i), 0, None, None), timeout=1.0)
         return stats
 
     assert asyncio.run(scenario()).buffered_peak == 100
@@ -99,10 +99,10 @@ def test_put_does_not_wait_with_an_unbounded_buffer():
 def test_put_waits_for_room_at_the_buffer_size():
     async def scenario():
         mailbox = Mailbox(StageStats(), buffer_size=2, spill=None)
-        await mailbox.put(_ref(0), 0, None)
-        await mailbox.put(_ref(1), 0, None)
+        await mailbox.put(_ref(0), 0, None, None)
+        await mailbox.put(_ref(1), 0, None, None)
 
-        third = asyncio.create_task(mailbox.put(_ref(2), 0, None))
+        third = asyncio.create_task(mailbox.put(_ref(2), 0, None, None))
         await asyncio.sleep(0.01)
         blocked = not third.done()
 
@@ -111,6 +111,27 @@ def test_put_waits_for_room_at_the_buffer_size():
         return blocked, len(mailbox)
 
     assert asyncio.run(scenario()) == (True, 2)
+
+
+def test_spilled_items_keep_their_ids():
+    async def scenario():
+        mailbox = Mailbox(
+            StageStats(),
+            buffer_size=None,
+            spill=SpillPolicy(threshold=1, store=RecordingStore()),
+        )
+        for i in range(3):
+            await mailbox.put(_ref(i), 0, bytes([i]) * 16, None)
+        entries = [await mailbox.get() for _ in range(3)]
+        return [(type(item), lid) for item, _, lid, _ in entries]
+
+    entries = asyncio.run(scenario())
+
+    assert entries == [
+        (Ref, b"\x00" * 16),
+        (Spilled, b"\x01" * 16),
+        (Spilled, b"\x02" * 16),
+    ]
 
 
 def test_items_beyond_the_threshold_are_spilled_in_order():
@@ -123,8 +144,8 @@ def test_items_beyond_the_threshold_are_spilled_in_order():
             spill=SpillPolicy(threshold=2, store=store),
         )
         for i in range(5):
-            await mailbox.put(_ref(i), 0, None)
-        kinds = [type(item) for item, _, _, _ in list(mailbox._entries)]
+            await mailbox.put(_ref(i), 0, None, None)
+        kinds = [type(item) for item, _, _, _, _ in list(mailbox._entries)]
         return await _drain(mailbox, 5), kinds, store, stats
 
     values, kinds, store, stats = asyncio.run(scenario())
@@ -156,9 +177,9 @@ def test_spilled_items_are_no_longer_referenced(tmp_path):
         items = [Payload(i) for i in range(3)]
         refs = [weakref.ref(item) for item in items]
         for item in items:
-            await mailbox.put(item, 0, None)
+            await mailbox.put(item, 0, None, None)
         del items, item
-        for entry, _, _, _ in list(mailbox._entries):
+        for entry, _, _, _, _ in list(mailbox._entries):
             match entry:
                 case Spilled(task=task):
                     await task
@@ -182,11 +203,11 @@ def test_items_are_kept_in_memory_again_once_the_backlog_drains():
             buffer_size=None,
             spill=SpillPolicy(threshold=1, store=RecordingStore()),
         )
-        await mailbox.put(_ref(0), 0, None)
-        await mailbox.put(_ref(1), 0, None)
+        await mailbox.put(_ref(0), 0, None, None)
+        await mailbox.put(_ref(1), 0, None, None)
         await _drain(mailbox, 2)
-        await mailbox.put(_ref(2), 0, None)
-        return [type(item) for item, _, _, _ in list(mailbox._entries)]
+        await mailbox.put(_ref(2), 0, None, None)
+        return [type(item) for item, _, _, _, _ in list(mailbox._entries)]
 
     assert asyncio.run(scenario()) == [Ref]
 
@@ -199,9 +220,9 @@ def test_flush_is_never_spilled_and_keeps_its_barrier():
             spill=SpillPolicy(threshold=1, store=RecordingStore()),
         )
         barrier = asyncio.get_running_loop().create_future()
-        await mailbox.put(_ref(0), 0, None)
-        await mailbox.put(_ref(1), 0, None)
-        await mailbox.put(FLUSH, 1, barrier)
+        await mailbox.put(_ref(0), 0, None, None)
+        await mailbox.put(_ref(1), 0, None, None)
+        await mailbox.put(FLUSH, 1, None, barrier)
         entries = [await mailbox.get() for _ in range(3)]
         return entries, barrier
 
@@ -209,7 +230,7 @@ def test_flush_is_never_spilled_and_keeps_its_barrier():
 
     assert isinstance(entries[1][0], Spilled)
     assert isinstance(entries[2][0], FlushSignal)
-    assert entries[2][1:] == (1, barrier)
+    assert entries[2][1:] == (1, None, barrier)
 
 
 def test_failing_spill_store_fails_the_fetch():
@@ -223,8 +244,8 @@ def test_failing_spill_store_fails_the_fetch():
             buffer_size=None,
             spill=SpillPolicy(threshold=0, store=FailingStore()),
         )
-        await mailbox.put(_ref(0), 0, None)
-        item, _, _ = await mailbox.get()
+        await mailbox.put(_ref(0), 0, None, None)
+        item, _, _, _ = await mailbox.get()
         await mailbox.resolve(item)
 
     with pytest.raises(OSError, match="disk full"):
@@ -282,8 +303,8 @@ def test_spilled_items_keep_references_instead_of_their_rows(tmp_path):
             buffer_size=None,
             spill=SpillPolicy(threshold=0, store=store),
         )
-        await mailbox.put(item, 0, None)
-        entry, _, _ = await mailbox.get()
+        await mailbox.put(item, 0, None, None)
+        entry, _, _, _ = await mailbox.get()
         return await mailbox.resolve(entry), stats
 
     restored, stats = asyncio.run(scenario())

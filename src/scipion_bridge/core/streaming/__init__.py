@@ -26,9 +26,12 @@ from .ir import (
 )
 from .fusion import FusionPolicy, NoFusion
 from .keyed import share_keys
+from .lineage import ElementSegment, LineageRecord
+from .lineage_graph import Ancestry, ElementOrigin, LineageGraph
 from .node import FLUSH, FlushSignal, LoweringContext, lower
 from .ops import Op, Source
 from .pipeline import Pipeline
+from .run_store import FileRunStore, RunStore, StageInfo
 from .report.model import (
     GpuMapPanel,
     GpuOccupant,
@@ -63,6 +66,15 @@ __all__ = [
     "SpillStoreFactory",
     "PickleSpillStore",
     "pickle_spill_store",
+    # Runs and lineage
+    "RunStore",
+    "FileRunStore",
+    "StageInfo",
+    "LineageGraph",
+    "LineageRecord",
+    "ElementSegment",
+    "Ancestry",
+    "ElementOrigin",
     # Reports
     "PipelineReport",
     "ReportNode",

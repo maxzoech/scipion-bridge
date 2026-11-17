@@ -3,7 +3,12 @@
 
 import pytest
 
-from scipion_bridge.backend.ray.actors import CallTiming, account_call
+import numpy as np
+
+import scipion_bridge as B
+from scipion_bridge.backend.ray.actors import CallTiming, _with_lineage, account_call
+from scipion_bridge.core.struct import identity
+from scipion_bridge.core.struct.id_column import IdColumn
 from scipion_bridge.backend.ray.backend import visible_gpus
 from scipion_bridge.core.streaming import (
     CallbackSinkWriter,
@@ -39,6 +44,37 @@ def test_a_failed_call_is_counted_without_times():
     account_call(stats, 0.1, None)
 
     assert (stats.items_in, stats.process_s, stats.wait_s) == (1, 0.0, 0.1)
+
+
+def test_the_lineage_of_a_call_is_its_own_time():
+    stats = StageStats()
+
+    account_call(stats, 0.0, CallTiming(waited_s=0.0, execute_s=1.0, lineage_s=0.25))
+
+    assert (stats.process_s, stats.lineage_s) == (1.0, 0.25)
+
+
+class Value(B.Struct):
+    value: float
+
+
+def _values(n):
+    s = B.Set[Value](capacity=n)
+    s["value"] = np.zeros(n)
+    identity.set_ids(s, IdColumn.of(b"F" * 16, range(n)))
+    return s
+
+
+def test_calls_find_element_ids_only_when_the_pipeline_records_lineage():
+    item = _values(4)
+    timing = CallTiming(waited_s=0.0, execute_s=1.0)
+
+    assert _with_lineage(timing, False, item, item[1:3]) is timing
+    recorded = _with_lineage(timing, True, item, item[1:3])
+    assert recorded.elements and recorded.lineage_s > 0
+    assert recorded.execute_s == 1.0
+    # A map returning its item keeps its ids without comparing them.
+    assert _with_lineage(timing, True, item, item).elements is None
 
 
 # -- Derived metrics -----------------------------------------------------------

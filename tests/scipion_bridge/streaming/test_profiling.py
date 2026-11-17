@@ -285,12 +285,12 @@ def test_mailbox_records_backpressure_fetch_and_spill(tmp_path):
             spill=SpillPolicy(threshold=1, store=PickleSpillStore(tmp_path)),
             recorder=recorder,
         )
-        await mailbox.put(1, 0, None)
-        await mailbox.put(2, 0, None)
-        waiting = asyncio.create_task(mailbox.put(3, 0, None))
+        await mailbox.put(1, 0, None, None)
+        await mailbox.put(2, 0, None, None)
+        waiting = asyncio.create_task(mailbox.put(3, 0, None, None))
         await asyncio.sleep(0)
         for _ in range(3):
-            item, _, _ = await mailbox.get()
+            item, _, _, _ = await mailbox.get()
             await mailbox.resolve(item)
         await waiting
 

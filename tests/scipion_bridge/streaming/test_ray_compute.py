@@ -733,27 +733,34 @@ class ImagesSecond(B.Protocol):
 
 
 def _spill_at_the_boundary(chunks):
-    """The results, and the bytes the phase boundary spilled."""
+    """The results, the bytes the phase boundary spilled, and the ids of the
+    items the sink received."""
     pipeline, collector = _phased(
         ImagesFirst(), ImagesSecond(), buffer_size=2, max_in_flight=2, spill_threshold=2
     )
-    with pipeline:
+    try:
         for chunk in chunks:
             pipeline.send(items=chunk)
+        pipeline.flush()
+        (received,) = pipeline.compiled.received_ids().values()
+    finally:
+        pipeline.close()
     ((_, boundary),) = pipeline.report().layer("placement").edges
     results = [r["result"] for r in ray.get(collector.get.remote())]
-    return results, pipeline.stats()[boundary]
+    return results, pipeline.stats()[boundary], received
 
 
 def test_a_phase_boundary_spills_references_instead_of_images(tmp_path, monkeypatch):
     chunks = _image_chunks(tmp_path / "stack.npy", chunks=12, size=16)
     expected = [float(np.asarray(c["pixels"], dtype=np.float64).sum()) for c in chunks]
 
-    results, by_reference = _spill_at_the_boundary(chunks)
+    results, by_reference, ids = _spill_at_the_boundary(chunks)
     monkeypatch.setenv(references.SPILL_REFERENCES_ENV, "0")
-    results_as_bytes, as_bytes = _spill_at_the_boundary(chunks)
+    results_as_bytes, as_bytes, ids_as_bytes = _spill_at_the_boundary(chunks)
 
     assert results == results_as_bytes == expected
+    # The items keep their ids through the spills of the boundary.
+    assert ids == ids_as_bytes and len(set(ids)) == len(chunks)
     assert by_reference.spilled > 0 and as_bytes.spilled > 0
     # 256 KiB of images per spilled chunk stay in their file.
     per_chunk = by_reference.spill_bytes / by_reference.spilled

@@ -26,10 +26,11 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
+from ..utils.hashing import item_id
 from .id_column import IdColumn, generators, tag_column
 from .key_path import KeyPath
 from .references import Stored
-from .schema import Schema
+from .schema import Schema, SchemaSetEntry
 from .storage import FieldKey, RootEngine, _BaseStorage
 
 NESTED_IDS_MESSAGE = (
@@ -233,6 +234,32 @@ def tag(obj: Stored, name: str, discriminator: Any) -> None:
     column = element_ids(obj)
     if column is not None:
         set_ids(obj, tag_column(column, name, discriminator))
+
+
+def fill_unassigned(obj: Stored, namespace: bytes) -> None:
+    """Give the elements of ``obj`` without ids ``(namespace, row)``, and
+    those of the Sets of its fields ``(item_id(namespace, field), row)``.
+
+    Rows a stage created have no ids; the stage gives them ids when it
+    emits them, from the id of the item it emits. Elements with ids keep
+    theirs. Nested Sets below two axes (the members of every element of a
+    Set) are left as they are: they cannot hold ids.
+    """
+    engine = _engine_of(obj.storage)
+    root = obj.storage.root
+    if engine is None or len(root.axis_indices()) > 1:
+        return
+    rows = _rows(obj)
+    column = element_ids(obj)
+    if column is None or not column.assigned:
+        base = IdColumn.unassigned(rows) if column is None else column
+        index = RootEngine._compute_index(root)
+        _assign(engine, _key(root), index, base.filled(namespace), rows)
+    if isinstance(obj, Sized):
+        return
+    for name, entry in obj.schema().fields.items():
+        if isinstance(entry, SchemaSetEntry):
+            fill_unassigned(getattr(obj, name), item_id(namespace, name.encode()))
 
 
 def ids_rng(obj: Stored, salt: Union[int, str, bytes]) -> List[np.random.Generator]:

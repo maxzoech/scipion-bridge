@@ -7,12 +7,20 @@ many particles it holds. A segment is one of:
 
 - **positional**: element ``k`` is ``(namespace, positions[k])``, e.g. the rows
   of a stack (a ``range``) or Scipion item ids (an ``int64`` array);
+- **mixed**: element ``k`` is ``(namespaces[indices[k]], positions[k])``:
+  positional ids of many namespaces in one segment;
 - **explicit**: element ``k`` has the 16-byte id ``explicit[k]``, e.g. after
   tagging with hashed values;
 - **unassigned**: the elements have no id yet, e.g. rows a stage created.
 
 Views narrow a column, ``concat`` joins columns (merging adjacent runs), and
 writes of rows assign ids to positions, all without materializing the ids.
+
+Runs of positional ids shorter than ``SHORT_RUN`` are joined into mixed
+segments. Rows of small stacks (a few particles each) and the members of a
+class, selected from many chunks, would otherwise give a segment per element;
+a mixed segment stores them in three arrays instead, so the number of
+segments stays a fraction of the number of elements.
 """
 
 from __future__ import annotations
@@ -27,6 +35,8 @@ from ..utils.hashing import ID_BYTES, item_id
 
 # The positions of a positional segment.
 Positions = Union[range, NDArray[np.int64]]
+# Runs of positional ids shorter than this are joined into mixed segments.
+SHORT_RUN = 32
 # A selection of elements: an index, a slice, positions or a mask.
 Selector = Union[int, slice, NDArray[np.integer], NDArray[np.bool_]]
 
@@ -41,15 +51,22 @@ class IdSegment:
     """The ids of consecutive elements of a column.
 
     Attributes:
-        positions: The positions of a positional segment; ``range(n)`` for
-            the other kinds, which only count their elements.
+        positions: The positions of a positional or mixed segment;
+            ``range(n)`` for the other kinds, which only count their
+            elements.
         namespace: The namespace of a positional segment, else ``None``.
         explicit: The ``(n, 16)`` ids of an explicit segment, else ``None``.
+        namespaces: The ``(k, 16)`` namespaces of a mixed segment, else
+            ``None``.
+        indices: The namespace of every element of a mixed segment, as an
+            index into ``namespaces``.
     """
 
     positions: Positions
     namespace: Optional[bytes] = None
     explicit: Optional[NDArray[np.uint8]] = None
+    namespaces: Optional[NDArray[np.uint8]] = None
+    indices: Optional[NDArray[np.int32]] = None
 
     def __len__(self) -> int:
         return len(self.positions)
@@ -57,7 +74,25 @@ class IdSegment:
     @property
     def assigned(self) -> bool:
         """Whether the elements have ids."""
-        return self.namespace is not None or self.explicit is not None
+        return (
+            self.namespace is not None
+            or self.explicit is not None
+            or self.namespaces is not None
+        )
+
+    @property
+    def mixed(self) -> bool:
+        return self.namespaces is not None
+
+    def namespace_of(self) -> NDArray[np.uint8]:
+        """The ``(n, 16)`` namespace of every element of a positional or
+        mixed segment."""
+        if self.namespaces is not None and self.indices is not None:
+            return self.namespaces[self.indices]
+        else:
+            assert self.namespace is not None
+            row = np.frombuffer(self.namespace, dtype=np.uint8)
+            return np.broadcast_to(row, (len(self), ID_BYTES))
 
     def take(self, selector: Union[slice, NDArray[np.int64]]) -> IdSegment:
         """The elements ``selector`` of this segment."""
@@ -67,9 +102,13 @@ class IdSegment:
             case np.ndarray():
                 positions = np.asarray(self.positions, dtype=np.int64)[selector]
         explicit = None if self.explicit is None else self.explicit[selector]
-        if self.namespace is None:
+        if self.namespace is None and self.namespaces is None:
             positions = range(len(positions))
-        return IdSegment(positions, self.namespace, explicit)
+        if self.namespaces is not None and self.indices is not None:
+            namespaces, indices = _pruned(self.namespaces, self.indices[selector])
+            return IdSegment(positions, namespaces=namespaces, indices=indices)
+        else:
+            return IdSegment(positions, self.namespace, explicit)
 
     def ids(self) -> NDArray[np.uint8]:
         """The ``(n, 16)`` ids of the elements.
@@ -79,12 +118,11 @@ class IdSegment:
         """
         if self.explicit is not None:
             return self.explicit
-        elif self.namespace is not None:
-            namespace = self.namespace
+        elif self.namespace is not None or self.namespaces is not None:
             return np.array(
                 [
-                    np.frombuffer(element_id(namespace, int(p)), dtype=np.uint8)
-                    for p in self.positions
+                    np.frombuffer(element_id(row.tobytes(), int(p)), dtype=np.uint8)
+                    for row, p in zip(self.namespace_of(), self.positions)
                 ],
                 dtype=np.uint8,
             ).reshape(len(self), ID_BYTES)
@@ -173,6 +211,40 @@ class IdColumn:
         """The elements of ``columns``, in order; adjacent runs are joined."""
         return IdColumn(_merged([s for column in columns for s in column.segments]))
 
+    def filled(self, namespace: bytes) -> IdColumn:
+        """This column with every element without an id given
+        ``(namespace, its position in the column)``."""
+        segments: List[IdSegment] = []
+        offset = 0
+        for segment in self.segments:
+            if segment.assigned:
+                segments.append(segment)
+            else:
+                positions = range(offset, offset + len(segment))
+                segments.append(IdSegment(positions, namespace))
+            offset += len(segment)
+        return IdColumn(_merged(segments))
+
+    def digest_parts(self) -> List[bytes]:
+        """An encoding of the ids, equal for columns of equal ids, however
+        they are split into segments (O(elements), for small columns)."""
+        n = len(self)
+        kinds = np.zeros(n, dtype=np.uint8)
+        ids = np.zeros((n, ID_BYTES), dtype=np.uint8)
+        positions = np.zeros(n, dtype=np.int64)
+        offset = 0
+        for segment in self.segments:
+            span = slice(offset, offset + len(segment))
+            if segment.explicit is not None:
+                kinds[span] = 2
+                ids[span] = segment.explicit
+            elif segment.assigned:
+                kinds[span] = 1
+                ids[span] = segment.namespace_of()
+                positions[span] = segment.positions
+            offset += len(segment)
+        return [kinds.tobytes(), ids.tobytes(), positions.tobytes()]
+
     def ids(self) -> NDArray[np.uint8]:
         """The ``(n, 16)`` ids of the elements.
 
@@ -189,8 +261,11 @@ class IdColumn:
         for segment in self.segments:
             if segment.explicit is not None:
                 result.extend(bytes(row) for row in segment.explicit)
-            elif segment.namespace is not None:
-                result.extend((segment.namespace, int(p)) for p in segment.positions)
+            elif segment.assigned:
+                result.extend(
+                    (row.tobytes(), int(p))
+                    for row, p in zip(segment.namespace_of(), segment.positions)
+                )
             else:
                 result.extend([None] * len(segment))
         return result
@@ -246,6 +321,8 @@ def tag_column(column: IdColumn, name: str, discriminator: Any) -> IdColumn:
             tagged.append(segment)
         elif segment.namespace is not None and _is_integer(segment_values):
             tagged.extend(_tag_runs(segment, label, segment_values))
+        elif segment.mixed and _is_integer(segment_values):
+            tagged.append(_tag_mixed(segment, label, segment_values))
         else:
             tagged.append(
                 IdSegment(
@@ -291,6 +368,36 @@ def _tag_runs(
         for run in runs
         if len(run)
     ]
+
+
+def _tag_mixed(segment: IdSegment, label: bytes, values: NDArray[Any]) -> IdSegment:
+    """The tagged mixed segment: a namespace per namespace and value, derived
+    as for positional segments."""
+    assert segment.namespaces is not None and segment.indices is not None
+    pairs, inverse = np.unique(
+        np.stack([segment.indices.astype(np.int64), values.astype(np.int64)]),
+        axis=1,
+        return_inverse=True,
+    )
+    namespaces = np.array(
+        [
+            np.frombuffer(
+                item_id(
+                    segment.namespaces[index].tobytes(),
+                    label,
+                    int(value).to_bytes(8, "little", signed=True),
+                ),
+                dtype=np.uint8,
+            )
+            for index, value in pairs.T
+        ],
+        dtype=np.uint8,
+    ).reshape(-1, ID_BYTES)
+    return IdSegment(
+        np.asarray(segment.positions, dtype=np.int64),
+        namespaces=namespaces,
+        indices=np.asarray(inverse, dtype=np.int32).ravel(),
+    )
 
 
 def _hashed(
@@ -372,7 +479,8 @@ def _compact(positions: NDArray[np.int64]) -> Union[slice, NDArray[np.int64]]:
 
 
 def _merged(segments: Sequence[IdSegment]) -> Tuple[IdSegment, ...]:
-    """``segments`` without empty ones, adjacent runs of a kind joined."""
+    """``segments`` without empty ones, adjacent runs of a kind joined, and
+    short positional runs joined into mixed segments."""
     result: List[IdSegment] = []
     for segment in (s for s in segments if len(s)):
         joined = _joined(result[-1], segment) if result else None
@@ -380,7 +488,74 @@ def _merged(segments: Sequence[IdSegment]) -> Tuple[IdSegment, ...]:
             result.append(segment)
         else:
             result[-1] = joined
+    return _compacted(result)
+
+
+def _compacted(segments: Sequence[IdSegment]) -> Tuple[IdSegment, ...]:
+    """``segments`` with every stretch of several short positional runs and
+    mixed segments joined into one mixed segment."""
+    result: List[IdSegment] = []
+    stretch: List[IdSegment] = []
+    for segment in [*segments, None]:
+        if segment is not None and _is_fragment(segment):
+            stretch.append(segment)
+            continue
+        if len(stretch) > 1:
+            result.append(_mixed_of(stretch))
+        else:
+            result.extend(stretch)
+        stretch = []
+        if segment is not None:
+            result.append(segment)
     return tuple(result)
+
+
+def _is_fragment(segment: IdSegment) -> bool:
+    return segment.mixed or (segment.namespace is not None and len(segment) < SHORT_RUN)
+
+
+def _mixed_of(segments: Sequence[IdSegment]) -> IdSegment:
+    """One mixed segment holding the positional and mixed ``segments``."""
+    tables: List[NDArray[np.uint8]] = []
+    indices: List[NDArray[np.int64]] = []
+    offset = 0
+    for segment in segments:
+        if segment.namespaces is not None and segment.indices is not None:
+            table = segment.namespaces
+            local = segment.indices.astype(np.int64)
+        else:
+            assert segment.namespace is not None
+            table = np.frombuffer(segment.namespace, dtype=np.uint8)[None]
+            local = np.zeros(len(segment), dtype=np.int64)
+        tables.append(table)
+        indices.append(local + offset)
+        offset += len(table)
+    rows = np.ascontiguousarray(np.concatenate(tables)).view(f"V{ID_BYTES}").ravel()
+    unique, inverse = np.unique(rows, return_inverse=True)
+    namespaces, merged = _pruned(
+        np.frombuffer(unique.tobytes(), dtype=np.uint8).reshape(-1, ID_BYTES),
+        inverse.ravel()[np.concatenate(indices)],
+    )
+    return IdSegment(
+        np.concatenate([np.asarray(s.positions, dtype=np.int64) for s in segments]),
+        namespaces=namespaces,
+        indices=merged,
+    )
+
+
+def _pruned(
+    namespaces: NDArray[np.uint8],
+    indices: NDArray[np.integer],
+) -> Tuple[NDArray[np.uint8], NDArray[np.int32]]:
+    """The namespaces ``indices`` use, and the indices into them.
+
+    A view of a few elements of a mixed segment would otherwise keep the
+    namespaces of all of its elements.
+    """
+    used, remapped = np.unique(indices, return_inverse=True)
+    if len(used) == len(namespaces):
+        return namespaces, np.asarray(indices, dtype=np.int32)
+    return namespaces[used], remapped.ravel().astype(np.int32)
 
 
 def _joined(first: IdSegment, second: IdSegment) -> Optional[IdSegment]:
@@ -395,6 +570,8 @@ def _joined(first: IdSegment, second: IdSegment) -> Optional[IdSegment]:
         or first.namespace != second.namespace
         or first.explicit is not None
         or second.explicit is not None
+        or first.mixed
+        or second.mixed
     ):
         return None
     a, b = first.positions, second.positions

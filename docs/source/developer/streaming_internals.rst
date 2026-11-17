@@ -194,6 +194,81 @@ A backend must guarantee:
 Maps may run concurrently with each other and with themselves, since they are
 stateless; the order of their results must still be preserved on every edge.
 
+Item ids
+--------
+
+On Ray, every item between two stages carries a 16-byte *item id* next to
+it, never inside it: user functions do not see it. Item ids link the items of
+a run to the items they were made from (lineage), and the checkpointing of
+runs will use them to skip outputs a sink already committed. They are
+deterministic: the same inputs, received in the same order, give the same ids
+in every run. ``core/streaming/lineage.py`` derives them with one
+``LineagePolicy`` per kind of stage, pure functions tested in-process:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Stage
+     - Item id
+   * - Source
+     - ``("source", stage, digest(element ids), k)``: the item's input rows,
+       whichever loader read them; ``k`` counts earlier items with the same
+       rows, so an input sent twice gives two items. Items without element
+       ids are counted in arrival order instead.
+   * - Map
+     - ``("map", stage, parent)``, derived by the stage submitting the call
+   * - Accumulator
+     - ``("acc", stage, sorted(parents), previous, index)``: the items
+       received since its last emission, the item processed last (which may
+       have left rows in the state), and its previous emission, which chains
+       its history
+   * - Merge, sink, ``group_by`` router
+     - unchanged; a child's source keeps the id the router sent
+
+The stage is named by its label, unique in a pipeline including the children
+of a ``group_by``. Items carry their id through ``push(item, port, lid)``,
+the mailbox (a spilled item keeps its id in the entry), the outbox and the
+routes; the driver and the loaders push without an id. Sinks keep the ids
+they received (``RayCompiledPipeline.received_ids()``).
+
+Rows a stage creates have no element ids. They get ``(item_id(lid, where),
+row)`` when the stage emits them in an item with the id ``lid``
+(``fill_created``): in the actor for sources and accumulators, in the task or
+executor for maps, so a result is never fetched for it. ``where`` tells apart
+the Sets of an item, e.g. the slots of a Collection. Elements with ids, and
+nested Sets below two axes, are left as they are.
+
+With a run store (``RayBackend(run_store=...)``, ``core/streaming/run_store.py``),
+the stages that make items record a ``LineageRecord`` per item: sources for
+the items the driver and the loaders sent (with the input files their rows
+reference), accumulators for their emissions (with ``emitted_parents``), and
+the stage submitting a map call for its result (the call returns the element
+ids of the result with its timing, so the result is not fetched). Records are
+buffered per actor and appended as a Parquet part, in the background, every
+``lineage_batch`` records (2000) or 30 seconds while items arrive; at every
+FLUSH a stage writes the rest and waits for its writes before it forwards
+FLUSH, so readers see every record once ``flush()`` returns. The parts of a
+stage are written one after another, in order. The time a stage spends on
+lineage is its ``lineage_s``. A map
+whose result holds the element ids of its item, as most do, records
+``inherited`` instead of repeating them; the calls return element ids only
+when the pipeline records lineage (``FunctionTable.record_lineage``). A pipeline
+writes the ``StageInfo`` of its stages when it starts, so the children of a
+``group_by`` register theirs. ``LineageGraph`` (``lineage_graph.py``) reads
+them back for queries. It is columnar: records are rows of NumPy arrays, the
+element ids stay in the Arrow buffers they were read into, and the
+positional and mixed segments are indexed by the first 8 bytes of their
+namespaces, so finding the items holding an element reads only the segments
+of its namespace. ``report/lineage_view.py`` serves a viewer on it;
+``benchmarks/bench_lineage.py`` measures both on a run of a million
+particles.
+
+Ids depend on the order in which a stage receives items. That order can
+differ between runs where several producers meet: several loaders feeding a
+source, stages with several inputs, and the results of ``group_by`` children.
+Resuming a run will log and replay the order at these points.
+
 Adding an operation
 -------------------
 

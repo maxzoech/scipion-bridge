@@ -8,7 +8,8 @@ import starfile
 
 import scipion_bridge as B
 from scipion_bridge.backend import Container
-from scipion_bridge.core.struct import concat, references
+from scipion_bridge.core.struct import concat, identity, references
+from scipion_bridge.core.struct.source import FileId
 from scipion_bridge.single_particle import (
     Particle,
     MRCStackProxy,
@@ -842,3 +843,61 @@ def test_a_truncated_stack_fails_when_resolved(tmp_path: Path):
     B.resolve(psp, astype=B.Set[Particle], slice=slice(0, 8))
     with pytest.raises(EOFError):
         B.resolve(psp, astype=B.Set[Particle], slice=slice(0, 9))
+
+
+# -- Element ids of resolved particles (internal, core/struct/identity.py) -----
+def _element_ids(particles):
+    return identity.element_ids(particles).elements()
+
+
+def test_particles_of_a_stack_are_its_rows(tmp_path: Path):
+    data = np.zeros((10, 16, 16), dtype=np.float32)
+    psp = _write_particle_stack(tmp_path, data, image_stack=True)
+    stack = FileId.of(tmp_path / "particles.mrcs").namespace
+
+    particles = B.resolve(psp, astype=B.Set[Particle], slice=slice(2, 9, 3))
+
+    assert _element_ids(particles) == [(stack, 2), (stack, 5), (stack, 8)]
+
+
+def test_chunks_of_a_stack_join_into_its_rows(tmp_path: Path):
+    data = np.zeros((10, 16, 16), dtype=np.float32)
+    psp = _write_particle_stack(tmp_path, data, image_stack=True)
+    resolver = B.find_resolver(ParticleStackProxy, B.Set[Particle])
+    stack = FileId.of(tmp_path / "particles.mrcs").namespace
+
+    regrouped = concat(list(resolver.iter(psp, chunk_size=3)))[1:8]
+
+    column = identity.element_ids(regrouped)
+    assert len(column.segments) == 1
+    assert column.elements() == [(stack, row) for row in range(1, 8)]
+
+
+def test_xmipp_particles_skip_the_ids_of_disabled_rows(tmp_path: Path):
+    xmd_path, _ = _create_xmipp_stack(
+        tmp_path,
+        n_particles=6,
+        enabled=[1, 1, -1, 1, -1, 1],
+    )
+    stack = FileId.of(tmp_path / "micrograph_fractions.mrcs").namespace
+
+    particles = B.resolve(
+        xmd_path,
+        astype=B.Set[Particle],
+        intermediate=XmippParticleStackProxy,
+    )
+
+    assert _element_ids(particles) == [(stack, row) for row in [0, 1, 3, 5]]
+
+
+def test_particles_of_temporary_stacks_have_no_ids(tmp_path: Path):
+    data = np.zeros((4, 16, 16), dtype=np.float32)
+    original = B.resolve(
+        _write_particle_stack(tmp_path, data, image_stack=True),
+        astype=B.Set[Particle],
+    )
+    temporary = B.resolve(original, astype=ParticleStackProxy)
+
+    particles = B.resolve(temporary, astype=B.Set[Particle])
+
+    assert identity.element_ids(particles) is None

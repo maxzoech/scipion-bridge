@@ -61,7 +61,8 @@ Constructor arguments
 ``RayPipelineRunner(protocol, *, parameters=None, origin_types=None,
 intermediate_types=None, sink=None, queue_size=2, max_in_flight=None,
 buffer_size=4, spill_threshold=4, spill_store=None, profile=None,
-profile_log_level=logging.INFO, num_loaders=4, loader_cpus=0)``
+profile_log_level=logging.INFO, num_loaders=4, loader_cpus=0,
+run_store=None)``
 
 ``parameters``
    Values of the protocol's fields. Unknown names raise ``ValueError``, and so
@@ -99,6 +100,11 @@ profile_log_level=logging.INFO, num_loaders=4, loader_cpus=0)``
 ``num_loaders``, ``loader_cpus``
    The number of loader actors for an input given as a list, and the CPUs
    each one reserves; see `Loading many files`_.
+
+``run_store``
+   Where the run records its manifest and the lineage of its items, e.g.
+   ``FileRunStore(path)``; see `The lineage of a run`_. ``None`` records
+   nothing.
 
 Running
 ^^^^^^^
@@ -215,8 +221,8 @@ program description.
 
 ``bool`` fields become ``--name`` / ``--no-name``, and ``Enum`` fields accept
 the member names. A field that is not optional is a required option, even
-when it has a default. Every application also accepts ``--profile [PATH]``
-and ``--num-loaders N``.
+when it has a default. Every application also accepts ``--profile [PATH]``,
+``--num-loaders N`` and ``--run-dir PATH`` (see `The lineage of a run`_).
 
 Buffering and spilling
 ----------------------
@@ -413,6 +419,103 @@ process id. Each part of a stage's work has its own lane:
 Profiling costs one extra Ray call per map call, because a task worker sends
 its events before the task returns. Timestamps are wall-clock times, so on a
 cluster they are only as accurate as the clocks of the nodes are in sync.
+
+The lineage of a run
+--------------------
+
+With a run store, a run records what it computed and from what. Give the
+runner a directory with ``--run-dir`` (or ``run_store=FileRunStore(path)``):
+
+.. code-block:: bash
+
+    python -m foundation_models --particles particles.star ... --run-dir runs/2d_classes
+
+The directory holds:
+
+* ``manifest.json``: the run id, the library version, the protocols with
+  their fingerprints, the parameters, the inputs (with the size and
+  modification time of the input files) and the chunking;
+* ``stages/``: every stage with its label and ``stage_fp``, including the
+  children of a ``group_by``;
+* ``lineage/``: Parquet files with a record per item a stage made: its id,
+  the ids of the items it was made from, the element ids it holds, and, for
+  the items read from inputs, the input files. Every stage writes its records
+  in the background, every 2000 records or 30 seconds while items arrive, and
+  the rest at every FLUSH, so the records of a run can be read while it goes.
+
+The manifest lists the inputs as they were given; the input files the run
+read, with their size and modification time, are in the records of the
+items read from them.
+
+``LineageGraph`` answers questions from them:
+
+.. code-block:: python
+
+    from scipion_bridge.core.streaming import FileRunStore, LineageGraph
+    from scipion_bridge.core.struct import identity
+
+    graph = LineageGraph.of(FileRunStore("runs/2d_classes"))
+
+    # Where does a member of a class come from?
+    namespace, position = identity.element_ids(classes[3].particles).elements()[0]
+    origin = graph.trace_element(namespace, position)
+    origin.file, origin.row          # the input stack and the row in it, or
+    origin.created_by                # the item a stage created it in
+
+    # Which inputs and stages made an item? (Its record, e.g. among
+    # graph.records, names it by its id.)
+    ancestry = graph.ancestry(origin.created_by.item_id)
+    ancestry.files                   # the input files
+    ancestry.stages                  # the stages, with their stage_fp
+
+To browse runs, serve the directory that holds their run directories, like
+TensorBoard's ``--logdir``, and open the address it prints:
+
+.. code-block:: bash
+
+    python -m scipion_bridge.core.streaming.report.lineage_view runs/
+    # Lineage of 3 run(s) in runs/: http://127.0.0.1:8765
+
+The sidebar lists every run below the directory (a directory with a
+``manifest.json`` or a ``lineage/`` directory; the directory given may be a run
+itself), with when it was created and last wrote records; runs that wrote in
+the last minute are marked as running, and the list is read again every 30
+seconds, so new runs appear. Pick a run to browse it; links name the run, so
+they can be shared. The two runs used last stay loaded.
+
+For the run picked, the page lists the run (protocols and fingerprints, parameters, inputs), every
+stage with the items it made and the share of their elements that are rows of
+input files, and the outputs. From an output it follows the items it was made
+from, the members of every class, and for every member the input file and row
+it came from and every item that held it; from an input file, the rows the run
+read and where they went. A stage whose share of input rows drops created new
+rows where it could have kept the rows it received (views, ``astype``).
+The graph of the pipeline, drawn as ``--report`` draws it, shows the items
+every stage made; from an item it shows its ancestry or its descendants over
+the graph, and from an element the items holding it: badges count them per
+stage, and the edges they went along are highlighted, also through the
+stages that pass items on without recording them (``group_by`` routers and
+the sources of their children, drawn dashed). The stages of all children of
+a ``group_by`` are counted on its template. ``Reload`` reads the records a
+running pipeline wrote since. The viewer binds
+to ``127.0.0.1``; use ``--host`` and ``--port`` to change that, e.g. behind an
+SSH tunnel. It loads a run of a million particles (about 60 MiB of records) in
+a few seconds and answers every page in a fraction of one.
+
+A particle read from a stack is its row in the stack, wherever it moves:
+views, ``astype`` and classes built from views keep its element id. Values a
+map computes from many rows (e.g. class averages) are linked to the items
+the map received: lineage records that they were made *from these items*,
+not from which rows inside them. Records are kept per item (chunk), not per
+particle.
+
+Recording costs tens of microseconds per item and stage for a chunk of
+particles, and below a millisecond for the classes of a classification
+(``benchmarks/bench_lineage.py --recording``), mostly in the background. The
+``lineage_s`` column of the stats shows the time every stage spent on it:
+recording and writing its records, and for a map, finding the element ids of
+its results (after the call, outside the lock of its executor). The Scipion 3
+backend records no lineage.
 
 Running on a cluster
 --------------------

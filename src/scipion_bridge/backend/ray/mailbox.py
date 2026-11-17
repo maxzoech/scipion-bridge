@@ -21,17 +21,20 @@ from typing import Any, Deque, Hashable, Optional, Tuple
 
 from scipion_bridge.core.streaming.provenance import prefetch_all
 from scipion_bridge.core.streaming.backend import StageStats
+from scipion_bridge.core.streaming.lineage import ItemId
 from scipion_bridge.core.streaming.node import FlushSignal
 from scipion_bridge.core.streaming.spill import SpillStore
 
 from .profiling import NullRecorder, Recorder
 
 _Barrier = asyncio.Future[None]
-# A waiting item, the port it arrived on and, for a FLUSH, its barrier.
-MailboxEntry = Tuple[Any, int, Optional[_Barrier]]
+# A waiting item, the port it arrived on, its id (see ``lineage.py``) and,
+# for a FLUSH, its barrier. The id stays in the entry when the item is
+# spilled.
+MailboxEntry = Tuple[Any, int, Optional[ItemId], Optional[_Barrier]]
 # An entry as buffered, with the time it was buffered (a tuple: an object per
 # item would cost more than the measurement).
-_Buffered = Tuple[Any, int, Optional[_Barrier], float]
+_Buffered = Tuple[Any, int, Optional[ItemId], Optional[_Barrier], float]
 
 
 @dataclass(frozen=True)
@@ -99,8 +102,14 @@ class Mailbox:
     def __len__(self) -> int:
         return len(self._entries)
 
-    async def put(self, item: Any, port: int, barrier: Optional[_Barrier]) -> None:
-        """Buffer an item, waiting only while the mailbox is full."""
+    async def put(
+        self,
+        item: Any,
+        port: int,
+        lid: Optional[ItemId],
+        barrier: Optional[_Barrier],
+    ) -> None:
+        """Buffer an item with its id, waiting only while the mailbox is full."""
         async with self._changed:
             if not self._has_room():
                 with self._recorder.span(
@@ -111,7 +120,7 @@ class Mailbox:
                 ):
                     await self._changed.wait_for(self._has_room)
             self._entries.append(
-                (self._admit(item), port, barrier, time.perf_counter()),
+                (self._admit(item), port, lid, barrier, time.perf_counter()),
             )
             self._stats.buffered_peak = max(
                 self._stats.buffered_peak,
@@ -127,7 +136,7 @@ class Mailbox:
         """
         async with self._changed:
             await self._changed.wait_for(lambda: bool(self._entries))
-            item, port, barrier, buffered_at = self._entries.popleft()
+            item, port, lid, barrier, buffered_at = self._entries.popleft()
             if not isinstance(item, (Spilled, FlushSignal)):
                 self._in_memory -= 1
             if not isinstance(item, FlushSignal):
@@ -135,7 +144,7 @@ class Mailbox:
                 self._stats.wait_s += waited
                 self._stats.wait_max_s = max(self._stats.wait_max_s, waited)
             self._changed.notify_all()
-            return item, port, barrier
+            return item, port, lid, barrier
 
     async def resolve(self, item: Any) -> Any:
         """The item of an entry taken by ``get``, read from where it waited."""

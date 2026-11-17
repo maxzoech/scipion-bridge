@@ -72,6 +72,7 @@ from scipion_bridge.core.streaming.ir import (
 )
 from scipion_bridge.core.streaming.node import FLUSH
 from scipion_bridge.core.streaming.provenance import StageSamples
+from scipion_bridge.core.streaming.run_store import RunStore, StageInfo
 from scipion_bridge.core.streaming.report.model import (
     Layer,
     PipelineReport,
@@ -537,6 +538,25 @@ class RayCompiledPipeline(CompiledPipeline):
                 for label, samples in stage.items()
             }
 
+    def received_ids(self) -> Dict[str, List[bytes]]:
+        """The ids of the items every sink wrote so far, in order, by label.
+
+        Item ids are internal (see ``core/streaming/lineage.py``); the
+        checkpointing of a run will commit them. Empty before the pipeline
+        has started.
+        """
+        if self._runtime is None:
+            return {}
+        else:
+            sinks = {
+                label: actor
+                for label, (node, actor) in self._runtime.stages.items()
+                if isinstance(node, IRSink)
+            }
+            return dict(
+                zip(sinks, ray.get([a.received_ids.remote() for a in sinks.values()])),
+            )
+
     def _runtime_stats(self, runtime: _Runtime) -> Dict[str, StageStats]:
         hosts = runtime.hosts
         stage_stats = dict(
@@ -669,6 +689,8 @@ class RayBackend(StreamingBackendProvider):
         ephemeral_idle_s: float = DEFAULT_EPHEMERAL_IDLE_S,
         pools: Optional[Mapping[str, "_Pool"]] = None,
         placement: PlacementMode = "managed",
+        run_store: Optional[RunStore] = None,
+        lineage_batch: int = 2000,
     ):
         """
         Args:
@@ -719,6 +741,12 @@ class RayBackend(StreamingBackendProvider):
                 placement planner gives every long-running pool, in a Ray
                 placement group, while the pool holds them. ``"ray"`` lets
                 Ray place the executors, for clusters shared with other jobs.
+            run_store: Where the compiled pipelines record their stages and
+                the lineage of the items they make (see ``run_store.py``);
+                ``None`` records nothing.
+            lineage_batch: Lineage records a stage writes to the run store
+                at once. Stages also write the records they hold every 30
+                seconds while items arrive, and at every FLUSH.
         """
         if queue_size <= 0:
             raise ValueError(f"Queue size must be positive, got {queue_size}.")
@@ -732,6 +760,7 @@ class RayBackend(StreamingBackendProvider):
             "spill_threshold": spill_threshold,
             "group_by_workers": group_by_workers,
             "ephemeral_idle_s": ephemeral_idle_s,
+            "lineage_batch": lineage_batch,
         }.items():
             if value is not None and value <= 0:
                 raise ValueError(f"{option} must be positive, got {value}.")
@@ -753,6 +782,8 @@ class RayBackend(StreamingBackendProvider):
         self.ephemeral_idle_s = ephemeral_idle_s
         self.pools = pools
         self.placement: PlacementMode = placement
+        self.run_store = run_store
+        self.lineage_batch = lineage_batch
         # The driver imported NumPy before; the workers get the environment.
         configure_numpy_hugepages()
 
@@ -898,6 +929,7 @@ class RayBackend(StreamingBackendProvider):
                     if isinstance(compute := node.compute, ComputeAssignment)
                     and compute.prepare is not None
                 },
+                record_lineage=self.run_store is not None,
             ),
         )
         if plan.pools is None:
@@ -932,7 +964,17 @@ class RayBackend(StreamingBackendProvider):
             buffer_size=self.buffer_size,
             spill=plan.spill,
             profile=profile,
+            run_store=self.run_store,
+            lineage_batch=self.lineage_batch,
         )
+        if self.run_store is not None:
+            self.run_store.write_stages(
+                plan.pipeline_id,
+                [
+                    StageInfo(labels[node], type(node).__name__, node.stage_fp)
+                    for node in plan.nodes
+                ],
+            )
         boundary_config = dataclasses.replace(
             config,
             buffer_size=None,
@@ -1155,6 +1197,8 @@ class RayBackend(StreamingBackendProvider):
             ephemeral_idle_s=self.ephemeral_idle_s,
             pools=pools,
             placement=self.placement,
+            run_store=config.run_store,
+            lineage_batch=config.lineage_batch,
         )
 
     def _group_by_workers(self, workers: GroupByWorkers) -> Optional[int]:
@@ -1469,6 +1513,7 @@ def _stats_of(
             spill_s=stage_stats.spill_s,
             spill_bytes=stage_stats.spill_bytes,
             reread_s=stage_stats.reread_s,
+            lineage_s=map_stats.lineage_s + stage_stats.lineage_s,
             fetch_s=stage_stats.fetch_s,
             wait_s=map_stats.wait_s + stage_stats.wait_s,
             wait_max_s=max(map_stats.wait_max_s, stage_stats.wait_max_s),

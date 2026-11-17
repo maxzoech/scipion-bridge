@@ -30,6 +30,7 @@ from typing import (
 import abc
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import threading
 import time
@@ -54,6 +55,21 @@ from scipion_bridge.core.streaming.ir import (
     clone_ir,
 )
 from scipion_bridge.core.streaming.keyed import share_keys
+from scipion_bridge.core.streaming.lineage import (
+    AccumulatorLineage,
+    ElementSegment,
+    ItemId,
+    LineagePolicy,
+    LineageRecord,
+    PassThrough,
+    SourceLineage,
+    call_elements,
+    element_segments,
+    fill_created,
+    input_files,
+    map_id,
+)
+from scipion_bridge.core.streaming.run_store import RunStore
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.provenance import ProvenanceSampler, StageSamples
 from scipion_bridge.core.streaming.sink_writer import SinkWriter
@@ -68,16 +84,20 @@ from .worker_env import configure_worker_env
 logger = logging.getLogger(__name__)
 
 _Barrier = asyncio.Future[None]
-_InboxEntry = Tuple[Any, int, Optional[_Barrier]]
-# An item ready to be pushed to a downstream stage: (actor, port, item).
-_Delivery = Tuple[Any, int, Any]
+# A received item, the port it arrived on, its id and, for a FLUSH, its
+# barrier.
+_InboxEntry = Tuple[Any, int, Optional[ItemId], Optional[_Barrier]]
+# An item ready to be pushed to a downstream stage: (actor, port, item, id).
+_Delivery = Tuple[Any, int, Any, Optional[ItemId]]
 
 
 @dataclass(frozen=True)
 class _EmitItem:
-    """An item a stage computed, waiting in its outbox to be routed."""
+    """An item a stage computed, with its id, waiting in its outbox to be
+    routed."""
 
     item: Any
+    lid: ItemId
 
 
 @dataclass(frozen=True)
@@ -159,6 +179,10 @@ class _Apply:
 _Route = Union[_Push, _Apply]
 
 
+# Seconds a stage keeps lineage records at most before it writes them, while
+# items arrive; so that a run store shows the lineage of a running pipeline.
+_LINEAGE_INTERVAL_S = 30.0
+
 # Items on the routes out of a stage at once, by default. An item holds its
 # slot through every map on the route until it is delivered, so the slots
 # must cover a slow map (e.g. CPU post-processing) behind a fast one (e.g. a
@@ -199,6 +223,10 @@ class _StageConfig:
     buffer_size: Optional[int]
     spill: Optional[_SpillConfig]
     profile: Optional[ProfileConfig]
+    # Where the stages record the lineage of the items they make.
+    run_store: Optional[RunStore] = None
+    # Lineage records a stage writes to the run store at once.
+    lineage_batch: int = 2000
 
 
 def _fail(barriers: List[_Barrier], error: BaseException) -> None:
@@ -229,13 +257,20 @@ def _transport(item: Any) -> Any:
             return item
 
 
-async def _deliver(handle: Any, item: Any, port: int) -> None:
-    """Push ``item`` into the stage of ``handle`` on ``port``.
+async def _deliver(
+    handle: Any,
+    item: Any,
+    port: int,
+    lid: Optional[ItemId] = None,
+) -> None:
+    """Push ``item``, whose id is ``lid``, into the stage of ``handle`` on
+    ``port``.
 
-    Returns once the item is buffered by the stage, or for FLUSH once the
-    flush has propagated through the stage and its downstream.
+    Returns once the item is buffered by the stage, or for FLUSH (which has
+    no id) once the flush has propagated through the stage and its
+    downstream.
     """
-    await handle.push.remote(_transport(item), port)
+    await handle.push.remote(_transport(item), port, lid)
 
 
 class _PipelinedStage(abc.ABC):
@@ -269,6 +304,11 @@ class _PipelinedStage(abc.ABC):
     sending stage among the upstream stages of the receiver. Stages with
     several inputs use it to tell their inputs apart.
 
+    Each item also travels with its id (see ``lineage.py``), which the
+    stage's ``LineagePolicy`` derives the ids of its emissions from. Rows the
+    stage created get element ids from the ids of the items they are emitted
+    in.
+
     A failure in a stage or downstream is stored and raised by every
     subsequent ``push``, so it propagates upstream to the driver. The failing
     stage also aborts the sources of the pipeline, so the driver's next
@@ -293,6 +333,15 @@ class _PipelinedStage(abc.ABC):
         self._stats = StageStats(capacity=1)
         self._provenance = ProvenanceSampler()
         self._label = label
+        self._lineage = self._lineage_policy(label)
+        self._run_store = config.run_store
+        # Lineage records not written yet; they are written in batches of
+        # ``lineage_batch``, at least every ``_LINEAGE_INTERVAL_S`` while
+        # items arrive, and at every FLUSH.
+        self._records: List[LineageRecord] = []
+        self._lineage_batch = config.lineage_batch
+        self._last_lineage_write = time.monotonic()
+        self._lineage_writes: Optional[asyncio.Task[None]] = None
         self._recorder = make_recorder(config.profile, label)
         self._mailbox = Mailbox(
             self._stats,
@@ -412,22 +461,36 @@ class _PipelinedStage(abc.ABC):
         _fail(self._pending_flushes, error)
         self._pending_flushes = []
 
-    async def push(self, item: Any, port: int = 0) -> None:
-        """Buffer an item; for FLUSH, wait until the pipeline has drained."""
+    async def push(
+        self,
+        item: Any,
+        port: int = 0,
+        lid: Optional[ItemId] = None,
+    ) -> None:
+        """Buffer an item; for FLUSH, wait until the pipeline has drained.
+
+        ``lid`` is the id of the item; the driver and the loaders push
+        items without one into sources, which derive it.
+        """
         if self._error is not None:
             raise self._error
 
         match item:
             case FlushSignal():
                 done: _Barrier = asyncio.get_running_loop().create_future()
-                await self._mailbox.put(item, port, done)
+                await self._mailbox.put(item, port, None, done)
                 await done
             case _:
-                await self._mailbox.put(item, port, None)
+                await self._mailbox.put(item, port, lid, None)
+
+    def _lineage_policy(self, label: str) -> LineagePolicy:
+        """How the stage derives the ids of the items it emits."""
+        return PassThrough(label)
 
     @abc.abstractmethod
-    async def process(self, item: Any, port: int) -> List[Any]:
-        """Process an item arriving on ``port`` and return the items to emit."""
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
+        """Process an item arriving on ``port`` with the id ``lid`` and return
+        the items to emit."""
         ...
 
     async def on_flush(self) -> List[Any]:
@@ -436,7 +499,7 @@ class _PipelinedStage(abc.ABC):
 
     async def _run_fetch(self) -> None:
         while True:
-            entry, port, done = await self._mailbox.get()
+            entry, port, lid, done = await self._mailbox.get()
             try:
                 item = await self._mailbox.resolve(entry)
             except Exception as error:
@@ -444,12 +507,12 @@ class _PipelinedStage(abc.ABC):
                 _fail([] if done is None else [done], error)
                 continue
 
-            await self._inbox.put((item, port, done))
+            await self._inbox.put((item, port, lid, done))
 
     async def _run_compute(self) -> None:
         while True:
             t_wait = time.perf_counter()
-            item, port, done = await self._inbox.get()
+            item, port, lid, done = await self._inbox.get()
             t_start = time.perf_counter()
             self._stats.idle_s += t_start - t_wait
 
@@ -486,7 +549,7 @@ class _PipelinedStage(abc.ABC):
                 self._provenance.receive(item)
             try:
                 with span:
-                    emissions = await self._compute(item, port)
+                    emissions = await self._compute(item, port, lid)
             except Exception as error:
                 self._set_error(error)
                 _fail(barriers, error)
@@ -498,23 +561,126 @@ class _PipelinedStage(abc.ABC):
                 self._stats.last_done_t = time.time()
             self._provenance.emit(
                 None if isinstance(item, FlushSignal) else item,
-                emissions,
+                [out_item for out_item, _ in emissions],
             )
 
             with self._recorder.span("blocked", "compute", items=len(emissions)):
-                for out_item in emissions:
-                    await self._outbox.put(_EmitItem(out_item))
+                for out_item, out_lid in emissions:
+                    await self._outbox.put(_EmitItem(out_item, out_lid))
                 if barriers:
                     await self._outbox.put(_FlushBarrier(barriers))
             self._stats.blocked_s += time.perf_counter() - t_processed
 
-    async def _compute(self, item: Any, port: int) -> List[Any]:
+    async def _compute(
+        self,
+        item: Any,
+        port: int,
+        lid: Optional[ItemId],
+    ) -> List[Tuple[Any, ItemId]]:
+        """The items the stage emits for ``item``, with their ids; rows they
+        created get element ids."""
         match item:
             case FlushSignal():
-                return await self.on_flush()
+                emissions = await self.on_flush()
+                ids = self._lineage.flush(len(emissions))
 
             case _:
-                return await self.process(item, port)
+                received = self._lineage.receive(item, lid)
+                if lid is None:
+                    self._record_source(item, received)
+                emissions = await self.process(item, port, received)
+                ids = self._lineage.emit(received, len(emissions))
+
+        for emission, emission_id in zip(emissions, ids):
+            fill_created(emission, emission_id)
+        if self._lineage.kind == "accumulate" and self._run_store is not None:
+            t_start = time.perf_counter()
+            for emission, emission_id in zip(emissions, ids):
+                self._record(
+                    emission_id,
+                    "accumulate",
+                    self._lineage.emitted_parents,
+                    element_segments(emission),
+                )
+            self._stats.lineage_s += time.perf_counter() - t_start
+        return list(zip(emissions, ids))
+
+    def _record_source(self, item: Any, lid: ItemId) -> None:
+        """Record an item the driver or a loader sent into this source."""
+        if self._run_store is not None:
+            t_start = time.perf_counter()
+            fill_created(item, lid)
+            self._keep(
+                LineageRecord(
+                    lid,
+                    self._label,
+                    "source",
+                    (),
+                    element_segments(item),
+                    input_files(item),
+                ),
+            )
+            self._stats.lineage_s += time.perf_counter() - t_start
+
+    def _record(
+        self,
+        lid: ItemId,
+        kind: str,
+        parents: Tuple[ItemId, ...],
+        elements: Tuple[ElementSegment, ...],
+        stage: Optional[str] = None,
+        inherited: bool = False,
+    ) -> None:
+        """Record an item this stage, or the map ``stage`` on its routes, made."""
+        if self._run_store is not None:
+            self._keep(
+                LineageRecord(
+                    lid,
+                    stage or self._label,
+                    kind,
+                    parents,
+                    elements,
+                    inherited=inherited,
+                ),
+            )
+
+    def _keep(self, record: LineageRecord) -> None:
+        """Buffer a record; write the buffer once it is full or old enough."""
+        self._records.append(record)
+        if (
+            len(self._records) >= self._lineage_batch
+            or time.monotonic() - self._last_lineage_write >= _LINEAGE_INTERVAL_S
+        ):
+            self._start_lineage_write()
+
+    def _start_lineage_write(self) -> None:
+        """Write the buffered records in the background, after the writes
+        started before, so that the parts of the stage keep their order."""
+        records, self._records = self._records, []
+        self._last_lineage_write = time.monotonic()
+        self._lineage_writes = asyncio.create_task(
+            self._append_lineage(self._lineage_writes, records),
+        )
+
+    async def _append_lineage(
+        self,
+        previous: Optional[asyncio.Task[None]],
+        records: List[LineageRecord],
+    ) -> None:
+        if previous is not None:
+            await previous
+        assert self._run_store is not None
+        t_start = time.perf_counter()
+        await asyncio.to_thread(self._run_store.append_lineage, records)
+        self._stats.lineage_s += time.perf_counter() - t_start
+
+    async def _write_lineage(self) -> None:
+        """Write the records not written yet, and wait until every write
+        started has finished: once FLUSH has passed, readers see them all."""
+        if self._run_store is not None:
+            self._start_lineage_write()
+            assert self._lineage_writes is not None
+            await self._lineage_writes
 
     async def _run_emit(self) -> None:
         while True:
@@ -524,11 +690,13 @@ class _PipelinedStage(abc.ABC):
                 continue
 
             match entry:
-                case _EmitItem(item=item):
+                case _EmitItem(item=item, lid=lid):
                     # The maps of the item start once a slot is free; the slot
                     # is released when the item has been forwarded.
                     await self._in_flight_slots.acquire()
-                    routing = asyncio.create_task(self._route(self._routes, item))
+                    routing = asyncio.create_task(
+                        self._route(self._routes, item, lid),
+                    )
                     self._in_flight.put_nowait(_InFlightItem(routing))
                 case _FlushBarrier():
                     self._in_flight.put_nowait(entry)
@@ -555,7 +723,10 @@ class _PipelinedStage(abc.ABC):
             with self._forward_span(entry):
                 deliveries = await self._finish(entry)
                 await asyncio.gather(
-                    *(_deliver(handle, item, port) for handle, port, item in deliveries)
+                    *(
+                        _deliver(handle, item, port, lid)
+                        for handle, port, item, lid in deliveries
+                    ),
                 )
         except Exception as error:
             self._set_error(error)
@@ -594,6 +765,7 @@ class _PipelinedStage(abc.ABC):
         """
         match entry:
             case _FlushBarrier():
+                await self._write_lineage()
                 await asyncio.gather(*(m.release() for m in self._maps.values()))
                 # The calls of this stage are done: a pool whose other stages
                 # are done too releases its GPUs for the next phase.
@@ -601,28 +773,48 @@ class _PipelinedStage(abc.ABC):
                     *(group.flushed.remote(self._label) for group in self._releases),
                 )
                 return [
-                    (route.handle, route.port, FLUSH)
+                    (route.handle, route.port, FLUSH, None)
                     for route in _walk_routes(self._routes)
                     if isinstance(route, _Push)
                 ]
             case _InFlightItem(routing=routing):
                 return await routing
 
-    async def _route(self, routes: List[_Route], item: Any) -> List[_Delivery]:
+    async def _route(
+        self,
+        routes: List[_Route],
+        item: Any,
+        lid: ItemId,
+    ) -> List[_Delivery]:
         deliveries = await asyncio.gather(
-            *(self._route_one(route, item) for route in routes),
+            *(self._route_one(route, item, lid) for route in routes),
         )
         return [delivery for nested in deliveries for delivery in nested]
 
-    async def _route_one(self, route: _Route, item: Any) -> List[_Delivery]:
+    async def _route_one(
+        self,
+        route: _Route,
+        item: Any,
+        lid: ItemId,
+    ) -> List[_Delivery]:
         match route:
             case _Push(handle=handle, port=port):
-                return [(handle, port, item)]
+                return [(handle, port, item, lid)]
             case _Apply(label=label, routes=routes):
                 # The result stays in the object store; the next map or the
-                # receiving stage resolves it.
-                result = await self._maps[label].run(item)
-                return await self._route(routes, result)
+                # receiving stage resolves it. Its id is derived here, and
+                # the call gives the rows it creates element ids from it.
+                result_id = map_id(label, lid)
+                result, elements = await self._maps[label].run(item, result_id)
+                self._record(
+                    result_id,
+                    "map",
+                    (lid,),
+                    () if elements is None else elements,
+                    stage=label,
+                    inherited=elements is None,
+                )
+                return await self._route(routes, result, result_id)
 
 
 def _cancel(task: Optional[asyncio.Task[Any]]) -> None:
@@ -656,7 +848,10 @@ class RaySourceActor(_PipelinedStage):
         super().__init__(config, spill, label)
         self.name = name
 
-    async def process(self, item: Any, port: int) -> List[Any]:
+    def _lineage_policy(self, label: str) -> LineagePolicy:
+        return SourceLineage(label)
+
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
         return [item]
 
 
@@ -676,7 +871,7 @@ class RayMergeActor(_PipelinedStage):
     ):
         super().__init__(config, spill, label)
 
-    async def process(self, item: Any, port: int) -> List[Any]:
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
         return [item]
 
 
@@ -706,7 +901,10 @@ class RayAccumulatorActor(_PipelinedStage):
         self.tag_inputs = tag_inputs
         self.state = initial_state_fn()
 
-    async def process(self, item: Any, port: int) -> List[Any]:
+    def _lineage_policy(self, label: str) -> LineagePolicy:
+        return AccumulatorLineage(label)
+
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
         value = Tagged(port=port, item=item) if self.tag_inputs else item
         self.state, emissions = await asyncio.to_thread(
             self.accumulate_fn,
@@ -749,12 +947,18 @@ class CallTiming:
 
     waited_s: float
     execute_s: float
+    # The element ids of the result, for its lineage record; ``None`` if they
+    # are the ids of the item of the call.
+    elements: Optional[Tuple[ElementSegment, ...]] = ()
+    # Time spent finding them.
+    lineage_s: float = 0.0
 
 
 def _run_map_call(
     functions: Ref,
     label: str,
     item: Any,
+    lid: ItemId,
     submitted_t: float,
 ) -> Tuple[Any, CallTiming]:
     """Run one call of a map ``label``, holding the resources of the task.
@@ -763,6 +967,8 @@ def _run_map_call(
     process. Ray may reuse the worker process for other calls or end it, so
     the profiling events of the call are sent before it returns. The call
     waited in Ray's queue since ``submitted_t`` (seconds since the epoch).
+    The rows the call creates get element ids from the id ``lid`` of its
+    result.
     """
     waited = max(time.time() - submitted_t, 0.0)
     table = table_of(functions)
@@ -772,9 +978,35 @@ def _run_map_call(
         with recorder.span("execute", f"map:{label}", gpus=ray.get_gpu_ids()):
             t_start = time.perf_counter()
             result = table.functions[label](item)
-            return result, CallTiming(waited, time.perf_counter() - t_start)
+            executed = time.perf_counter() - t_start
+            fill_created(result, lid)
+            return result, _with_lineage(
+                CallTiming(waited, executed),
+                table.record_lineage,
+                item,
+                result,
+            )
     finally:
         recorder.flush_sync()
+
+
+def _with_lineage(
+    timing: CallTiming,
+    record: bool,
+    item: Any,
+    result: Any,
+) -> CallTiming:
+    """``timing`` with the element ids of ``result`` for its lineage record,
+    if the pipeline records lineage, and the time it took to find them."""
+    if not record:
+        return timing
+    t_start = time.perf_counter()
+    elements = call_elements(item, result)
+    return dataclasses.replace(
+        timing,
+        elements=elements,
+        lineage_s=time.perf_counter() - t_start,
+    )
 
 
 # Calls without GPUs; Ray reuses their worker processes. Calls claiming GPUs
@@ -873,6 +1105,7 @@ class RayComputeExecutor:
         label: str,
         stage: str,
         item: Any,
+        lid: ItemId,
     ) -> Tuple[Any, CallTiming]:
         """Run the function of the map ``label`` from ``functions`` on ``item``.
 
@@ -880,9 +1113,11 @@ class RayComputeExecutor:
         one at a time; the copies of a map in the children of a ``group_by``
         are the same map. So an executor runs as many calls at once as the
         protocol has maps, however many children share it. Returns the
-        result and its timing (called with ``num_returns=2``).
+        result, whose created rows get element ids from its id ``lid``, and
+        its timing (called with ``num_returns=2``).
         """
-        func = table_of(functions).functions[label]
+        table = table_of(functions)
+        func = table.functions[label]
         lane = f"map:{label}"
         lock = self._locks.setdefault(stage, threading.Lock())
         t_wait = time.perf_counter()
@@ -892,12 +1127,17 @@ class RayComputeExecutor:
             t_start = time.perf_counter()
             with self._recorder.span("execute", lane):
                 result = func(item)
-            return result, CallTiming(
-                t_start - t_wait,
-                time.perf_counter() - t_start,
-            )
+            executed = time.perf_counter() - t_start
         finally:
             lock.release()
+        # Outside the lock: the next call of the map starts meanwhile.
+        fill_created(result, lid)
+        return result, _with_lineage(
+            CallTiming(t_start - t_wait, executed),
+            table.record_lineage,
+            item,
+            result,
+        )
 
     def prepare(self, functions: Ref) -> Tuple[str, ...]:
         """Build the process-scope resources of the group before the first call.
@@ -1507,8 +1747,14 @@ class _MapRunner:
             on_idle=self._schedule_linger,
         )
 
-    async def run(self, item: Any) -> ray.ObjectRef:
-        """Submit a call and wait until its result is in the object store.
+    async def run(
+        self,
+        item: Any,
+        lid: ItemId,
+    ) -> Tuple[ray.ObjectRef, Optional[Tuple[ElementSegment, ...]]]:
+        """Submit a call, whose result has the id ``lid``, and wait until its
+        result is in the object store. Returns the result and its element ids
+        (``None``: the ids of ``item``).
 
         The span of the call covers its queueing for resources and its
         transfer; the worker running it records its execution, and returns
@@ -1522,9 +1768,10 @@ class _MapRunner:
             overlapping=True,
             seq=self.stats.items_in + 1,
         ):
-            result, timing, waited = await self._call(item)
+            result, timing, waited = await self._call(item, lid)
 
-        account_call(self.stats, waited, await _timing_of(timing))
+        call = await _timing_of(timing)
+        account_call(self.stats, waited, call)
         if self._group is not None:
             self.stats.capacity = max(
                 self.stats.capacity or 0,
@@ -1532,7 +1779,7 @@ class _MapRunner:
             )
         if self.provenance.sampling:
             await self._sample(item, result)
-        return result
+        return result, () if call is None else call.elements
 
     async def _sample(self, item: Any, result: ray.ObjectRef) -> None:
         """Sample the item of a call and its result, fetched from the object
@@ -1544,11 +1791,12 @@ class _MapRunner:
     async def _call(
         self,
         item: Any,
+        lid: ItemId,
     ) -> Tuple[ray.ObjectRef, ray.ObjectRef, float]:
         """The result of a call, its timing, and how long it waited for an
         executor of the pool (0 for Ray tasks, which queue inside Ray)."""
         if self._group is None:
-            result, timing = self._submit(item)
+            result, timing = self._submit(item, lid)
             return await self._completions.done(result), timing, 0.0
         else:
             _cancel(self._linger)
@@ -1560,6 +1808,7 @@ class _MapRunner:
                     self._label,
                     self._stage,
                     item,
+                    lid,
                 )
                 await self._completions.done(result)
             return result, timing, waited
@@ -1587,12 +1836,17 @@ class _MapRunner:
             self._executors.stop()
             await self._group.return_leases.remote(leases)
 
-    def _submit(self, item: Any) -> Tuple[ray.ObjectRef, ray.ObjectRef]:
+    def _submit(
+        self,
+        item: Any,
+        lid: ItemId,
+    ) -> Tuple[ray.ObjectRef, ray.ObjectRef]:
         """Submit a call as a Ray task: the refs of its result and timing."""
         refs = _run_in_task.options(**self._options, num_returns=2).remote(
             self._functions,
             self._label,
             item,
+            lid,
             time.time(),
         )
         # The stubs of Ray do not model num_returns.
@@ -1627,6 +1881,7 @@ def account_call(
     stats.wait_s += waited + waited_there
     stats.wait_max_s = max(stats.wait_max_s, waited + waited_there)
     stats.process_s += executed
+    stats.lineage_s += 0.0 if timing is None else timing.lineage_s
     stats.last_done_t = time.time()
 
 
@@ -1693,7 +1948,11 @@ class _Completions:
 
 @ray.remote
 class RaySinkActor(_PipelinedStage):
-    """Terminal stage wrapping a SinkWriter, finalized on FLUSH."""
+    """Terminal stage wrapping a SinkWriter, finalized on FLUSH.
+
+    The sink of a ``group_by`` child hands its results back to the router
+    with their ids (``_ResultWriter``).
+    """
 
     def __init__(
         self,
@@ -1704,45 +1963,69 @@ class RaySinkActor(_PipelinedStage):
     ):
         super().__init__(config, spill, label)
         self.writer = writer
+        # The ids of the items written, in order.
+        self._received: List[ItemId] = []
 
-    async def process(self, item: Any, port: int) -> List[Any]:
-        await self.writer.write(item)
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
+        match self.writer:
+            case _ResultWriter():
+                await self.writer.write_identified(item, lid)
+            case _:
+                await self.writer.write(item)
+        self._received.append(lid)
         return []
+
+    async def received_ids(self) -> List[ItemId]:
+        """The ids of the items written so far, in order."""
+        return self._received
 
     async def on_flush(self) -> List[Any]:
         await self.writer.finalize()
         return []
 
 
-class _DemuxResultWriter:
-    """Sink of the ``group_by`` child of a key, handing its results back to the router."""
-
-    def __init__(self, router: Any, key: Any) -> None:
-        self.router = router
-        self.key = key
-
-    async def write(self, item: Any) -> None:
-        await self.router.emit.remote(self.key, item)
-
-    async def finalize(self) -> None:
-        pass
-
-
-class _SharedResultWriter:
-    """Sink of a ``group_by`` child shared by several keys (see ``share_keys``).
-
-    Its results arrive as ``Keyed(key, result)``.
-    """
+class _ResultWriter(abc.ABC):
+    """Sink of a ``group_by`` child, handing its results back to the router
+    with their ids."""
 
     def __init__(self, router: Any) -> None:
         self.router = router
 
     async def write(self, item: Any) -> None:
-        assert isinstance(item, Keyed), "A shared group_by child lost the key."
-        await self.router.emit.remote(item.key, item.value)
+        raise NotImplementedError(
+            "The sink of a group_by child writes its results with their ids "
+            "(write_identified).",
+        )
+
+    @abc.abstractmethod
+    async def write_identified(self, item: Any, lid: ItemId) -> None:
+        """Hand the result ``item``, whose id is ``lid``, to the router."""
+        ...
 
     async def finalize(self) -> None:
         pass
+
+
+class _DemuxResultWriter(_ResultWriter):
+    """Sink of the ``group_by`` child of a key."""
+
+    def __init__(self, router: Any, key: Any) -> None:
+        super().__init__(router)
+        self.key = key
+
+    async def write_identified(self, item: Any, lid: ItemId) -> None:
+        await self.router.emit.remote(self.key, item, lid)
+
+
+class _SharedResultWriter(_ResultWriter):
+    """Sink of a ``group_by`` child shared by several keys (see ``share_keys``).
+
+    Its results arrive as ``Keyed(key, result)``.
+    """
+
+    async def write_identified(self, item: Any, lid: ItemId) -> None:
+        assert isinstance(item, Keyed), "A shared group_by child lost the key."
+        await self.router.emit.remote(item.key, item.value, lid)
 
 
 class ChildPipeline(Protocol):
@@ -1802,25 +2085,26 @@ class _Child:
         self.ready: asyncio.Task[ChildPipeline] = asyncio.create_task(start)
         self._source_name = source_name
         self._on_error = on_error
-        self._queue: asyncio.Queue[Tuple[Any, Optional[_Barrier]]] = asyncio.Queue(
-            maxsize=0 if buffer_size is None else buffer_size,
+        self._queue: asyncio.Queue[Tuple[Any, Optional[ItemId], Optional[_Barrier]]] = (
+            asyncio.Queue(maxsize=0 if buffer_size is None else buffer_size)
         )
         self._feeder = asyncio.create_task(self._feed())
 
-    async def send(self, item: Any) -> None:
-        """Queue an item for the child, waiting while its queue is full."""
-        await self._queue.put((item, None))
+    async def send(self, item: Any, lid: ItemId) -> None:
+        """Queue an item, whose id is ``lid``, for the child, waiting while
+        its queue is full."""
+        await self._queue.put((item, lid, None))
 
     async def flush(self) -> None:
         """Flush the child after all queued items; returns once it has drained."""
         done: _Barrier = asyncio.get_running_loop().create_future()
-        await self._queue.put((FLUSH, done))
+        await self._queue.put((FLUSH, None, done))
         await done
 
     async def _feed(self) -> None:
         error: Optional[BaseException] = None
         while True:
-            item, done = await self._queue.get()
+            item, lid, done = await self._queue.get()
             barriers = [] if done is None else [done]
             if error is not None:
                 _fail(barriers, error)
@@ -1828,7 +2112,7 @@ class _Child:
 
             try:
                 child = await self.ready
-                await _deliver(child.source_handle(self._source_name), item, 0)
+                await _deliver(child.source_handle(self._source_name), item, 0, lid)
             except Exception as raised:
                 error = raised
                 self._on_error(raised)
@@ -1913,7 +2197,7 @@ class RayDemuxActor(_PipelinedStage):
         # Child of every key.
         self._keys: Dict[Any, _Child] = {}
 
-    async def process(self, item: Any, port: int) -> List[Any]:
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
         if self.outer_keyed:
             outer, value = item
             key = (outer, await asyncio.to_thread(self.key_fn, value))
@@ -1925,21 +2209,21 @@ class RayDemuxActor(_PipelinedStage):
             self._keys[key] = self._assign(key)
 
         child_item = value if self.workers is None else Keyed(key=key, value=value)
-        await self._keys[key].send(child_item)
+        await self._keys[key].send(child_item, lid)
         return []
 
     async def on_flush(self) -> List[Any]:
         await asyncio.gather(*(child.flush() for child in self._children.values()))
         return []
 
-    async def emit(self, key: Any, item: Any) -> None:
-        """Forward a result of the child pipeline of ``key``."""
+    async def emit(self, key: Any, item: Any, lid: ItemId) -> None:
+        """Forward a result of the child pipeline of ``key``, with its id."""
         if self.outer_keyed:
             outer, inner = key
             keyed = Keyed(key=outer, value=Keyed(key=inner, value=item))
         else:
             keyed = Keyed(key=key, value=item)
-        await self._outbox.put(_EmitItem(keyed))
+        await self._outbox.put(_EmitItem(keyed, lid))
 
     async def children_stats(self) -> Dict[str, StageStats]:
         """Return the execution metrics of every stage of the started children."""

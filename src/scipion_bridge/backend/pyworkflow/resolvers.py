@@ -108,7 +108,10 @@ class PyWorkflowResolutionContext:
 if HAS_PWEM:
     from ...core.typed.resolve import resolver, lift_resolvers
     from ...core import struct
+    from ...core.struct import identity
     from ...core.struct.exceptions import UninitializedFieldError
+    from ...core.struct.id_column import IdColumn
+    from ...core.utils.hashing import item_id
     from ... import single_particle as spa
     from ...single_particle.mrc import write_stack
 
@@ -171,6 +174,24 @@ if HAS_PWEM:
             pixels = np.zeros((num_particles, 0, 0), dtype=np.float32)
 
         return raw_rows, pixels, row_keys
+
+    def _set_scipion_ids(target: Any, value: Any, raw_rows: Sequence[Any]) -> None:
+        """Give the particles ``target`` read from the rows ``raw_rows`` of the
+        Scipion set ``value`` the element ids ``(set, item id)``.
+
+        The namespace is the table of the set: its database and the prefix
+        of its tables. The classes of a ``SetOfClasses2D`` are tables of one
+        database (``Class001_``, ...), whose item ids may repeat.
+        """
+        mapper = value._getMapper()
+        assert mapper is not None and mapper.db is not None
+        namespace = item_id(
+            b"scipion",
+            str(value.getFileName()).encode(),
+            str(mapper.db.tablePrefix).encode(),
+        )
+        ids = np.array([int(row["id"]) for row in raw_rows], dtype=np.int64)
+        identity.set_ids(target, IdColumn.of(namespace, ids))
 
     def _col(db: Any, attr: str) -> Optional[str]:
         """Return the real SQLite column name for a given attribute, or None if absent."""
@@ -545,6 +566,7 @@ if HAS_PWEM:
                 dtype=np.float32,
             )
             flex_set["embeddings"] = embeddings
+            _set_scipion_ids(flex_set, value, raw_rows)
             return flex_set  # type: ignore[return-value]
 
         particle_set = struct.Set[spa.Particle](capacity=n)
@@ -554,6 +576,7 @@ if HAS_PWEM:
         _fill_ctf_columns(particle_set, raw_rows, db)
         _fill_coordinate_columns(particle_set, raw_rows, db)
         _fill_acquisition_columns(particle_set, raw_rows, db, container=value)
+        _set_scipion_ids(particle_set, value, raw_rows)
 
         return particle_set
 
@@ -702,6 +725,7 @@ if HAS_PWEM:
         _fill_acquisition_columns(particle_set, raw_rows, db, container=value)
         _fill_ctf_columns(particle_set, raw_rows, db)
         _fill_coordinate_columns(particle_set, raw_rows, db)
+        _set_scipion_ids(particle_set, value, raw_rows)
 
         return particle_set
 

@@ -17,7 +17,9 @@ from scipion_bridge.core.typed import current_registry
 from scipion_bridge.core.streaming.ops import Source, MapOp
 from scipion_bridge.core.streaming import Pipeline
 from scipion_bridge.core.streaming import CallbackSinkWriter
-from scipion_bridge.core.struct import references
+from scipion_bridge.core.streaming import FileRunStore, LineageGraph
+from scipion_bridge.core.struct import identity, references
+from scipion_bridge.core.struct.source import FileId
 from scipion_bridge.single_particle import XmippParticleStackProxy
 from scipion_bridge.single_particle import Particle
 from scipion_bridge.backend.ray import RayPipelineRunner
@@ -599,6 +601,64 @@ def test_ray_pipeline_runner_parameters_default(tmp_path):
     assert tags == {(Precision.FP32, 2)}
 
 
+def _element_ids(particles):
+    column = identity.element_ids(particles)
+    assert column is not None
+    return column.elements()
+
+
+def test_a_run_records_its_manifest_and_the_lineage_of_its_outputs(tmp_path):
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=8)
+    stack = FileId.of(tmp_path / "particles.mrcs")
+    store = FileRunStore(tmp_path / "run")
+    collector = OutputCollector.remote()
+    chain = ParameterProtocol().pipe(RechunkProtocol(), mapping={"output": "chunked"})
+    runner = RayPipelineRunner(
+        chain,
+        parameters={"scale": 3},
+        sink=CallbackSinkWriter(
+            lambda out: ray.get(collector.append.remote(_element_ids(out["result"]))),
+        ),
+        run_store=store,
+    )
+
+    runner.run(particles=star_path)
+
+    report = store.read_report()
+    assert report is not None and "chunk(3)" in report
+    manifest = store.read_manifest()
+    assert [p["protocol"] for p in manifest["protocols"]] == [
+        "ParameterProtocol",
+        "RechunkProtocol",
+    ]
+    assert all(p["fingerprint"] for p in manifest["protocols"])
+    assert manifest["parameters"]["scale"] == 3
+    assert manifest["inputs"]["particles"] == {"value": str(star_path), "count": 1}
+    graph = LineageGraph.of(store)
+    # The outputs are the particles of the stack, by their rows.
+    outputs = [
+        e for elements in ray.get(collector.get_items.remote()) for e in elements
+    ]
+    assert sorted(position for _, position in outputs) == list(range(8))
+    origins = [graph.trace_element(*element) for element in outputs]
+    assert {(o.file, o.row) for o in origins} == {(stack, row) for row in range(8)}
+    # The last items trace back through the stages of both protocols.
+    last, *_ = [
+        lid for lid in graph.leaves() if "_verify_outputs" in graph.record(lid).stage
+    ]
+    ancestry = graph.ancestry(last)
+    assert ancestry.files == (stack,) and ancestry.missing == ()
+    # Every stage of both protocols, with the fingerprint of its code.
+    labels = [s.label for s in ancestry.stages]
+    assert any("ParameterProtocol._tag" in label for label in labels)
+    assert any("chunk(3)" in label for label in labels)
+    assert all(s.stage_fp for s in ancestry.stages)
+    # Maps passing the particles on record that instead of repeating their ids.
+    inherited = [lid for lid in graph.item_ids() if graph.record(lid).inherited]
+    assert inherited and all(graph.kind_of(lid) == "map" for lid in inherited)
+    assert all(graph.elements(lid) for lid in inherited)
+
+
 def test_ray_pipeline_runner_rejects_unknown_parameters():
     with pytest.raises(ValueError, match="Unknown parameters"):
         RayPipelineRunner(ParameterProtocol(), parameters={"missing": 1})
@@ -641,6 +701,25 @@ def test_ray_pipeline_runner_cli_parameters(tmp_path, monkeypatch):
     runner.launch_as_terminal_application()
 
     assert proto.driver_values == (Precision.FP16, 5)
+
+
+def test_the_cli_records_the_run_in_a_run_directory(tmp_path, monkeypatch):
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prog",
+            *["--particles", str(star_path), "--precision", "FP16", "--scale", "5"],
+            *["--run-dir", str(run_dir)],
+        ],
+    )
+
+    RayPipelineRunner(ParameterProtocol()).launch_as_terminal_application()
+
+    store = FileRunStore(run_dir)
+    assert store.read_manifest()["parameters"]["scale"] == 5
+    assert store.read_lineage()
 
 
 def _create_xmipp_stack(tmp_path: Path, stem: str, first: int, n_particles: int):

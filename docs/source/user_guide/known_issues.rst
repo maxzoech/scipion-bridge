@@ -179,6 +179,80 @@ Tests: ``test_a_set_of_groups_from_members_with_ids_raises`` and
 ``test_a_set_of_groups_from_members_without_ids_copies`` in
 ``tests/scipion_bridge/struct/test_ids.py``.
 
+Lineage cannot tell where elements with Scipion item ids come from
+------------------------------------------------------------------
+
+The lineage of a run (``--run-dir``, see :doc:`/user_guide/backends/ray`)
+traces a particle read from a stack back to the stack and its row. It cannot
+do the same for a particle whose element id is a Scipion item id:
+
+.. code-block:: python
+
+    graph = LineageGraph.of(FileRunStore("runs/2d_classes"))
+
+    origin = graph.trace_element(*stack_particle)     # read from a .star/.xmd
+    origin.file, origin.row                           # the stack, row 17
+
+    origin = graph.trace_element(*scipion_particle)   # read from a SetOfParticles
+    origin.file                                       # None
+    origin.created_by.kind                            # "source": reported as
+                                                      # created by the source stage
+
+**Why.** An element id is a *namespace* and a *position*. The namespace is a
+16-byte hash, which cannot be turned back into what it names; lineage needs
+a record of what every namespace means. Today it has such a record only for
+files, and only indirectly:
+
+* The resolvers of stacks set the namespace of a particle to the hash of its
+  stack (path, size and modification time), and its ``pixels`` reference the
+  same stack. The source stage records the files the references of an item
+  point to, and ``LineageGraph`` maps the hash of every recorded file back to
+  it. The reference explains the namespace, not the id itself.
+* The Scipion 3 resolver (``SetOfParticles``, the classes of a
+  ``SetOfClasses2D``) sets the namespace to the hash of the set's database and
+  table, and the position to the Scipion item id. It reads the pixels into
+  arrays, so the item references no file, and even a referenced file would
+  not match a namespace that is not a file hash.
+
+``trace_element`` then misses the table of files and falls back to the item
+records: the first record that holds the element is the source item, so the
+element is reported as *created* by the source stage. Its position, the
+Scipion item id, is correct, but nothing says which set, database or table it
+belongs to.
+
+The same applies to any namespace that no reference explains: elements
+whose rows were read into arrays before the source stage, ids set by
+resolvers that build no references, and the namespaces ``tag`` derives (a
+tagged view cannot be traced to its particle by its namespace, only through
+the items that hold it).
+
+**Affected.** Nothing in practice yet. The Ray runner reads particles from
+files, whose elements are traced correctly, and the Scipion 3 backend records
+no lineage. It becomes relevant with the interoperability with Scipion: a
+Ray run reading Scipion sets, and a ScipionWeb resolver, whose elements are
+``scipionItemId`` values of a ScipionWeb set, are exactly this case.
+
+**Instead.** Read the item id from the element (its position) and identify
+the set from the inputs in the manifest of the run.
+
+**Planned**, with the interoperability with Scipion:
+
+1. A description of every namespace, attached by the resolver that sets the
+   ids and carried with them through views, ``concat``, casts and pickling, as
+   references are: a file (path, size, modification time), a Scipion table
+   (database, table prefix, set class), a ScipionWeb set (server, project,
+   set), or a tag (namespace, name, discriminator).
+2. The source stage records the descriptions of the namespaces of every item,
+   replacing the files of its references, and ``tag`` records its
+   derivations.
+3. ``trace_element`` answers every input element alike: "row 17 of stack X",
+   "item 4711 of table ``Class001_`` of classes.sqlite", "``scipionItemId``
+   4711 of ScipionWeb set Y". ``created_by`` then only names rows a stage
+   created.
+
+Test: ``test_an_element_with_a_scipion_item_id_is_an_input_element`` in
+``tests/scipion_bridge/streaming/test_run_store.py``.
+
 Struct specialization is not implemented
 ----------------------------------------
 

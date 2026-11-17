@@ -496,10 +496,20 @@ field key of the root of a Set or Struct to an ``IdColumn``
 in slot 3 of a Collection.
 
 * An ``IdColumn`` is a tuple of segments: positional (a 16-byte namespace and
-  a ``range`` or ``int64`` positions), explicit (``(n, 16)`` ids, from hashed
-  tags) or unassigned (rows without ids). Element ``k`` of a positional
-  segment is ``item_id(namespace, position)`` (``core/utils/hashing.py``),
-  materialized only on request (``IdColumn.ids``).
+  a ``range`` or ``int64`` positions), mixed (positions, a table of
+  namespaces and the namespace of every element as an ``int32`` index into
+  it), explicit (``(n, 16)`` ids, from hashed tags) or unassigned (rows
+  without ids). Element ``k`` of a positional segment is
+  ``item_id(namespace, position)`` (``core/utils/hashing.py``), materialized
+  only on request (``IdColumn.ids``).
+* Runs of positional ids shorter than ``SHORT_RUN`` (32) are joined into mixed
+  segments (``_compacted``), and a mixed segment keeps only the namespaces its
+  elements use (``_pruned``). Without them, rows of small stacks (a few
+  particles each) and the members of classes, selected from many chunks,
+  would cost a Python segment per element; with them, the segments of a
+  column stay a fraction of its elements, whatever the size of the stacks.
+  ``digest_parts`` encodes the ids element by element, so equal ids give
+  equal digests however they are split into segments.
 * ``narrow`` selects with an index, a slice, positions or a mask, splitting
   the selection into runs per segment, as ``Reference.segments`` does;
   ``concat`` joins columns and merges adjacent runs of a namespace; ``assign``

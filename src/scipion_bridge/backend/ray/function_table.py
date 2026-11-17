@@ -33,6 +33,9 @@ class FunctionTable:
     profile: Optional[ProfileConfig]
     # Builds the process-scope resources of a protocol, by its compute group.
     preparers: Mapping[str, Callable[[], None]]
+    # Whether calls return the element ids of their results, for the lineage
+    # records of a run store.
+    record_lineage: bool = False
 
 
 class TableCache:

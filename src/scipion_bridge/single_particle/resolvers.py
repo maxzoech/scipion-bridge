@@ -20,7 +20,8 @@ from .particle import Particle
 from .sources import StackProxy, StackSource, check_rows, read_rows
 from ..core.typed.resolve import resolver
 from ..core import struct
-from ..core.struct import references
+from ..core.struct import identity, references
+from ..core.struct.id_column import IdColumn
 from ..core.struct.source import Reference, RowIndex
 
 # STAR columns and the Particle fields they fill. When several columns fill
@@ -347,17 +348,24 @@ def _particles_of(stack: StackProxy, positions: RowIndex) -> struct.Set[Particle
     The pixels reference the stack and are read when they are first read
     (``core/struct/source.py``); the images of temporary stacks, which may be
     deleted before that, are read now.
+
+    The particles of an input stack have the element ids ``(stack, row)``.
+    Those of a temporary stack, which a stage wrote during the run, are rows
+    the stage created: they get their ids when it emits them.
     """
     particle_set = struct.Set[Particle](capacity=len(positions))
     if stack.managed:
         particle_set["pixels"] = read_rows(stack, positions)
     else:
         check_rows(stack, positions)
+        source = StackSource(stack)
         references.set_reference(
             particle_set,
             ("pixels",),
-            Reference(StackSource(stack), positions),
+            Reference(source, positions),
         )
+        (file,) = source.files
+        identity.set_ids(particle_set, IdColumn.of(file.namespace, positions))
     return particle_set
 
 

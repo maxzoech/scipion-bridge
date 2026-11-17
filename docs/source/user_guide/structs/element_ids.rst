@@ -25,15 +25,21 @@ An id is a *namespace* and a *position* in it:
    * - Elements
      - Namespace
      - Position
-   * - Read from an input file
-     - the file
-     - the row in the file
-   * - Read from a Scipion output
-     - the output
+   * - Read from an input stack (MRC, SPIDER)
+     - the file, as it is: its path, size and modification time
+     - the row in the stack
+   * - Read from a Scipion set
+     - the table of the set (its database, and for the classes of a
+       ``SetOfClasses2D`` the table of the class)
      - its item id
    * - Created by a stage of a pipeline
      - the item the stage emits
      - the row in that item
+
+The resolvers set them: particles read from a ``.star`` or ``.xmd`` file are
+the rows of their stack, whichever metadata file selected them, and disabled
+rows of an Xmipp file leave gaps. Particles of temporary stacks, which an
+external program wrote during the run, are rows a stage created.
 
 Ids are stored compactly, like references to the rows of input files: a batch
 of 256 particles read from one stack is a single range, not 256 values.
@@ -53,7 +59,10 @@ Ids belong to the rows of a Set, not to its values:
   Struct field (``Class2D(particles=particles[mask])``) and a Struct into a
   ``Collection`` slot.
 * **New rows** have no id until the stage that created them emits them; they
-  then get the id of the emitted item and their row in it.
+  then get the id of the emitted item and their row in it. Every item a stage
+  emits has an id of its own, derived from the items it was made from, so the
+  ids of new rows are the same in every run of a pipeline on the same inputs
+  (Ray backend).
 
 Rows rebuilt from arrays are new rows: ``out["pixels"] =
 particles["pixels"][order]`` into a new Set loses the ids of the particles.

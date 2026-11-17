@@ -3,6 +3,9 @@
 ``Pipeline.report()`` returns the report of a compiled pipeline with the stats
 of its stages; ``report_of`` the graph of an IR without running it. Render it
 with ``render_text``, ``render_dot``, ``render_svg`` or ``render_html``.
+
+The module ``lineage_view`` browses the lineage a run recorded
+(``python -m scipion_bridge.core.streaming.report.lineage_view RUN_DIR``).
 """
 
 from .model import (
