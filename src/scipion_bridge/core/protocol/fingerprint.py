@@ -1,9 +1,9 @@
 """Fingerprints identifying what a protocol and the stages of its pipeline compute.
 
-A fingerprint is a SHA-256 digest of the code of a protocol, its parameter
-values and its sealed state. Two runs whose stages have equal fingerprints run
-the same computation, which lineage records, checkpoints and profiles of
-earlier runs rely on.
+A fingerprint is an ``xxh3_128`` digest (``core/utils/hashing.py``) of the
+code of a protocol, its parameter values and its sealed state. Two runs whose
+stages have equal fingerprints run the same computation, which lineage
+records, checkpoints and profiles of earlier runs rely on.
 
 Values are encoded canonically where possible. Other values are encoded as
 their pickle, which may differ between processes for equal values: the
@@ -11,7 +11,6 @@ fingerprints then differ, so that two stages are never taken for the same
 computation when they are not.
 """
 
-import hashlib
 import inspect
 from enum import Enum
 from pathlib import PurePath
@@ -19,7 +18,9 @@ from typing import Any, Protocol, runtime_checkable
 
 import cloudpickle  # type: ignore
 import numpy as np
+import xxhash
 
+from ..utils.hashing import digest, join as _join
 from ..streaming.node import Node
 from ..streaming.ops import AsTypeOp, MapElementOp, MapOp
 
@@ -29,16 +30,6 @@ class HasFingerprint(Protocol):
     """An object identified by a fingerprint of its own, e.g. a protocol."""
 
     def fingerprint(self) -> str: ...
-
-
-def _join(*parts: bytes) -> bytes:
-    """Concatenate ``parts`` unambiguously, each prefixed with its length."""
-    return b"".join(len(part).to_bytes(8, "big") + part for part in parts)
-
-
-def digest(*parts: bytes) -> str:
-    """The hex SHA-256 digest of ``parts``."""
-    return hashlib.sha256(_join(*parts)).hexdigest()
 
 
 def fingerprint_value(value: Any) -> bytes:
@@ -68,7 +59,7 @@ def fingerprint_value(value: Any) -> bytes:
                 b"array",
                 value.dtype.str.encode(),
                 repr(value.shape).encode(),
-                hashlib.sha256(np.ascontiguousarray(value).tobytes()).digest(),
+                xxhash.xxh3_128_digest(np.ascontiguousarray(value).tobytes()),
             )
         case _:
             return _join(b"pickle", cloudpickle.dumps(value))

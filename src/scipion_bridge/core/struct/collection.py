@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import (
     Any,
     Dict,
+    FrozenSet,
     Iterator,
     Optional,
     Sequence,
@@ -17,6 +18,7 @@ from typing_extensions import Self
 
 import pyarrow as pa
 
+from . import identity, references
 from .schema import (
     CollectionEntry,
     Entry,
@@ -210,6 +212,7 @@ class Collection(Marker[T], SchemaConvertible):
         ):
             return
 
+        identity.check_placement(value, slot_storage.root)
         self._storage.clear(slot_storage.root)
 
         for path, entry in value.schema().tree_iter():
@@ -217,9 +220,15 @@ class Collection(Marker[T], SchemaConvertible):
             if source_path not in value.storage:
                 continue
 
-            data = value.storage.read(source_path, entry)
-            target_path = slot_storage.root.extend(path)
-            slot_storage.write(target_path, entry, data)
+            references.copy_leaf(
+                value.storage,
+                source_path,
+                entry,
+                slot_storage,
+                slot_storage.root.extend(path),
+                entry,
+            )
+        identity.write_ids(value, self._storage, slot_storage.root)
 
     def __set_name__(self, owner: type, name: str) -> None:
         super().__set_name__(owner, name)
@@ -285,6 +294,32 @@ class Collection(Marker[T], SchemaConvertible):
         # The element type may be given per instance (``Collection(dtype=...)``).
         return Collection[self._element_type()]
 
+    def _pickle_state(self) -> Tuple[pa.RecordBatch, Any]:
+        """The batch without the leaves pickled as references, those (per
+        slot), and the element ids of the slots and their nested Sets."""
+        pickled = {
+            index: references.pickled_references(self._slot(index))
+            for index in self.initialized_indices()
+        }
+        batch = self._to_arrow(
+            {index: omitted for index, (_, omitted) in pickled.items()}
+        )
+        slot_references = {
+            index: tuple(found) for index, (found, _) in pickled.items() if found
+        }
+        return batch, (slot_references, identity.hidden_ids(self))
+
+    def _restore_state(self, state: Any) -> None:
+        slot_references, ids = state
+        for index, found in slot_references.items():
+            references.restore_references(self._slot(index), list(found))
+        identity.restore_ids(self, ids)
+
+    def _slot(self, index: int) -> T:
+        """The Struct of slot ``index``, initialized or not."""
+        assert self._dtype is not None, "Collection element type is not set."
+        return self._dtype(storage=self._storage.append(str(index), axis=False))
+
     def _element_type(self) -> Type[Struct]:
         assert self._dtype is not None, "Collection element type is not set."
         return self._dtype
@@ -295,10 +330,20 @@ class Collection(Marker[T], SchemaConvertible):
         Uninitialized slots, and fields not initialized in a slot, are null.
         The size is stored in the batch metadata.
         """
+        return self._to_arrow({})
+
+    def _to_arrow(
+        self,
+        omitted: Dict[int, FrozenSet[Tuple[str, ...]]],
+    ) -> pa.RecordBatch:
+        """The batch of ``to_arrow`` without the ``omitted`` leaves of every
+        slot (pickled as references), which are null there."""
         schema = self._element_type().schema()
         slots = {
             index: struct_leaf_arrays(
-                self._storage.append(str(index), axis=False), schema
+                self._storage.append(str(index), axis=False),
+                schema,
+                omitted.get(index, frozenset()),
             )
             for index in self.initialized_indices()
         }

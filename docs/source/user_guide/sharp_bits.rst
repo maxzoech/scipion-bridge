@@ -116,6 +116,16 @@ buffers. Python lists of structs would be pickled object by object and are
 rejected by ``Pipeline.send``. For the same reason, ``flatten()`` rejects a
 ``Set``: use ``chunk(n)`` to change the batch size instead.
 
+Random values: seed them from element ids
+-----------------------------------------
+
+A stage that draws random values (augmentations, random crops) draws other
+values when it runs again, e.g. when a run resumes after a crash. Seed the
+generators from the ids of the elements with ``B.ids_rng(elements, salt)``,
+so that every element draws the same values every time, and give derived
+elements ids of their own with ``tag``; see
+:doc:`/user_guide/structs/element_ids`.
+
 ``combine_latest`` drops items at the end of the stream
 -------------------------------------------------------
 

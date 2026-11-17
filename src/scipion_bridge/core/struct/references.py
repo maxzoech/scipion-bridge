@@ -179,6 +179,50 @@ def set_reference(obj: Stored, path: FieldKey, reference: Reference) -> None:
     engine.set_reference(field_key, reference)
 
 
+def copy_leaf(
+    source: _BaseStorage,
+    source_key: KeyPath,
+    source_entry: Any,
+    target: _BaseStorage,
+    target_key: KeyPath,
+    target_entry: Any,
+) -> None:
+    """Copy a leaf of ``source`` to ``target``, keeping its reference.
+
+    When the target is a whole column (a Struct field or a Collection slot)
+    and the source a reference, the target becomes the same reference,
+    narrowed to the source's rows: unread rows stay unread, read rows are
+    copied and stay a cached reference. Otherwise (a row or a selection of a
+    Set) the rows are copied as owned bytes, as before.
+    """
+    source_engine = source.root_storage
+    target_engine = target.root_storage
+    whole = RootEngine._compute_index(target_key) == ()
+    reference = (
+        source_engine.reference_at(source_key)
+        if whole
+        and isinstance(source_engine, RootEngine)
+        and isinstance(target_engine, RootEngine)
+        and source_engine.references()
+        else None
+    )
+    if reference is None:
+        target.write(target_key, target_entry, source.read(source_key, source_entry))
+        return
+
+    assert isinstance(source_engine, RootEngine) and isinstance(
+        target_engine, RootEngine
+    )
+    field_key = RootEngine._decompose(target_key)[0]
+    if source_engine.is_cached(RootEngine._decompose(source_key)[0]):
+        target.write(target_key, target_entry, source.read(source_key, source_entry))
+        target_engine.set_reference(
+            field_key, reference, rows=target_engine._data[field_key]
+        )
+    else:
+        target_engine.set_reference(field_key, reference)
+
+
 def column_states(obj: Stored) -> Dict[FieldKey, ColumnState]:
     """The state of every initialized leaf of ``obj``, without reading any."""
     storage = obj.storage
@@ -344,8 +388,10 @@ def _keeps_bytes(mode: PicklingMode, state: ColumnState) -> bool:
 
 
 def restore_references(obj: Stored, pickled: List[PickledReference]) -> None:
-    """Restore the references of an unpickled ``obj``."""
-    engine = _engine_of(obj)
+    """Restore the references of an unpickled ``obj``, e.g. a slot of a
+    Collection."""
+    engine = _root_engine(obj)
+    assert engine is not None, "references are restored into a root engine"
     for path, reference, has_rows in pickled:
         key = obj.storage.root.extend(_key_path(obj, path))
         field_key = RootEngine._decompose(key)[0]

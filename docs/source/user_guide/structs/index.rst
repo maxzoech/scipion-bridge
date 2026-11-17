@@ -121,10 +121,13 @@ Articles in this section
    collections
    dynamic_data
    reduction_and_serialization
+   element_ids
    single_particle
 
 * :doc:`defining_structs` covers field types, named dimensions, creating
   and reading structs, uninitialized fields, and inheritance.
+* :doc:`element_ids` covers the ids of elements, ``tag`` for new elements
+  derived from old ones, and seeding randomness from ids (``ids_rng``).
 * :doc:`sets` covers creating sets, the object and vectorized APIs, views,
   selections and concatenation.
 * :doc:`collections` covers fixed-size, row-wise containers such as the

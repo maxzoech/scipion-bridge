@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Type, TypeVar, Union, overload
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    overload,
+)
 from typing_extensions import Self, TypeAlias
 import awkward as ak
 import numpy as np
@@ -20,6 +30,8 @@ from .schema import (
     SetEntryBase,
 )
 from ..utils.marker import Marker
+from . import identity, references
+from .sharing import share_columns
 from .storage import _BaseStorage, RootEngine
 from .key_path import STRUCT_ROOT, KeyPath
 from .utils.arrow_utils import (
@@ -555,16 +567,52 @@ class Struct(Trait, SchemaConvertible):
         write_struct_row(struct.storage, leaf_columns(batch, cls.schema()), row=0)
         return struct
 
+    def _pickle_state(self) -> Tuple[pa.RecordBatch, Any]:
+        """The batch without the leaves pickled as references, those, and the
+        element ids of the Struct and its nested Sets."""
+        pickled, omitted = references.pickled_references(self)
+        batch = leaves_to_batch(
+            self.schema(),
+            struct_leaf_arrays(self.storage, self.schema(), omitted),
+            metadata={},
+        )
+        return batch, (tuple(pickled), identity.hidden_ids(self))
+
+    def _restore_state(self, state: Any) -> None:
+        pickled, ids = state
+        references.restore_references(self, list(pickled))
+        identity.restore_ids(self, ids)
+
+    def tag(self, name: str, discriminator: Any) -> Self:
+        """A new element with the values of this one, e.g. an augmented view.
+
+        It keeps a link to this element but gets an id of its own; see
+        ``Set.tag``. A Struct without an id (created in this stage) keeps
+        none: it is a new element already.
+
+        Args:
+            name: What distinguishes the new element, e.g. ``"view"``.
+            discriminator: An integer (e.g. the index of a view), or another
+                value that is hashed into the id (e.g. a seed).
+        """
+        engine = RootEngine(root=STRUCT_ROOT)
+        share_columns(self, type(self), engine)
+        tagged = type(self)(storage=engine)
+        identity.tag(tagged, name, discriminator)
+        return tagged
+
 
 def struct_leaf_arrays(
     storage: _BaseStorage,
     schema: Schema,
+    omitted: FrozenSet[Tuple[str, ...]] = frozenset(),
 ) -> Dict[KeyPath, pa.Array]:
-    """Export the initialized leaves of the Struct at ``storage.root`` as 1-row arrays."""
+    """Export the initialized leaves of the Struct at ``storage.root`` as 1-row
+    arrays, except the ``omitted`` ones (pickled as references)."""
     return {
         path: leaf_to_arrow(_with_row_axis(storage.read(key, entry)), entry)
         for path, entry in schema.tree_iter()
-        if (key := storage.root.extend(path)) in storage
+        if path.path not in omitted and (key := storage.root.extend(path)) in storage
     }
 
 

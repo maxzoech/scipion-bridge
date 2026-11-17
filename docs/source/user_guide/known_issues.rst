@@ -49,7 +49,9 @@ numbers of particles, which is the usual case.
 
 **Instead.** Keep such elements in a ``Collection`` (``B.Collection[Class2D]``):
 every slot of a Collection stores its own columns, so nested Sets of different
-sizes pickle and travel between stages.
+sizes pickle and travel between stages. With elements that carry ids (e.g.
+particles a pipeline read), such a Set already raises when it is built (see
+above).
 
 Test: ``test_pickle_roundtrip_nested_sets_of_different_sizes`` in
 ``tests/scipion_bridge/struct/test_set_arrow.py``.
@@ -85,48 +87,97 @@ empty Set, works.
 Test: ``test_a_nested_set_column_longer_than_its_capacity_is_rejected`` in
 ``tests/scipion_bridge/struct/test_set.py``.
 
-Sets assigned into Struct fields or Collection slots lose their references
---------------------------------------------------------------------------
+Replacing the nested Set of one element clears it for every element
+-------------------------------------------------------------------
 
-Columns that are rows of input files (references, e.g. the ``pixels`` of
-particles read from their stacks) stay references through views, ``concat``,
-``chunk`` and ``astype``. Assigning a Set to a field of a Struct, or a Struct
-to a slot of a Collection, copies its columns instead, which makes them
-computed (owned) columns:
+Assigning a new nested Set to one element of a ``Set`` destroys the nested
+Sets of all other elements:
 
 .. code-block:: python
 
-    def classify(x):
-        particles, classifier = x               # pixels: references
-        labels = classifier.predict(particles["embeddings"])
-        classes = {
-            int(k): spa.Class2D(                # copies the selected rows: owned
-                particles=particles[labels == k],
-                class_id=int(k),
-            )
-            for k in np.unique(labels)
-        }
-        return B.Collection[spa.Class2D](size=n, items=classes)   # copies again
+    groups = B.Set[Group]([...])            # three groups of 2, 3 and 1 members
 
-The selection ``particles[labels == k]`` keeps the reference (a view narrows
-it to the selected rows); the copies happen in the descriptor of the Struct
-field (``Set.__set__``) and in ``Collection.__setitem__``. Selecting by
-positions instead of a mask does not change this.
+    groups[1].members = B.Set[Member]([Member(value=99.0), Member(value=98.0)])
 
-**Effect.** Spills after such a stage write the pixels instead of
-references (on the 2D pipeline: ~78 MB per item behind the classification, a
-spill estimate saving of 0%). Values are correct.
+    groups[1].members["value"]              # [[99.], [98.]]
+    groups[0].members["value"]              # UninitializedFieldError
+    groups[2].members["value"]              # IndexError
+    groups["members"]["value"].tolist()     # [None, [[99.0], [98.0]]]
 
-**The report does not show it.** The *Key paths* panel shows ``·`` for stages
-whose items are Collections, and no warning is raised: a reference counts as
-lost when the same path turns from reference to owned, but here the path
-``pixels`` of the input disappears and ``particles.pixels`` appears in every
-slot of the Collection. The byte columns of the provenance layer
-(``cached_bytes`` turning into ``owned_bytes``) show it.
+**Why.** The members of all groups are one column with a row per group. Before
+writing the new members, the assignment clears the old ones, and the clear
+removes the whole column instead of the row of group 1. Only group 1 is then
+written back.
 
-**Instead.** None yet. Carrying references through these assignments is
-planned for Collection slots and Structs; a ``Set[Class2D]``, whose particles
-are below two axes, will keep copying.
+**Instead.** Write values into the existing members
+(``groups[1].members[0].value = 5.0`` or
+``groups[1].members["value"] = ...`` with the same number of members), or
+replace the whole element: ``groups[1] = Group(members=..., group_id=1)``.
+Better still, keep such elements in a ``Collection``, whose slots store their
+own columns. Assigning a nested Set to a standalone Struct or to a
+``Collection`` slot is not affected.
+
+Test: ``test_replacing_the_members_of_one_group_keeps_the_other_groups`` in
+``tests/scipion_bridge/struct/test_set.py``.
+
+Nested Sets of elements with ids inside a Set raise NotImplementedError
+-----------------------------------------------------------------------
+
+Building a ``Set`` whose elements hold nested Sets of elements that carry
+element ids raises ``NotImplementedError``. Particles a pipeline reads carry
+ids (their row in a stack, or their Scipion item id), so a ``Set[Class2D]``
+built from them raises on every write path:
+
+.. code-block:: python
+
+    classes = B.Set[spa.Class2D]([
+        spa.Class2D(particles=particles[labels == k], class_id=int(k))
+        for k in np.unique(labels)
+    ])                                  # NotImplementedError
+
+    classes[i] = spa.Class2D(...)       # NotImplementedError
+    classes[i].particles = particles    # NotImplementedError
+
+**Why.** Element ids let lineage trace an output back to the input elements it
+holds, and they are what ScipionWeb stores as ``scipionItemId``. In a
+``Set[Class2D]``, the particles of all classes are one column with a row per
+class: they sit below two axes (the class, then the particle within it), and
+the number of particles differs per class, so the column is ragged. Ids, like
+references to the input files, are stored per column as compact segments,
+which cannot describe ragged columns yet. Copying the particles would silently
+drop their ids: lineage could no longer tell which input particle a member
+is. Raising makes this explicit. No values are lost either way.
+
+**Instead.** Use a ``Collection``: every slot stores its own columns, so the
+particles of a class sit below one axis and keep their ids and their
+references to the input files (spills write references, not pixels). The
+Scipion resolver (``SetOfClasses2D`` → ``Collection[Class2D]``) and the
+protocols of ``scipion-em-foundation-models`` use it:
+
+.. code-block:: python
+
+    keys = np.unique(labels)
+    classes = B.Collection[spa.Class2D](
+        size=len(keys),
+        items={
+            i: spa.Class2D(particles=particles[labels == k], class_id=int(k))
+            for i, k in enumerate(keys)
+        },
+    )
+
+**What changed for existing code.** Two uses of ``Set[Class2D]`` with
+particles from a pipeline worked before and raise now: a ``Set[Class2D]``
+built and used within one stage, and one with classes of equal size sent
+between stages (classes of different sizes already failed, see below).
+Particles without ids, e.g. built by hand in tests, still form a
+``Set[Class2D]``; their references (if any) are copied as bytes.
+
+**Planned.** Storing the ids and references of nested Sets per outer element
+(a list of segments per class), which removes the guard.
+
+Tests: ``test_a_set_of_groups_from_members_with_ids_raises`` and
+``test_a_set_of_groups_from_members_without_ids_copies`` in
+``tests/scipion_bridge/struct/test_ids.py``.
 
 Struct specialization is not implemented
 ----------------------------------------

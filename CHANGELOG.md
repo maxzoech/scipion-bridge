@@ -35,6 +35,27 @@
   `backend.ray` no longer exports its actor classes, `RayResourceCoordinator`
   and the alias `configure_ray_container`.
 
+### Element ids
+- Every element of a Set, and every Struct, can carry an element id, a
+  column of the storage that is not part of the schema (`id_column.py`,
+  `identity.py`, internal). Ids are compact segments (a namespace plus a
+  range or positions), follow the rows through views, `concat`, `astype`,
+  row writes, `Set([...])`, Struct fields and Collection slots, and survive
+  pickling. Resolvers do not set them yet.
+- `Set.tag(name, discriminator)` and `Struct.tag(...)` give elements derived
+  from others (e.g. augmented views) ids of their own, linked to theirs.
+  `B.ids_rng(elements, salt)` returns random generators seeded from the ids,
+  for augmentations that repeat when a stage runs again.
+- A Set whose elements hold nested Sets of elements with ids (e.g. a
+  `Set[Class2D]` of particles a pipeline read) raises `NotImplementedError`;
+  use a `Collection` (Known Issues).
+- Sets assigned into Struct fields and Structs assigned into Collection
+  slots keep the references of their columns (unread rows stay unread), and
+  Structs and Collections pickle references like Sets, so spills behind a
+  classification write references instead of pixels.
+- Fingerprints and `stage_fp` use `xxh3_128` instead of SHA-256
+  (`core/utils/hashing.py`), so all fingerprints change once.
+
 ### Indexing of nested fields
 - Fixed: selecting rows of a struct field after an outer selection selects
   rows of the Set: `s[1:]["ctf"][:1]` is one row (it was three),

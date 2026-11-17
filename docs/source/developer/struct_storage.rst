@@ -482,7 +482,45 @@ Copy-on-write (``_writable_static_buffer``) and the write path of reference
 columns then keep writes to the result from reaching ``value``. A cast costs
 about 55 µs per leaf and reads no rows of files. A whole-column write of a
 leaf below more than one axis (a nested Set) allocates a ragged column, as
-indexed writes do.
+indexed writes do. The column sharing is ``sharing.share_columns``, which
+``tag`` uses too.
+
+Element ids
+^^^^^^^^^^^
+
+Element ids (user guide: :doc:`/user_guide/structs/element_ids`) are a column
+of the engine that is not part of the schema: ``RootEngine._ids`` maps the
+field key of the root of a Set or Struct to an ``IdColumn``
+(``id_column.py``). ``()`` is the root of a Set or of a standalone Struct,
+``("particles",)`` the Set of a Struct field, ``("3", "particles")`` that field
+in slot 3 of a Collection.
+
+* An ``IdColumn`` is a tuple of segments: positional (a 16-byte namespace and
+  a ``range`` or ``int64`` positions), explicit (``(n, 16)`` ids, from hashed
+  tags) or unassigned (rows without ids). Element ``k`` of a positional
+  segment is ``item_id(namespace, position)`` (``core/utils/hashing.py``),
+  materialized only on request (``IdColumn.ids``).
+* ``narrow`` selects with an index, a slice, positions or a mask, splitting
+  the selection into runs per segment, as ``Reference.segments`` does;
+  ``concat`` joins columns and merges adjacent runs of a namespace; ``assign``
+  gives rows the ids of others (gathering from the concatenation of both).
+* ``identity.py`` works on objects: ``element_ids`` narrows the column of an
+  object to its view (through the axis index of its ``KeyPath``, like
+  ``reference_at``); ``hidden_ids`` adds the columns of the Sets nested below
+  a root without selection; ``write_ids`` is called by every write of rows
+  (``Set.__setitem__``, ``Set.__set__``, ``Collection.__setitem__``),
+  ``populate_ids`` by ``Set([...])`` and ``concat_ids`` by ``concat``.
+  Pickling carries the columns next to the references (``_pickle_state``).
+* Columns are stored for Sets with one axis only. ``check_placement`` runs
+  before a write and raises ``NotImplementedError`` when elements with ids
+  would land below two axes (the members of nested Sets of a Set); without
+  ids, such writes copy as before.
+
+The same writes carry references (``references.copy_leaf``): when the target
+is a whole column (a Struct field or a Collection slot), it becomes the
+source's reference, narrowed to the view's rows. Unread rows stay unread.
+``Struct`` and ``Collection`` pickle their references like ``Set``, per slot
+for a Collection, so spilling them writes references instead of rows.
 
 Thread safety
 ^^^^^^^^^^^^^

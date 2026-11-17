@@ -535,6 +535,26 @@ def test_the_members_of_one_group_can_be_indexed():
     ]
 
 
+# Documented in docs/source/user_guide/known_issues.rst.
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Replacing the nested Set of one element clears that column of every "
+        "element; when this passes, the bug is fixed."
+    ),
+)
+def test_replacing_the_members_of_one_group_keeps_the_other_groups():
+    groups = B.Set[Group]([_group(i, n) for i, n in enumerate([2, 3, 1])])
+
+    groups[1].members = B.Set[Member]([Member(value=99.0), Member(value=98.0)])
+
+    assert groups["members"]["value"].tolist() == [
+        [[0.0], [1.0]],
+        [[99.0], [98.0]],
+        [[20.0]],
+    ]
+
+
 class Defocus(B.Struct):
     defocus: float
 

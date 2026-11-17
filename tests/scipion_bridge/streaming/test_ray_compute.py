@@ -849,6 +849,62 @@ def test_astype_keeps_the_references_through_every_stage(tmp_path):
     assert _wait_for_free_gpus() == CLUSTER_GPUS
 
 
+class ImageGroup(B.Struct):
+    members: B.Set[ImageItem]
+    group_id: int
+
+
+def _grouped(chunk):
+    # Classes of particles: Sets in the slots of a Collection keep the
+    # references of their pixels.
+    half = len(chunk) // 2
+    groups = B.Collection[ImageGroup](
+        size=2,
+        items=[
+            ImageGroup(members=chunk[:half], group_id=0),
+            ImageGroup(members=chunk[half:], group_id=1),
+        ],
+    )
+    return {"result": groups}
+
+
+@B.resources(gpus=CLUSTER_GPUS, task=B.TaskType.LONG_RUNNING)
+class ImagesGrouped(B.Protocol):
+    out: B.Input[B.Set[ImageItem]] = B.Input()
+
+    def outputs(self):
+        return {"result": B.Collection[ImageGroup]}
+
+    def steps(self):
+        return self.out.map(_grouped)
+
+
+def test_collections_of_groups_keep_the_references_of_their_members(tmp_path):
+    chunks = _image_chunks(tmp_path / "stack.npy", chunks=4, size=16)
+    pipeline, collector = _phased(ImagesFirst(), ImagesGrouped(), spill_threshold=2)
+    with pipeline:
+        for chunk in chunks:
+            pipeline.send(items=chunk)
+
+    results = [r["result"] for r in ray.get(collector.get.remote())]
+    expected = sorted(
+        float(np.asarray(c["pixels"], dtype=np.float64).sum()) for c in chunks
+    )
+    sums = sorted(
+        sum(
+            float(np.asarray(g[i].members["pixels"], dtype=np.float64).sum())
+            for i in range(2)
+        )
+        for g in results
+    )
+    assert sums == pytest.approx(expected)
+    report = pipeline.report()
+    layer = report.layer("provenance")
+    (grouped,) = [n.id for n in report.nodes if n.title.endswith("_grouped)")]
+    assert layer.nodes[grouped]["reference_fraction"] > 0.9
+    assert _wait_for_free_gpus() == CLUSTER_GPUS
+
+
 def test_phases_start_over_with_every_stream():
     pipeline, collector = _phased(AllGpusFirst(), AllGpusSecond())
 

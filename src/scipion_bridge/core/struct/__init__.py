@@ -2,6 +2,7 @@
 
 from .collection import Collection
 from .exceptions import UninitializedFieldError
+from .identity import ids_rng
 from .key_path import IndexType, KeyPath
 from .schema import (
     ArrayEntry,
@@ -26,6 +27,7 @@ __all__ = [
     "Set",
     "Collection",
     "concat",
+    "ids_rng",
     "Array",
     "Arg",
     "Dim",

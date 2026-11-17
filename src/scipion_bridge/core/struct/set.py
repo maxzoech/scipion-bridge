@@ -39,7 +39,8 @@ from .schema import (
 )
 from .exceptions import UninitializedFieldError
 from .storage import _BaseStorage, RootEngine
-from . import references
+from . import identity, references
+from .sharing import share_columns
 from .utils.arrow_utils import (
     find_nested_column,
     leaf_from_arrow,
@@ -148,6 +149,7 @@ class Set(Marker[T], SchemaConvertible):
 
             target_path = self._storage.root.extend(path)
             self._storage.write(target_path, entry, col_chunks)
+        identity.populate_ids(self, items)
 
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         if instance is None:
@@ -195,6 +197,7 @@ class Set(Marker[T], SchemaConvertible):
         ):
             return
 
+        identity.check_placement(value, target_root)
         instance.storage.clear(target_root)
 
         for path, entry in field_entry.schema.tree_iter():
@@ -202,9 +205,15 @@ class Set(Marker[T], SchemaConvertible):
             if source_path not in value._storage:
                 continue
 
-            data = value._storage.read(source_path, entry)
-            target_path = target_root.extend(path)
-            instance.storage.write(target_path, entry, data)
+            references.copy_leaf(
+                value._storage,
+                source_path,
+                entry,
+                instance.storage,
+                target_root.extend(path),
+                entry,
+            )
+        identity.write_ids(value, instance.storage, target_root)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -352,6 +361,7 @@ class Set(Marker[T], SchemaConvertible):
                 ):
                     return
 
+                identity.check_placement(value, target_root)
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -365,6 +375,7 @@ class Set(Marker[T], SchemaConvertible):
 
                     target_path = target_root.extend(path)
                     self._storage.write(target_path, target_entry, data)
+                identity.write_ids(value, self._storage, target_root)
 
             case slice() as index:
                 if not isinstance(value, Set):
@@ -380,6 +391,7 @@ class Set(Marker[T], SchemaConvertible):
                 ):
                     return
 
+                identity.check_placement(value, target_root)
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -390,6 +402,7 @@ class Set(Marker[T], SchemaConvertible):
 
                     target_path = target_root.extend(path)
                     self._storage.write(target_path, target_entry, data)
+                identity.write_ids(value, self._storage, target_root)
 
             case _ if _is_bool_sequence(key):
                 if not isinstance(value, Set):
@@ -398,6 +411,8 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 span = self._active_span
+                target_root = self._storage.root.narrow_mask(key, length=span)
+                identity.check_placement(value, target_root)
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -406,10 +421,9 @@ class Set(Marker[T], SchemaConvertible):
                     source_path = value._storage.root.extend(path)
                     data = value._storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_mask(
-                        key, length=span
-                    ).extend(path)
+                    target_path = target_root.extend(path)
                     self._storage.write(target_path, target_entry, data)
+                identity.write_ids(value, self._storage, target_root)
 
             case _ if _is_int_sequence(key):
                 if not isinstance(value, Set):
@@ -418,6 +432,8 @@ class Set(Marker[T], SchemaConvertible):
                     )
 
                 span = self._active_span
+                target_root = self._storage.root.narrow_indices(key, length=span)
+                identity.check_placement(value, target_root)
                 entry = self.entry
                 assert isinstance(entry, SchemaEntry)
                 for path, target_entry, source_entry in entry.schema.tree_iter(
@@ -426,10 +442,9 @@ class Set(Marker[T], SchemaConvertible):
                     source_path = value._storage.root.extend(path)
                     data = value._storage.read(source_path, source_entry)
 
-                    target_path = self._storage.root.narrow_indices(
-                        key, length=span
-                    ).extend(path)
+                    target_path = target_root.extend(path)
                     self._storage.write(target_path, target_entry, data)
+                identity.write_ids(value, self._storage, target_root)
 
             case str(field_name):
                 fields = self.schema().fields
@@ -451,6 +466,11 @@ class Set(Marker[T], SchemaConvertible):
                         raise ValueError
 
                     assert isinstance(value, Set)
+                    if isinstance(schema_entry, SchemaSetEntry):
+                        identity.check_placement(
+                            value,
+                            self._storage.root.append(field_name, axis=True),
+                        )
 
                     for (
                         path,
@@ -600,12 +620,44 @@ class Set(Marker[T], SchemaConvertible):
         return self._to_arrow(frozenset())
 
     def _pickle_state(self) -> Tuple[pa.RecordBatch, Any]:
-        """The batch without the columns pickled as references, and those."""
+        """The batch without the columns pickled as references, those, and
+        the element ids."""
         pickled, omitted = references.pickled_references(self)
-        return self._to_arrow(omitted), tuple(pickled)
+        return self._to_arrow(omitted), (tuple(pickled), identity.hidden_ids(self))
 
     def _restore_state(self, state: Any) -> None:
-        references.restore_references(self, list(state))
+        pickled, ids = state
+        references.restore_references(self, list(pickled))
+        identity.restore_ids(self, ids)
+
+    def tag(self, name: str, discriminator: Any) -> Self:
+        """A Set of new elements with the values of these, e.g. augmented views.
+
+        Every element keeps a link to the element it derives from, but gets
+        an id of its own, so that lineage tells, e.g., the 6 random views of
+        a particle apart::
+
+            views = particles[np.repeat(np.arange(len(particles)), 6)]
+            views = views.tag("view", np.tile(np.arange(6), len(particles)))
+
+        The columns are shared, as by ``astype``. Elements without ids (rows
+        created in this stage) keep none: they are new elements already.
+
+        Args:
+            name: What distinguishes the new elements, e.g. ``"view"``.
+            discriminator: One value per element, or one for all. Integers
+                (e.g. the index of a view) give the same ids when the stage
+                runs again, e.g. after a resume. Other values (a seed, the
+                parameters of an augmentation) are hashed into the ids: new
+                values give new elements. See "Randomness and resume" in the
+                user guide, and ``ids_rng`` to seed random augmentations from
+                the ids.
+        """
+        engine = RootEngine()
+        share_columns(self, type(self), engine)
+        tagged = type(self)(capacity=self._capacity, storage=engine)
+        identity.tag(tagged, name, discriminator)
+        return tagged
 
     def _to_arrow(self, omitted: FrozenSet[Tuple[str, ...]]) -> pa.RecordBatch:
         leaves = {
@@ -720,7 +772,9 @@ def concat(sets: Sequence[Set[T]]) -> Set[T]:
     )
 
     assert first_set.dtype is not None
-    return Set[first_set.dtype](
+    result = Set[first_set.dtype](
         capacity=total_capacity,
         storage=new_storage,
     )
+    identity.concat_ids(sets, result)
+    return result

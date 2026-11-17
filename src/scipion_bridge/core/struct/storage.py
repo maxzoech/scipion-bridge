@@ -47,6 +47,7 @@ from .schema import (
     SchemaSetEntry,
 )
 from .key_path import AxisIndex, IndexType, KeyPath
+from .id_column import IdColumn
 from .source import Reference
 
 FieldKey = Tuple[str, ...]
@@ -382,6 +383,9 @@ class RootEngine(_BaseStorage):
         self._data: Dict[FieldKey, Column] = {}
         self._chunks: Dict[FieldKey, List[Any]] = {}
         self._refs: Dict[FieldKey, Reference] = {}
+        # The element ids of the Sets and Structs of the engine, by the field
+        # key of their root (``identity.py``); not part of the schema.
+        self._ids: Dict[FieldKey, IdColumn] = {}
         # (column keys, their prefixes), see _initialized_prefixes
         self._prefix_cache: Tuple[FrozenSet[FieldKey], FrozenSet[FieldKey]] = (
             frozenset(),
@@ -533,6 +537,9 @@ class RootEngine(_BaseStorage):
         }
         self._refs = {
             k: v for k, v in tuple(self._refs.items()) if not self._is_under(k, prefix)
+        }
+        self._ids = {
+            k: v for k, v in tuple(self._ids.items()) if not self._is_under(k, prefix)
         }
 
     def get_length(self, key: Optional[KeyPath] = None) -> Optional[int]:
