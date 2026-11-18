@@ -1,6 +1,6 @@
-"""Changing the type of a Set or Struct without copying its columns (internal).
+"""Changing the type of a Set or Struct without copying its columns.
 
-``cast(value, T)`` returns a ``T`` whose leaves share the columns of the
+``astype(value, T)`` returns a ``T`` whose leaves share the columns of the
 leaves of ``value`` with the same field path: no rows are read and no bytes
 move, and references to rows of input files stay references. Fields of ``T``
 that ``value`` lacks stay uninitialized; fields ``T`` lacks are dropped.
@@ -14,8 +14,12 @@ writing to the result never changes ``value``; writing in place into a buffer
 read from it raises. Writes to ``value`` after the cast can show through the
 views of its owned buffers.
 
-The streaming operator ``Op.astype`` is built on it. It is not part of the
-public API of the type system.
+Dropping fields keeps the element ids of the rows and the references to
+input files, e.g. to keep the members of a class without their pixels::
+
+    members = B.astype(particles, B.Set[Member])  # Member: coordinates only
+
+The streaming operator ``Op.astype`` applies it to every item of a stream.
 """
 
 from __future__ import annotations
@@ -56,7 +60,7 @@ def check_target(target: Any) -> None:
             )
 
 
-def cast(value: Stored, target: Type[S]) -> S:
+def astype(value: Stored, target: Type[S]) -> S:
     """A ``target`` sharing the columns of ``value``, without reading or copying rows.
 
     Args:

@@ -7,7 +7,7 @@ import pytest
 
 import scipion_bridge as B
 from scipion_bridge.core.struct import concat, identity, references
-from scipion_bridge.core.struct.cast import cast
+
 from scipion_bridge.core.struct.id_column import IdColumn, tag_column
 from scipion_bridge.core.struct.references import PicklingMode
 from scipion_bridge.core.struct.source import ArraySource, Reference
@@ -333,7 +333,7 @@ def test_a_set_of_groups_from_members_without_ids_copies():
 def test_casts_share_the_ids():
     s, _ = _images()
 
-    scored = cast(s[1:4], B.Set[ScoredImage])
+    scored = B.astype(s[1:4], B.Set[ScoredImage])
 
     assert _ids(scored) == _f(1, 2, 3)
 

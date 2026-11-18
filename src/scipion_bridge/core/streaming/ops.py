@@ -21,7 +21,7 @@ from typing import (
 
 from ..environment.compute import ComputeAssignment
 from ..struct import Set, concat
-from ..struct.cast import cast, check_target
+from ..struct.cast import astype, check_target
 from ..struct.collection import Collection
 from ..struct.struct import Struct
 from .node import Node, LoweringContext
@@ -446,7 +446,7 @@ class Cast:
     def __call__(self, item: Any) -> Any:
         match item:
             case Set() | Struct() | Collection():
-                return cast(item, self.target)
+                return astype(item, self.target)
             case _:
                 raise TypeError(
                     f"astype({self.target.__name__}) expected a Set or a Struct, "

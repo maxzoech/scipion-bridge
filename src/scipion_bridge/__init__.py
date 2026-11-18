@@ -9,7 +9,17 @@ Domain types and proxies of single particle analysis are in
 """
 
 # Structs
-from .core.struct import Arg, Array, Collection, Dim, Set, Struct, concat, ids_rng
+from .core.struct import (
+    Arg,
+    Array,
+    Collection,
+    Dim,
+    Set,
+    Struct,
+    astype,
+    concat,
+    ids_rng,
+)
 
 # Protocols and their compute resources
 from .core.protocol import (
@@ -74,6 +84,7 @@ __all__ = [
     "Arg",
     "Dim",
     "concat",
+    "astype",
     "ids_rng",
     # Protocols and their compute resources
     "Protocol",

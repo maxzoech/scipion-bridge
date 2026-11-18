@@ -30,6 +30,10 @@ Array types
      - A named dimension, shared between array shapes.
    * - :py:obj:`B.concat <scipion_bridge.core.struct.set.concat>`
      - Concatenate sets with identical schemas.
+   * - :py:obj:`B.astype <scipion_bridge.core.struct.cast.astype>`
+     - Change the type of a Set or Struct without copying its columns: drop
+       fields (keeping element ids and references to input files) or add
+       uninitialized ones.
 
 Common methods: ``schema()``, ``print_schema()``, ``to_arrow()``,
 ``from_arrow(batch)``, ``is_initialized(...)``.

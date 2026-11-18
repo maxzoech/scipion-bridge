@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 
 import scipion_bridge as B
-from scipion_bridge.core.struct import references
-from scipion_bridge.core.struct.cast import cast
+from scipion_bridge.core.struct import identity, references
+from scipion_bridge.core.struct.id_column import IdColumn
+
 from scipion_bridge.core.struct.references import PicklingMode
 from scipion_bridge.core.struct.source import ArraySource, Reference
 
@@ -78,7 +79,7 @@ def _read(s, path):
 def test_a_cast_shares_the_columns_and_adds_uninitialized_fields():
     s, _ = _images()
 
-    scored = cast(s, B.Set[ScoredImage])
+    scored = B.astype(s, B.Set[ScoredImage])
 
     assert isinstance(scored, B.Set[ScoredImage]) and len(scored) == len(s)
     assert scored.capacity == s.capacity
@@ -93,10 +94,10 @@ def test_a_cast_shares_the_columns_and_adds_uninitialized_fields():
 
 def test_fields_the_target_lacks_are_dropped():
     s, _ = _images()
-    scored = cast(s, B.Set[ScoredImage])
+    scored = B.astype(s, B.Set[ScoredImage])
     scored["score"] = np.ones(len(s))
 
-    back = cast(scored, B.Set[Image])
+    back = B.astype(scored, B.Set[Image])
 
     assert set(references.column_states(back)) == {
         ("pixels",),
@@ -108,7 +109,7 @@ def test_fields_the_target_lacks_are_dropped():
 def test_types_outside_each_others_hierarchy_cast_by_their_common_fields():
     s, _ = _images()
 
-    thumbnails = cast(s, B.Set[Thumbnail])
+    thumbnails = B.astype(s, B.Set[Thumbnail])
 
     assert set(references.column_states(thumbnails)) == {("pixels",)}
     np.testing.assert_array_equal(thumbnails["pixels"], s["pixels"])
@@ -118,7 +119,7 @@ def test_types_outside_each_others_hierarchy_cast_by_their_common_fields():
 def test_unread_references_stay_unread():
     s, source = _images(reference=True)
 
-    scored = cast(s, B.Set[ScoredImage])
+    scored = B.astype(s, B.Set[ScoredImage])
 
     assert source.reads == 0
     assert references.column_states(scored)[("pixels",)].state == "reference"
@@ -130,7 +131,7 @@ def test_read_references_stay_references_with_their_digests():
     s, source = _images(reference=True)
     references.prefetch(s)
 
-    scored = cast(s, B.Set[ScoredImage])
+    scored = B.astype(s, B.Set[ScoredImage])
 
     states = references.column_states(scored)
     assert states[("pixels",)] == references.column_states(s)[("pixels",)]
@@ -155,7 +156,7 @@ def test_views_are_cast_with_their_rows(select):
     eager, _ = _images()
     view = select(s)
 
-    scored = cast(view, B.Set[ScoredImage])
+    scored = B.astype(view, B.Set[ScoredImage])
 
     assert len(scored) == len(view)
     paths = ("pixels", "ctf.defocus", "sampling_rate")
@@ -169,7 +170,7 @@ def test_views_are_cast_with_their_rows(select):
 def test_an_element_of_a_set_is_cast_to_a_struct():
     s, _ = _images()
 
-    element = cast(s[3], ScoredImage)
+    element = B.astype(s[3], ScoredImage)
 
     assert isinstance(element, ScoredImage)
     np.testing.assert_array_equal(element.pixels, _rows(6)[3])
@@ -184,7 +185,7 @@ def test_structs_cast_to_structs():
         sampling_rate=1.0,
     )
 
-    scored = cast(image, ScoredImage)
+    scored = B.astype(image, ScoredImage)
 
     assert (scored.ctf.defocus, scored.ctf.angle, scored.sampling_rate) == (
         2.0,
@@ -218,7 +219,7 @@ def test_nested_sets_are_shared_with_their_rows():
         ],
     )
 
-    labelled = cast(groups, B.Set[LabelledGroup])
+    labelled = B.astype(groups, B.Set[LabelledGroup])
 
     for g, n in enumerate([2, 3, 1]):
         values = np.asarray(labelled[g].members["value"]).ravel().tolist()
@@ -271,7 +272,7 @@ def test_casts_that_would_convert_values_are_rejected(target, message):
     s, _ = _images()
 
     with pytest.raises(TypeError, match=message):
-        cast(s, target)
+        B.astype(s, target)
 
 
 def test_a_nested_set_does_not_cast_to_a_nested_struct():
@@ -280,7 +281,7 @@ def test_a_nested_set_does_not_cast_to_a_nested_struct():
     with pytest.raises(
         TypeError, match="'members' is a nested Set in one type and a nested Struct"
     ):
-        cast(s, B.Set[StructOfMembers])
+        B.astype(s, B.Set[StructOfMembers])
 
 
 def test_targets_must_be_set_types_or_structs():
@@ -288,7 +289,7 @@ def test_targets_must_be_set_types_or_structs():
 
     for target in (B.Set, int, 3):
         with pytest.raises(TypeError, match="Set type .* or a Struct"):
-            cast(s, target)
+            B.astype(s, target)
 
 
 def test_a_view_of_the_members_of_every_group_is_rejected():
@@ -297,7 +298,7 @@ def test_a_view_of_the_members_of_every_group_is_rejected():
     )
 
     with pytest.raises(TypeError, match="index the outer Set first"):
-        cast(groups["members"], B.Set[Member])
+        B.astype(groups["members"], B.Set[Member])
 
 
 class Classes(B.Struct):
@@ -320,7 +321,7 @@ def test_collection_fields_of_the_same_size_are_shared():
         sampling_rate=1.0,
     )
 
-    labelled = cast(classes, LabelledClasses)
+    labelled = B.astype(classes, LabelledClasses)
 
     assert labelled.classes[1].ctf.defocus == 2.0
     assert not labelled.classes.is_initialized(0)
@@ -328,16 +329,16 @@ def test_collection_fields_of_the_same_size_are_shared():
 
 def test_collection_fields_of_another_size_are_rejected():
     with pytest.raises(TypeError, match="Collection of size 2 in one type and 3"):
-        cast(Classes(), MoreClasses)
+        B.astype(Classes(), MoreClasses)
 
 
 def test_casting_collections_is_not_implemented():
     collection = B.Collection[Image](size=2)
 
     with pytest.raises(NotImplementedError):
-        cast(collection, ScoredImage)
+        B.astype(collection, ScoredImage)
     with pytest.raises(NotImplementedError):
-        cast(_images()[0], B.Collection[Image])
+        B.astype(_images()[0], B.Collection[Image])
 
 
 # -- No aliasing ---------------------------------------------------------------
@@ -362,7 +363,7 @@ def test_writing_to_a_cast_leaves_the_input_unchanged(write):
     s, _ = _images()
     before = _values(s, "pixels", "ctf.defocus", "sampling_rate")
 
-    write(cast(s, B.Set[ScoredImage]))
+    write(B.astype(s, B.Set[ScoredImage]))
 
     for path, value in _values(s, "pixels", "ctf.defocus", "sampling_rate").items():
         np.testing.assert_array_equal(value, before[path])
@@ -370,7 +371,7 @@ def test_writing_to_a_cast_leaves_the_input_unchanged(write):
 
 def test_writing_in_place_into_a_shared_buffer_raises():
     s, _ = _images()
-    scored = cast(s, B.Set[ScoredImage])
+    scored = B.astype(s, B.Set[ScoredImage])
 
     with pytest.raises(ValueError, match="read-only"):
         scored["pixels"][0] = 1.0
@@ -379,7 +380,7 @@ def test_writing_in_place_into_a_shared_buffer_raises():
 def test_writing_into_a_reference_makes_it_owned_in_the_cast_only():
     s, _ = _images(reference=True)
     references.prefetch(s)
-    scored = cast(s, B.Set[ScoredImage])
+    scored = B.astype(s, B.Set[ScoredImage])
 
     scored[1:3]["pixels"] = np.zeros((2, 4, 4), dtype=np.float32)
 
@@ -392,7 +393,7 @@ def test_writing_into_a_reference_makes_it_owned_in_the_cast_only():
 def test_casts_pickle_with_their_references():
     s, _ = _images(reference=True)
     references.prefetch(s)
-    scored = cast(s, B.Set[ScoredImage])
+    scored = B.astype(s, B.Set[ScoredImage])
 
     transferred = pickle.loads(pickle.dumps(scored))
     with references.pickling(PicklingMode.SPILL):
@@ -403,3 +404,27 @@ def test_casts_pickle_with_their_references():
     assert references.column_states(restored)[("pixels",)].state == "reference"
     np.testing.assert_array_equal(restored["pixels"], _rows(6))
     assert len(spilled) < len(pickle.dumps(scored))
+
+
+# -- Dropping fields -------------------------------------------------------------
+class ClassMember(B.Struct):
+    """The members of a class: their CTF, without their pixels."""
+
+    ctf: CTF
+
+
+def test_dropping_the_pixels_keeps_the_ids_and_the_other_fields():
+    s, _ = _images(64)
+    identity.set_ids(s, IdColumn.of(b"F" * 16, range(64)))
+
+    members = B.astype(s, B.Set[ClassMember])
+
+    assert _ids(members) == _ids(s)
+    np.testing.assert_array_equal(members["ctf"]["defocus"], s["ctf"]["defocus"])
+    restored = pickle.loads(pickle.dumps(members))
+    assert len(pickle.dumps(members)) < _rows(64).nbytes
+    assert _ids(restored) == _ids(s)
+
+
+def _ids(s):
+    return identity.element_ids(s).ids().tobytes()

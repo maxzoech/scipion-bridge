@@ -72,6 +72,9 @@
   `--logdir`: it lists every run below it (running ones marked, new ones
   appear) and browses the one picked; its API is `/api/runs` and
   `/api/run/<name>/...`.
+- `B.astype(value, T)` changes the type of a Set or Struct without copying
+  its columns, as `Op.astype` does for a stream: e.g. dropping the pixels of
+  the members of a class keeps their element ids and file references.
 - Arrays with an axis of size 0 (e.g. the members of an empty class) no
   longer kill the process (SIGFPE in PyArrow) when converted to Arrow or
   pickled.

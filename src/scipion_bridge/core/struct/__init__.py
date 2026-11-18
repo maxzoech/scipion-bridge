@@ -1,5 +1,6 @@
 """Core Struct and Set abstractions and Arrow storage engine."""
 
+from .cast import astype
 from .collection import Collection
 from .exceptions import UninitializedFieldError
 from .identity import ids_rng
@@ -27,6 +28,7 @@ __all__ = [
     "Set",
     "Collection",
     "concat",
+    "astype",
     "ids_rng",
     "Array",
     "Arg",
