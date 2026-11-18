@@ -1,3 +1,5 @@
+from typing import List
+
 from dependency_injector import containers, providers
 
 from ...core.environment.cmd_exec import StandaloneExecProvider
@@ -5,14 +7,20 @@ from ...core.environment.temp_files import TemporaryFilesProvider
 from ...core.environment.storage import ArrowStorageProvider
 from ...core.environment.resource_provider import DefaultResourceProvider
 from ...core.environment.protocol_config import StaticProtocolConfigurationProvider
-from ...core.streaming.backend import StreamingBackendProvider
+from ...core.streaming.backend import CompiledPipeline, StreamingBackendProvider
+from ...core.streaming.ir import IROp
 
-try:
-    from ..ray.backend import RayBackend
 
-    default_streaming_backend = providers.Factory(RayBackend)
-except ImportError:
-    default_streaming_backend = providers.AbstractFactory(StreamingBackendProvider)
+class NoStreamingBackend(StreamingBackendProvider):
+    """The streaming backend of containers that do not implement streaming
+    (standalone, pyworkflow): compiling a pipeline raises."""
+
+    def compile(self, ir_sinks: List[IROp]) -> CompiledPipeline:
+        raise NotImplementedError(
+            "This backend does not implement streaming. Compile pipelines with "
+            "the Ray backend, Pipeline.from_sink(..., backend=RayBackend()), "
+            "or run protocols with RayPipelineRunner.",
+        )
 
 
 class Container(containers.DeclarativeContainer):
@@ -29,7 +37,7 @@ class Container(containers.DeclarativeContainer):
         values={},
     )
     resource_provider = providers.Singleton(DefaultResourceProvider)
-    streaming_backend = default_streaming_backend
+    streaming_backend = providers.Factory(NoStreamingBackend)
 
 
 def configure_default_env(modules=None, packages=None):

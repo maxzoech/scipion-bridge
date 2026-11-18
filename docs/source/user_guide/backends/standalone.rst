@@ -25,7 +25,10 @@ Services
   ``protocol_config_provider`` abstract, because outside of a runner there are
   no parameter values to serve. Code that reads ``Field.value`` needs one; see
   below.
-* **Pipelines** are compiled with the Ray backend if Ray is installed.
+* **Pipelines** cannot be compiled: the standalone backend does not
+  implement streaming, and ``Pipeline.from_sink`` raises
+  ``NotImplementedError``. Pass ``backend=RayBackend()`` or run protocols
+  with ``RayPipelineRunner``.
 
 Wiring
 ------

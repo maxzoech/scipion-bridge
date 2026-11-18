@@ -92,9 +92,9 @@ The backends differ in the implementation of each service:
      - per process, or per cluster
      - per process
    * - ``streaming_backend``
-     - Ray, if installed
+     - not implemented
      - Ray
-     - Ray, if installed
+     - not implemented
 
 Articles in this section
 ------------------------

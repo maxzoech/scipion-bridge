@@ -219,7 +219,9 @@ not know where it runs. The library ships three backends:
    A protocol class is converted into a native Scipion 3 streaming protocol
    with a generated form. Inputs and outputs are converted from and to
    Scipion objects, commands run through the protocol's ``runJob``, and
-   temporary files are created in the protocol's directory.
+   temporary files are created in the protocol's directory. Streaming is not
+   implemented on this backend yet, so the generated protocol cannot run its
+   pipeline.
 
 Interoperability with Scipion
 -----------------------------
@@ -231,7 +233,7 @@ ways.
    A Scipion Bridge protocol becomes a native Scipion 3 protocol with a
    generated form (see :ref:`scipion-backend`). It reads its inputs from the
    outputs of other Scipion protocols, and its outputs can be used by them in
-   turn. The same class still runs on Ray outside of Scipion. Parameter
+   turn, once the pyworkflow backend implements streaming. The same class still runs on Ray outside of Scipion. Parameter
    values such as the chunk size should be chosen for the environment the
    protocol runs in.
 

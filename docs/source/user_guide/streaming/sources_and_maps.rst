@@ -22,7 +22,7 @@ A ``Source`` is a named entry point of a graph. Data enters it through
     particles = Source("particles")
     out = particles.map(process).sink(save)
 
-    with Pipeline.from_sink(out) as pipeline:
+    with Pipeline.from_sink(out, backend=RayBackend()) as pipeline:
         pipeline.send(particles=batch)
 
 Inside a :doc:`protocol </user_guide/protocols/index>`, every ``B.Input``

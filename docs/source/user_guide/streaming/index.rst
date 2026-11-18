@@ -11,12 +11,13 @@ operations.
 
 .. code-block:: python
 
+    from scipion_bridge.backend.ray import RayBackend
     from scipion_bridge.core.streaming import Pipeline, Source
 
     particles = Source("particles")
     done = particles.chunk(256).map(embed).map(cluster).sink(save)
 
-    with Pipeline.from_sink(done) as pipeline:
+    with Pipeline.from_sink(done, backend=RayBackend()) as pipeline:
         for batch in batches:
             pipeline.send(particles=batch)
 

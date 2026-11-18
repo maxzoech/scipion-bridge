@@ -61,6 +61,13 @@ explanation of the resolver that is missing.
 Execution
 ---------
 
+.. note::
+
+   The pyworkflow backend does not implement streaming yet. The form, the
+   conversions and the outputs described here exist, but compiling the
+   protocol's pipeline raises ``NotImplementedError``. Run protocols with
+   :doc:`ray` in the meantime.
+
 The generated protocol is a streaming Scipion protocol. When it runs, it:
 
 1. wires a container with Scipion implementations of the services: commands

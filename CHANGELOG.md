@@ -189,6 +189,11 @@
   new.
 
 ### Streaming
+- **Breaking:** the standalone and pyworkflow backends no longer compile
+  pipelines with Ray when it is installed: they do not implement streaming,
+  and `Pipeline.from_sink` without a backend raises `NotImplementedError`
+  there. Pass `backend=RayBackend()` or run protocols with
+  `RayPipelineRunner`.
 - `Op.astype(T)` changes the type of the Sets or Structs of a stream
   without copying their columns: fields `T` adds stay uninitialized, fields
   it lacks are dropped, and fields of both must match in kind, dtype and

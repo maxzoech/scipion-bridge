@@ -77,6 +77,13 @@ whose source is exactly that type.
 Streaming execution
 -------------------
 
+.. note::
+
+   The pyworkflow backend does not implement streaming yet. The form, the
+   conversions and the outputs described below exist, but compiling the
+   protocol's pipeline raises ``NotImplementedError``. Run protocols with
+   :doc:`/user_guide/backends/ray` in the meantime.
+
 The generated protocol defines its steps dynamically in
 ``stepsGeneratorStep``:
 

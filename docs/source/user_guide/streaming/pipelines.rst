@@ -25,7 +25,9 @@ Compiling a graph
 compiles it with a backend. Only nodes upstream of the given sinks are part of
 the pipeline; a branch that does not lead to one of them is not compiled. If
 ``backend`` is omitted, the backend provided by the dependency injection
-container is used, which is the Ray backend when Ray is installed.
+container is used: the Ray backend in ``RayPipelineRunner`` and after
+``configure_ray_env()``. The standalone and pyworkflow backends do not
+implement streaming; outside of a Ray container, pass ``backend=RayBackend()``.
 
 Compilation starts the backend's processes. On Ray, every stateful operation
 and every sink becomes an actor, which takes on the order of a second per
@@ -63,7 +65,7 @@ available.
 
 .. code-block:: python
 
-    with Pipeline.from_sink(out) as pipeline:
+    with Pipeline.from_sink(out, backend=RayBackend()) as pipeline:
         for batch in batches:
             pipeline.send(particles=batch)
     print(pipeline.stats())

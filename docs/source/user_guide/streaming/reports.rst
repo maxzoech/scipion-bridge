@@ -105,6 +105,7 @@ From Python
 
     from pathlib import Path
 
+    from scipion_bridge.backend.ray import RayBackend
     from scipion_bridge.core.streaming import Pipeline, Source, lower
     from scipion_bridge.core.streaming.report import report_of, render_html, render_text
 
@@ -116,10 +117,10 @@ From Python
 
     # A compiled pipeline adds the placement of its pools; compiling starts
     # no actors, so this costs nothing on the cluster.
-    print(render_text(Pipeline.from_sink(done).report()))
+    print(render_text(Pipeline.from_sink(done, backend=RayBackend()).report()))
 
     # A pipeline that ran adds the stats of its stages.
-    with Pipeline.from_sink(done) as pipeline:
+    with Pipeline.from_sink(done, backend=RayBackend()) as pipeline:
         ...
     Path("report.html").write_text(render_html(pipeline.report()))
 

@@ -98,6 +98,7 @@ it records a graph. ``Source`` names an input of the graph:
 
 .. code-block:: python
 
+    from scipion_bridge.backend.ray import RayBackend
     from scipion_bridge.core.streaming import Pipeline, Source
 
 
@@ -122,7 +123,7 @@ backend's resources, such as Ray actors:
 
 .. code-block:: python
 
-    with Pipeline.from_sink(out) as pipeline:
+    with Pipeline.from_sink(out, backend=RayBackend()) as pipeline:
         pipeline.send(particles=particles[:600])
         pipeline.send(particles=particles[600:])
 
@@ -136,8 +137,9 @@ next. See :doc:`/user_guide/streaming/index`.
 
 A :class:`~scipion_bridge.core.protocol.protocol_base.Protocol` packages a
 stream with declared inputs, parameters, and outputs. With these declarations
-the same class can run as a Ray job, a command line tool, or a Scipion protocol
-with a generated GUI form.
+the same class can run as a Ray job or a command line tool, and becomes a
+Scipion protocol with a generated GUI form (running it in Scipion needs a
+streaming backend for Scipion, which is not implemented yet).
 
 .. code-block:: python
 

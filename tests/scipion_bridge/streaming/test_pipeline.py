@@ -6,6 +6,7 @@ import scipion_bridge as B
 from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import Pipeline
 from scipion_bridge.core.streaming import SinkWriter
+from scipion_bridge.backend.ray import RayBackend
 
 pytestmark = pytest.mark.usefixtures("ray_cluster")
 
@@ -50,7 +51,9 @@ def test_basic_stream():
     source = Source("particles")
     sink_node = source.sink(lambda x: ray.get(collector.append.remote(x)))
 
-    with contextlib.closing(Pipeline.from_sink(sink_node)) as stream:
+    with contextlib.closing(
+        Pipeline.from_sink(sink_node, backend=RayBackend(init_ray=False))
+    ) as stream:
         for batch_idx in range(2):
             particle_set = B.Set[Particle](capacity=batch_size)
             for element_idx in range(batch_size):
@@ -83,7 +86,7 @@ def test_pipeline_context_manager_autoflush():
         pixels=np.zeros([256, 256], dtype=np.float32) + 1.0, metadata=Metadata(foo=42)
     )
 
-    with Pipeline.from_sink(sink_node) as pipe:
+    with Pipeline.from_sink(sink_node, backend=RayBackend(init_ray=False)) as pipe:
         pipe.send(items=B.Set[Particle]([p]))
         assert ray.get(collector.get_finalized.remote()) == 0
 
