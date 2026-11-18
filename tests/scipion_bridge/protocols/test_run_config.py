@@ -53,6 +53,14 @@ class NeedsModel(B.Protocol):
         return {"particles": particles}
 
 
+@pytest.fixture(autouse=True)
+def rewire_test_container(setup_test_container):
+    """A runner wires the Ray container when it builds its pipeline; wire the
+    test container again so later tests see their overrides."""
+    yield
+    setup_test_container.wire(packages=["scipion_bridge"])
+
+
 class Config(Mapping):
     """A mapping that is no dict, as OmegaConf's DictConfig."""
 
