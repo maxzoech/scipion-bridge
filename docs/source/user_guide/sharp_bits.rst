@@ -173,13 +173,16 @@ in a new worker process, because CUDA binds a process to its first GPU. A
 every such call: a model is loaded for every batch. Declare protocols that
 keep a model on the GPU with ``task=B.TaskType.LONG_RUNNING``.
 
+.. _sharp-bits-set-sub:
+
 ``Set[Sub]`` is not a ``Set[Base]``
 -----------------------------------
 
 Containers are specialized per element type. ``Set[FlexParticle]`` is a class
 of its own, not a subclass of ``Set[Particle]``. Resolvers written for
 ``Set[Particle]`` do not apply to it, and an output declared as one cannot be
-satisfied by the other.
+satisfied by the other. Chaining protocols has the same rule: see
+:doc:`known_issues`.
 
 Resolution is by type, not by file name
 ---------------------------------------

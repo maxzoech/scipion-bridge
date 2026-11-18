@@ -253,6 +253,72 @@ the set from the inputs in the manifest of the run.
 Test: ``test_an_element_with_a_scipion_item_id_is_an_input_element`` in
 ``tests/scipion_bridge/streaming/test_run_store.py``.
 
+.. _known-issue-protocol-inheritance:
+
+Protocol subclasses do not inherit inputs, parameters and resources
+-------------------------------------------------------------------
+
+A protocol collects the inputs, parameters and resources it declares in its
+own class body. A subclass does not see those of its base: it has only what
+it declares itself.
+
+.. code-block:: python
+
+    class Accumulate(B.Protocol):
+        classes: B.Input[B.Collection[spa.Class2D]] = B.Input()
+        ctf_correct: B.Field[bool] = B.Field(default=False)
+        ...
+
+    class AccumulateScored(Accumulate):
+        classes: B.Input[B.Collection[ScoredClass2D]] = B.Input()
+
+    list(AccumulateScored().configuration.parameters)   # [], no ctf_correct
+
+**Instead.** Declare every field again in the subclass. Reusing the
+declaration of the base keeps both the same:
+
+.. code-block:: python
+
+    class AccumulateScored(Accumulate):
+        classes: B.Input[B.Collection[ScoredClass2D]] = B.Input()
+        ctf_correct: B.Field[bool] = Accumulate.ctf_correct
+
+A subclass item type cannot feed an input of its base type
+-----------------------------------------------------------
+
+When protocols are chained, an output feeds an input only if the item types
+are the same: ``Collection[Sub]`` does not feed an input declared as
+``Collection[Base]``, even when ``Sub`` subclasses ``Base``. The same holds
+for ``Set`` (see also :ref:`sharp-bits-set-sub` in :doc:`sharp_bits`).
+
+.. code-block:: python
+
+    class ScoredClass2D(spa.Class2D):
+        relative_cost: float
+
+    # AlignPCA outputs Collection[ScoredClass2D];
+    # AccumulateClassAverages takes Collection[Class2D].
+    AlignPCA() | AccumulateClassAverages()
+    # ChainError: Output 'classes' of type Collection[ScoredClass2D]
+    # cannot feed input 'classes' of type Collection[Class2D].
+
+This is so even when the second protocol only reads fields of ``Base``, as
+``AccumulateClassAverages`` only reads the fields of ``Class2D``.
+
+**Instead.** Write a second protocol that declares the subclass as its input
+type. Since protocol subclasses do not inherit fields
+(:ref:`known-issue-protocol-inheritance`), it declares all of them again:
+
+.. code-block:: python
+
+    class AccumulateScoredClassAverages(AccumulateClassAverages):
+        classes: B.Input[B.Collection[ScoredClass2D]] = B.Input()
+        ctf_correct: B.Field[bool] = AccumulateClassAverages.ctf_correct
+        ...  # every other field of AccumulateClassAverages
+
+**Possible fix.** Covariant item types: an output whose item type subclasses
+the item type of an input could feed it. This is not planned.
+
 Struct specialization is not implemented
 ----------------------------------------
 
