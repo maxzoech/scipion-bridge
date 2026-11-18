@@ -586,7 +586,7 @@ def test_ray_pipeline_runner_serves_parameters(tmp_path):
     """Verify that parameter values reach steps() on the driver and the Ray stages."""
     proto, tags = _run_parameter_protocol(
         tmp_path,
-        parameters={"precision": Precision.FP16, "scale": 3},
+        parameters={"ParameterProtocol": {"precision": Precision.FP16, "scale": 3}},
     )
 
     assert proto.driver_values == (Precision.FP16, 3)
@@ -595,7 +595,9 @@ def test_ray_pipeline_runner_serves_parameters(tmp_path):
 
 def test_ray_pipeline_runner_parameters_default(tmp_path):
     """Verify that parameters without a value resolve to their declared default."""
-    proto, tags = _run_parameter_protocol(tmp_path, parameters={"scale": 2})
+    proto, tags = _run_parameter_protocol(
+        tmp_path, parameters={"ParameterProtocol": {"scale": 2}}
+    )
 
     assert proto.driver_values == (Precision.FP32, 2)
     assert tags == {(Precision.FP32, 2)}
@@ -615,7 +617,7 @@ def test_a_run_records_its_manifest_and_the_lineage_of_its_outputs(tmp_path):
     chain = ParameterProtocol().pipe(RechunkProtocol(), mapping={"output": "chunked"})
     runner = RayPipelineRunner(
         chain,
-        parameters={"scale": 3},
+        parameters={"ParameterProtocol": {"scale": 3}},
         sink=CallbackSinkWriter(
             lambda out: ray.get(collector.append.remote(_element_ids(out["result"]))),
         ),
@@ -632,7 +634,7 @@ def test_a_run_records_its_manifest_and_the_lineage_of_its_outputs(tmp_path):
         "RechunkProtocol",
     ]
     assert all(p["fingerprint"] for p in manifest["protocols"])
-    assert manifest["parameters"]["scale"] == 3
+    assert manifest["parameters"]["ParameterProtocol"]["scale"] == 3
     assert manifest["inputs"]["particles"] == {"value": str(star_path), "count": 1}
     # The outputs of both protocols are kept.
     checkpoints = store.read_checkpoints()
@@ -668,7 +670,9 @@ def test_a_run_records_its_manifest_and_the_lineage_of_its_outputs(tmp_path):
 
 def test_ray_pipeline_runner_rejects_unknown_parameters():
     with pytest.raises(ValueError, match="Unknown parameters"):
-        RayPipelineRunner(ParameterProtocol(), parameters={"missing": 1})
+        RayPipelineRunner(
+            ParameterProtocol(), parameters={"ParameterProtocol": {"missing": 1}}
+        )
 
 
 class RequiredParameterProtocol(Protocol):
@@ -688,11 +692,11 @@ def test_ray_pipeline_runner_requires_parameters_on_compile():
     with pytest.raises(ValueError, match="required parameters"):
         runner.pipeline
 
-    runner.set_parameters({"model": "small"})
+    runner.set_parameters({"RequiredParameterProtocol": {"model": "small"}})
     assert isinstance(runner.pipeline, Pipeline)
 
     with pytest.raises(RuntimeError):
-        runner.set_parameters({"model": "large"})
+        runner.set_parameters({"RequiredParameterProtocol": {"model": "large"}})
 
 
 def test_ray_pipeline_runner_cli_parameters(tmp_path, monkeypatch):
@@ -700,7 +704,15 @@ def test_ray_pipeline_runner_cli_parameters(tmp_path, monkeypatch):
     star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
     monkeypatch.setattr(
         "sys.argv",
-        ["prog", "--particles", str(star_path), "--precision", "FP16", "--scale", "5"],
+        [
+            "prog",
+            "--particles",
+            str(star_path),
+            "--ParameterProtocol.precision",
+            "FP16",
+            "--ParameterProtocol.scale",
+            "5",
+        ],
     )
     proto = ParameterProtocol()
     runner = RayPipelineRunner(proto)
@@ -717,7 +729,14 @@ def test_the_cli_records_the_run_in_a_run_directory(tmp_path, monkeypatch):
         "sys.argv",
         [
             "prog",
-            *["--particles", str(star_path), "--precision", "FP16", "--scale", "5"],
+            *[
+                "--particles",
+                str(star_path),
+                "--ParameterProtocol.precision",
+                "FP16",
+                "--ParameterProtocol.scale",
+                "5",
+            ],
             *["--run-dir", str(run_dir)],
         ],
     )
@@ -725,7 +744,7 @@ def test_the_cli_records_the_run_in_a_run_directory(tmp_path, monkeypatch):
     RayPipelineRunner(ParameterProtocol()).launch_as_terminal_application()
 
     store = FileRunStore(run_dir)
-    assert store.read_manifest()["parameters"]["scale"] == 5
+    assert store.read_manifest()["parameters"]["ParameterProtocol"]["scale"] == 5
     assert store.read_lineage()
 
 
@@ -853,7 +872,14 @@ def test_the_cli_sets_what_the_sink_does_with_repeated_elements(tmp_path, monkey
         "sys.argv",
         [
             "prog",
-            *["--particles", str(star_path), "--precision", "FP16", "--scale", "5"],
+            *[
+                "--particles",
+                str(star_path),
+                "--ParameterProtocol.precision",
+                "FP16",
+                "--ParameterProtocol.scale",
+                "5",
+            ],
             *["--unique-elements", "warn"],
         ],
     )
@@ -866,3 +892,25 @@ def test_the_cli_sets_what_the_sink_does_with_repeated_elements(tmp_path, monkey
     (sink,) = runner.ir_sinks
     assert isinstance(sink, IRSink)
     assert sink.unique_elements is B.UniqueElements.WARN
+
+
+def test_launch_runs_a_chain_whose_protocols_share_a_parameter_name(tmp_path):
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    collector = OutputCollector.remote()
+    first, second = ParameterProtocol(scale=2), ParameterProtocol()
+    runner = RayPipelineRunner(
+        first.pipe(second, mapping={"output": "particles"}),
+        sink=CallbackSinkWriter(
+            lambda out: ray.get(collector.append.remote(out["tag"])),
+        ),
+    )
+
+    runner.launch(
+        inputs={"particles": str(star_path)},
+        parameters={"ParameterProtocol_2": {"precision": "FP16", "scale": 7}},
+    )
+
+    # The first keeps its constructor value; the second reads its own.
+    assert first.driver_values == (Precision.FP32, 2)
+    assert second.driver_values == (Precision.FP16, 7)
+    assert set(ray.get(collector.get_items.remote())) == {(Precision.FP16, 7)}

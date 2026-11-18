@@ -1,6 +1,7 @@
 import abc
 import ast
 import inspect
+import re
 import textwrap
 import uuid
 
@@ -14,6 +15,7 @@ from typing import (
     Mapping,
     Optional,
     OrderedDict,
+    Sequence,
     Type,
     Tuple,
     TypeVar,
@@ -34,12 +36,11 @@ from ..environment.resource_provider import ResourceScope
 from ..streaming.ops import CheckpointOp, MapElementOp, MapOp, Op, lineage
 from .chain_utils import (
     merge_inputs,
-    merge_parameters,
     merge_pipelines,
     merge_resources,
     resolve_wires,
 )
-from .fields import Field, Input, Resource
+from .fields import BoundField, Field, Input, Resource
 from .fingerprint import class_identity, digest, fingerprint_value, stage_fingerprint
 
 
@@ -53,8 +54,14 @@ class _ProtocolTypeConfiguration:
 
 @dataclass(frozen=True)
 class ProtocolConfiguration:
+    """The declarations of a protocol.
+
+    ``parameters`` are those of a single protocol, and ``None`` for a chain,
+    whose parameters are per protocol: ``Protocol.parameters_by_name()``.
+    """
+
     inputs: OrderedDict[str, Input]
-    parameters: OrderedDict[str, Field]
+    parameters: Optional[OrderedDict[str, Field]]
     resources: OrderedDict[str, Resource]
 
 
@@ -74,8 +81,22 @@ class SealedProtocolError(Exception):
 # Attribute of a protocol's __dict__ marking it sealed.
 _SEALED = "_sealed"
 
+# Attributes holding the instance name, and the values given to the
+# constructor (the fingerprint covers the values of all parameters).
+_EXPLICIT_NAME = "_explicit_name"
+_ASSIGNED_NAME = "_assigned_name"
+_FIELD_VALUES = "_field_values"
+
 # Attributes of a protocol that do not change what it computes.
-_UNFINGERPRINTED = frozenset({"protocol_id", _SEALED})
+_UNFINGERPRINTED = frozenset(
+    {"protocol_id", _SEALED, _EXPLICIT_NAME, _ASSIGNED_NAME, _FIELD_VALUES},
+)
+
+# Names a protocol cannot declare: the arguments of its constructor.
+_RESERVED = frozenset({"name", "protocol_id"})
+
+# An instance name: usable as a command line flag and a configuration key.
+_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 _STATE_DOCS = (
     "the section 'Where state belongs' of the user guide "
@@ -129,6 +150,33 @@ def _freeze(owner: str, path: str, value: Any) -> None:
                 _freeze(owner, f"{path}[{index}]", element)
         case _:
             pass
+
+
+def _instance_names(protocols: Sequence["Protocol"]) -> Tuple[str, ...]:
+    """Names given to the constructors, else class names, numbered in order
+    where a class repeats (``Align``, ``Align_2``)."""
+    explicit = [p.__dict__[_EXPLICIT_NAME] for p in protocols]
+    taken = {name for name in explicit if name is not None}
+    counts: Dict[str, int] = {}
+    names: List[str] = []
+    for protocol, name in zip(protocols, explicit):
+        if name is None:
+            base = type(protocol).__name__
+            counts[base] = counts.get(base, 0) + 1
+            name = base if counts[base] == 1 else f"{base}_{counts[base]}"
+            if name in taken:
+                raise ValueError(
+                    f"The protocol named {name!r} clashes with the name given to "
+                    f"a {type(protocol).__qualname__}; name one of them "
+                    "explicitly (name=...).",
+                )
+        elif name in names:
+            raise ValueError(
+                f"Two protocols of the chain are named {name!r}; protocols need "
+                "names of their own.",
+            )
+        names.append(name)
+    return tuple(names)
 
 
 FieldT = TypeVar("FieldT", bound=Field)
@@ -190,8 +238,100 @@ class Protocol(metaclass=abc.ABCMeta):
 
         cls._configuration = _create_protocol_info(cls)
 
-    def __init__(self, protocol_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        *,
+        name: Optional[str] = None,
+        protocol_id: Optional[str] = None,
+        **values: Any,
+    ) -> None:
+        """
+        Args:
+            name: The instance name of the protocol, under which its
+                parameters are configured (``parameters: {name: {...}}``,
+                ``--name.parameter``). By default its class name, numbered
+                in a chain holding the class several times (``Align_2``).
+            protocol_id: Identifies the protocol's stages and resources.
+            values: Values of parameters of the protocol, e.g.
+                ``Align(num_classes=50)``: they replace the declared defaults
+                for this instance, and the configuration of a run can still
+                override them.
+
+        Raises:
+            ValueError: If ``name`` is not an identifier.
+            TypeError: For a value of a parameter the protocol does not declare.
+        """
+        if name is not None and not _NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                f"The name of a protocol must be an identifier (letters, digits "
+                f"and underscores), got {name!r}.",
+            )
+        declared = self._configuration.parameters
+        unknown = sorted(set(values) - set(declared))
+        if unknown:
+            raise TypeError(
+                f"{type(self).__qualname__} has no parameters {unknown}. "
+                f"Declared: {list(declared)}.",
+            )
         self.protocol_id: str = protocol_id or uuid.uuid4().hex
+        setattr(self, _EXPLICIT_NAME, name)
+        setattr(self, _FIELD_VALUES, tuple(sorted(values.items())))
+
+    @property
+    def name(self) -> str:
+        """The instance name: given to the constructor, else the class name;
+        in a chain, numbered where a class repeats (fixed when the pipeline
+        is built)."""
+        assigned = self.__dict__.get(_ASSIGNED_NAME)
+        if assigned is not None:
+            return assigned
+        else:
+            return getattr(self, _EXPLICIT_NAME) or type(self).__name__
+
+    def field_default(self, name: str, default: Any) -> Any:
+        """The value of parameter ``name`` given to the constructor, else
+        ``default`` (the declared default)."""
+        return dict(getattr(self, _FIELD_VALUES)).get(name, default)
+
+    def protocols(self) -> Tuple["Protocol", ...]:
+        """The protocols this one consists of, in order: itself, or the
+        protocols of a chain."""
+        return (self,)
+
+    def names(self) -> Tuple[str, ...]:
+        """The instance names of ``protocols()``: names given to the
+        constructors, else class names, numbered where a class repeats.
+
+        Raises:
+            ValueError: If two protocols would get the same name.
+        """
+        return _instance_names(self.protocols())
+
+    def parameters_by_name(self) -> "OrderedDict[str, OrderedDict[str, BoundField]]":
+        """The parameters of every protocol of ``protocols()``, by instance
+        name, bound to the instance: their defaults are the values given to
+        the constructor, else the declared defaults."""
+        return OrderedDict(
+            (
+                name,
+                OrderedDict(
+                    (key, field.__get__(protocol, type(protocol)))
+                    for key, field in protocol._own_parameters().items()
+                ),
+            )
+            for protocol, name in zip(self.protocols(), self.names())
+        )
+
+    def _own_parameters(self) -> "OrderedDict[str, Field]":
+        parameters = self.configuration.parameters
+        assert parameters is not None, "a chain has no parameters of its own"
+        return parameters
+
+    def _assign_names(self) -> None:
+        """Fix the instance names of ``protocols()`` before the pipeline is
+        built and the protocols are sealed."""
+        for protocol, name in zip(self.protocols(), self.names()):
+            setattr(protocol, _ASSIGNED_NAME, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         if self.sealed:
@@ -253,6 +393,7 @@ class Protocol(metaclass=abc.ABCMeta):
             SealedProtocolError: If the pipeline was already built.
         """
         self._check_unbuilt()
+        self._assign_names()
         self.validate_protocol_configuration()
         self.setup()
         return self._verified_steps()
@@ -372,7 +513,7 @@ class Protocol(metaclass=abc.ABCMeta):
         """The value of every parameter, from the backend's configuration."""
         return tuple(
             (name, field.__get__(self, type(self)).value)
-            for name, field in self.configuration.parameters.items()
+            for name, field in self._own_parameters().items()
         )
 
     def _verify_outputs(self, outputs: Any) -> Dict[str, Any]:
@@ -491,6 +632,14 @@ def _extract_declaration_order_from_ast(cls: type) -> Optional[List[str]]:
 def _create_protocol_info(cls: type[Protocol]) -> _ProtocolTypeConfiguration:
     annotations: Dict[str, Any] = getattr(cls, "__annotations__", {})
 
+    reserved = sorted(_RESERVED & (set(annotations) | set(vars(cls))))
+    if reserved:
+        raise TypeError(
+            f"The protocol {cls.__qualname__} declares {reserved}: these names "
+            "are reserved for the arguments of the constructor of protocols "
+            "(name is the instance name of a protocol).",
+        )
+
     # Detect untyped class attributes (e.g. `state = 42` instead of `state: int = 42`)
     untyped = [
         k
@@ -597,12 +746,10 @@ class ChainedProtocol(Protocol):
         wires = resolve_wires(first.outputs(), second_config.inputs, mapping)
         # Immutable, since the chain is sealed with its pipeline.
         self._wires = tuple(wires.items())
+        # Parameters stay with their protocols (parameters_by_name).
         self._chain_configuration = ProtocolConfiguration(
             inputs=merge_inputs(first_config.inputs, second_config.inputs, wires),
-            parameters=merge_parameters(
-                first_config.parameters,
-                second_config.parameters,
-            ),
+            parameters=None,
             resources=merge_resources(first_config.resources, second_config.resources),
         )
 
@@ -623,6 +770,9 @@ class ChainedProtocol(Protocol):
 
     def _output_name(self) -> str:
         return self.second._output_name()
+
+    def protocols(self) -> Tuple[Protocol, ...]:
+        return (*self.first.protocols(), *self.second.protocols())
 
     def steps(self) -> Op:
         # The hooks of both protocols ran in the hooks of the chain.

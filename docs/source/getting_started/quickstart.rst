@@ -179,7 +179,7 @@ statistics at the end:
     from pathlib import Path
     from scipion_bridge.backend.ray import RayPipelineRunner
 
-    with RayPipelineRunner(Normalize(), parameters={"chunk_size": 512}) as runner:
+    with RayPipelineRunner(Normalize(chunk_size=512)) as runner:
         runner.run(particles=Path("particles.star"))
 
 To turn the protocol into a command line program, call
@@ -193,7 +193,7 @@ the declared fields:
 
 .. code-block:: bash
 
-    python normalize.py --particles particles.star --chunk-size 512
+    python normalize.py --particles particles.star --Normalize.chunk-size 512
 
 See :doc:`/user_guide/protocols/index` and :doc:`/user_guide/backends/index`.
 

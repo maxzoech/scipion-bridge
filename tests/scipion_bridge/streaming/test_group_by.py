@@ -522,9 +522,17 @@ def test_keys_share_workers(op_workers, backend_workers, children):
         pipeline.close()
 
 
-class Params:
+class Params(B.Protocol):
+    """Fields are read under the instance name of their protocol."""
+
     groups: B.Field[int] = B.Field(default=1)
     offset: B.Field[int] = B.Field(default=0)
+
+    def outputs(self):
+        return {}
+
+    def steps(self):
+        raise NotImplementedError
 
     def key(self, item):
         return item % self.groups.value
@@ -541,7 +549,7 @@ def test_key_function_and_children_see_parameters():
         .group_by(params.key, lambda stream: stream.map(params.shift))
         .unkey()
         .write_to(_collecting_writer(collector)),
-        parameters={"groups": 2, "offset": 100},
+        parameters={"Params": {"groups": 2, "offset": 100}},
     )
 
     try:

@@ -1,6 +1,6 @@
-from argparse import ArgumentParser, BooleanOptionalAction
+from argparse import ArgumentParser, BooleanOptionalAction, Namespace
 from collections.abc import Sized
-from enum import Enum
+from dataclasses import dataclass
 import datetime
 import glob
 import importlib.metadata
@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
+import sys
 import time
 import uuid
 from typing import (
@@ -31,6 +31,16 @@ from ...core.struct import references
 from ...core.struct.set import Set
 from ...core.typed.resolve import ComposedResolver, find_resolver
 from ...core.protocol.protocol_base import ChainedProtocol, Protocol
+from ...core.protocol.run_config import (
+    add_input_arguments,
+    add_parameter_arguments,
+    argname,
+    check_required,
+    default_parameters,
+    inputs_of,
+    parameter_values,
+    parameters_of,
+)
 from ...core.streaming.backend import StageStats, throughput_of
 from ...core.streaming.ir import IROp
 from ...core.streaming.node import lower
@@ -56,13 +66,6 @@ from .backend import (
 from .placement import ClusterSpec, explain_placement
 from .container import configure_ray_env
 from .loader import LoaderStats, RayInputLoader, expand_pattern, shard
-
-
-def _convert_to_argname(name: str) -> str:
-    """Convert a Protocol field name (snake_case or camelCase) to a CLI argument name."""
-    cleaned = name.lstrip("-")
-    kebab = re.sub(r"(?<!^)(?=[A-Z])", "-", cleaned).replace("_", "-").lower()
-    return f"--{kebab}"
 
 
 def _format_stats(stats: Dict[str, StageStats]) -> str:
@@ -217,52 +220,6 @@ def _check_continues(previous: Mapping[str, Any], manifest: Mapping[str, Any]) -
         )
 
 
-def _validate_parameters(
-    protocol: Protocol,
-    parameters: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Reject values for parameters that ``protocol`` does not declare."""
-    declared = protocol.configuration.parameters
-
-    unknown = [name for name in parameters if name not in declared]
-    if unknown:
-        raise ValueError(
-            f"Unknown parameters {unknown} for protocol "
-            f"{type(protocol).__name__}. Declared: {list(declared)}.",
-        )
-
-    return dict(parameters)
-
-
-def _check_required_parameters(
-    protocol: Protocol,
-    parameters: Mapping[str, Any],
-) -> None:
-    """Fail if a required parameter without default has no value."""
-    declared = protocol.configuration.parameters
-    missing = [
-        name
-        for name, field in declared.items()
-        if not field.optional and field.default is None and name not in parameters
-    ]
-
-    if missing:
-        raise ValueError(
-            f"Missing values for required parameters {missing} of protocol "
-            f"{type(protocol).__name__}.",
-        )
-
-
-def _parse_cli_value(dtype: Any, value: Any) -> Any:
-    """Convert a parsed command line value to the parameter type."""
-    match dtype:
-        case type() if issubclass(dtype, Enum) and isinstance(value, str):
-            return dtype[value]
-
-        case _:
-            return value
-
-
 _DEFAULT_REPORT = "pipeline_report.html"
 
 
@@ -276,11 +233,11 @@ def _placement_mode(value: str) -> PlacementMode:
             raise ValueError(f"placement must be 'managed' or 'ray', got {value!r}.")
 
 
-def _explain_requested() -> bool:
-    """Whether the command line asks for ``--explain``, before it is parsed."""
+def _explain_requested(argv: Sequence[str]) -> bool:
+    """Whether ``argv`` asks for ``--explain``, before it is parsed."""
     peek = ArgumentParser(add_help=False)
     peek.add_argument("--explain", nargs="?", const=True)
-    known, _ = peek.parse_known_args()
+    known, _ = peek.parse_known_args(argv)
     return known.explain is not None
 
 
@@ -311,15 +268,6 @@ def _cluster_of(gpus: Optional[str]) -> Optional[ClusterSpec]:
             )
 
 
-def _cli_parameters(config: Any, args: Any) -> Dict[str, Any]:
-    """The parameter values given on the command line."""
-    return {
-        name: _parse_cli_value(field.dtype, val)
-        for name, field in config.parameters.items()
-        if (val := getattr(args, name, None)) is not None
-    }
-
-
 def _protocols_of(protocol: Protocol) -> List[Dict[str, str]]:
     """The protocols of ``protocol`` in order, with their fingerprints."""
     if isinstance(protocol, ChainedProtocol):
@@ -328,6 +276,7 @@ def _protocols_of(protocol: Protocol) -> List[Dict[str, str]]:
         return [
             {
                 "protocol": type(protocol).__qualname__,
+                "name": protocol.name,
                 "fingerprint": protocol.fingerprint(),
             },
         ]
@@ -376,9 +325,12 @@ class RayPipelineRunner:
         ``RayBackend`` for their meaning.
 
         Args:
-            parameters: Values of the protocol parameters, served to
-                ``Field.value`` on the driver and inside every pipeline stage.
-                Parameters without a value resolve to their declared default.
+            parameters: Values of the parameters by protocol name,
+                ``{name: {parameter: value}}`` (see ``Protocol.name``), served
+                to ``Field.value`` on the driver and inside every pipeline
+                stage. Enums may be given by name. Parameters without a value
+                resolve to the value given to the constructor of their
+                protocol, else to their declared default.
             origin_types: Type each input is given as, by input name; ``Path``
                 by default.
             intermediate_types: Type each input is resolved through, by input
@@ -423,7 +375,7 @@ class RayPipelineRunner:
                 its own setting.
         """
         self.protocol = protocol
-        self.parameters = _validate_parameters(protocol, parameters or {})
+        self.parameters = parameter_values(protocol, parameters or {})
         self.origin_types = origin_types or {}
         self.intermediate_types = intermediate_types or {}
         self.num_loaders = int(
@@ -478,7 +430,7 @@ class RayPipelineRunner:
 
     def _compile_pipeline(self) -> Pipeline:
         """Compile protocol streaming DAG into an executable Ray pipeline."""
-        _check_required_parameters(self.protocol, self.parameters)
+        check_required(self.protocol, self.parameters)
         configure_ray_env(parameters=self.parameters)
         backend = RayBackend(
             queue_size=self.queue_size,
@@ -570,7 +522,7 @@ class RayPipelineRunner:
                 "Parameters cannot be changed after the pipeline has been compiled.",
             )
 
-        self.parameters = _validate_parameters(self.protocol, parameters)
+        self.parameters = parameter_values(self.protocol, parameters)
 
     def set_profile(self, profile: Union[bool, str, Path]) -> None:
         """Profile the pipeline. Only possible before the pipeline is compiled."""
@@ -794,169 +746,327 @@ class RayPipelineRunner:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
-    def launch_as_terminal_application(self):
-        """CLI entry point for running the protocol from terminal arguments.
+    def launch(
+        self,
+        *,
+        inputs: Optional[Mapping[str, Any]] = None,
+        parameters: Optional[Mapping[str, Any]] = None,
+        **options: Any,
+    ) -> None:
+        """Run the protocol as a configuration of plain values describes it.
+
+        The configuration is what any frontend gives: ``launch(**cfg)`` with
+        Hydra's ``DictConfig``, a mapping read from YAML, or the command line
+        (``launch_as_terminal_application``)::
+
+            runner.launch(
+                inputs={"particles": ["run_a/*.xmd"]},
+                parameters={"Align": {"num_classes": 50}},
+                run_dir="runs/a",
+            )
+
+        Args:
+            inputs: The input files by input name: a path, or a list of
+                paths and glob patterns (read by the loaders).
+            parameters: Values by protocol name, ``{name: {parameter:
+                value}}``; enums by name.
+            options: The options of ``RUN_OPTIONS``: the runner's, which
+                replace those given to the constructor, and ``explain``
+                (write the report to this path instead of running),
+                ``explain_gpus`` and ``report`` (write the report with the
+                stats of the stages to this path after the run).
+
+        Raises:
+            TypeError: For an unknown option.
+            ValueError: For unknown or missing inputs and parameters.
+        """
+        unknown = sorted(set(options) - set(RUN_OPTIONS))
+        if unknown:
+            raise TypeError(
+                f"Unknown options {unknown}. Options: {list(RUN_OPTIONS)}.",
+            )
+        for name, value in options.items():
+            RUN_OPTIONS[name].apply(self, value)
+        self.set_parameters(parameters or {})
+        explain = options.get("explain")
+        if explain is not None:
+            self.explain(Path(explain), _cluster_of(options.get("explain_gpus")))
+        else:
+            self.run(self._input_values(inputs or {}))
+            report = options.get("report")
+            if report is not None:
+                _write_report(self.report(), Path(report))
+
+    def default_config(self) -> Dict[str, Any]:
+        """The configuration ``launch`` takes, with every value at its
+        default as plain values: the inputs (``None``), the parameters by
+        protocol name (the values given to the constructors, else the
+        declared defaults) and the options of the runner. E.g. a node of
+        Hydra's ``ConfigStore``, or a YAML file to start from."""
+        return {
+            "inputs": {name: None for name in self.protocol.configuration.inputs},
+            "parameters": default_parameters(self.protocol),
+            **{name: option.current(self) for name, option in RUN_OPTIONS.items()},
+        }
+
+    def argument_parser(self, required: bool = True) -> ArgumentParser:
+        """The command line of the protocol: ``--<input>``,
+        ``--<protocol name>.<parameter>`` and the options. Add arguments of
+        your own to it; ``config_of`` leaves them out.
+
+        Args:
+            required: Whether inputs without a default are required.
+        """
+        parser = ArgumentParser(description=self.protocol.__doc__)
+        add_input_arguments(parser, self.protocol, required)
+        add_parameter_arguments(parser, self.protocol)
+        group = parser.add_argument_group("options of the run")
+        for name, option in RUN_OPTIONS.items():
+            group.add_argument(
+                f"--{argname(name)}",
+                dest=f"options.{name}",
+                default=None,
+                help=option.help,
+                **option.argument,
+            )
+        return parser
+
+    def config_of(self, namespace: Namespace) -> Dict[str, Any]:
+        """The configuration ``launch`` takes, from the arguments of
+        ``argument_parser()`` parsed into ``namespace``: those given only."""
+        return {
+            "inputs": inputs_of(namespace, self.protocol),
+            "parameters": parameters_of(namespace, self.protocol),
+            **{
+                name: value
+                for name in RUN_OPTIONS
+                if (value := getattr(namespace, f"options.{name}", None)) is not None
+            },
+        }
+
+    def launch_as_terminal_application(
+        self,
+        argv: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Run the protocol as the command line (``sys.argv``, or ``argv``)
+        describes it: ``launch(**config_of(argument_parser().parse_args()))``.
 
         ``--explain`` writes the report of the pipeline instead of running
         it, so inputs and parameters are optional then.
         """
-        explaining = _explain_requested()
-        parser = ArgumentParser(description=self.protocol.__doc__)
-        config = self.protocol.configuration
+        argv = sys.argv[1:] if argv is None else list(argv)
+        parser = self.argument_parser(required=not _explain_requested(argv))
+        self.launch(**self.config_of(parser.parse_args(argv)))
 
-        for name, field in config.inputs.items():
-            parser.add_argument(
-                _convert_to_argname(name),
-                dest=name,
-                nargs="+",
-                required=not explaining
-                and ((not field.optional) or field.default is not None),
-                default=field.default,
-                help=field.help,
+    def _input_values(self, inputs: Mapping[str, Any]) -> Dict[str, Any]:
+        """The inputs of a configuration as ``run`` takes them: one path, or
+        the files of several paths and glob patterns.
+
+        Raises:
+            ValueError: For an unknown input, or a missing required one.
+        """
+        declared = self.protocol.configuration.inputs
+        unknown = [name for name in inputs if name not in declared]
+        missing = [
+            name
+            for name, field in declared.items()
+            if not field.optional and field.default is None and name not in inputs
+        ]
+        if unknown or missing:
+            raise ValueError(
+                f"Unknown inputs {unknown} or missing inputs {missing}. "
+                f"Inputs: {list(declared)}.",
             )
-
-        parser.add_argument(
-            "--num-loaders",
-            type=int,
-            help=(
-                "Number of loader actors resolving the files of an input "
-                "given as several paths or quoted glob patterns, e.g. "
-                "'run_a/extra/*.xmd' 'run_b/extra/*.xmd'."
-            ),
-        )
-
-        parser.add_argument(
-            "--profile",
-            nargs="?",
-            const=True,
-            type=Path,
-            help=(
-                "Profile the pipeline into a trace file at this path (a "
-                "timestamped file without a path), which can be opened in "
-                "https://ui.perfetto.dev while the pipeline runs."
-            ),
-        )
-
-        parser.add_argument(
-            "--explain",
-            nargs="?",
-            const=Path(_DEFAULT_REPORT),
-            type=Path,
-            help=(
-                "Do not run the pipeline: print its stages and write its "
-                "report to this path (HTML, default "
-                f"{_DEFAULT_REPORT}) and a DOT file next to it."
-            ),
-        )
-        parser.add_argument(
-            "--explain-gpus",
-            help=(
-                "The GPUs of every node of the cluster --explain plans for, "
-                "e.g. 4 or 4,4 (default: the GPUs of this machine)."
-            ),
-        )
-        parser.add_argument(
-            "--placement",
-            choices=["managed", "ray"],
-            help=(
-                "managed (default) reserves the GPUs the planner gives every "
-                "long-running protocol; ray lets Ray place them, for clusters "
-                "shared with other jobs."
-            ),
-        )
-        parser.add_argument(
-            "--run-dir",
-            type=Path,
-            help=(
-                "Record the manifest of the run and the lineage of its items "
-                "in this directory, readable while the run goes. Running "
-                "again in it continues the run."
-            ),
-        )
-        parser.add_argument(
-            "--no-checkpoint-outputs",
-            action="store_true",
-            help=(
-                "Do not keep the outputs of every protocol in the run "
-                "directory (kept by default, to inspect them and to rerun "
-                "from)."
-            ),
-        )
-        parser.add_argument(
-            "--unique-elements",
-            choices=[u.value for u in UniqueElements],
-            help=(
-                "What the sink does with an element (e.g. a particle) it "
-                "writes a second time: off (default), warn, or raise to fail "
-                "the run."
-            ),
-        )
-        parser.add_argument(
-            "--report",
-            type=Path,
-            help=(
-                "Write the report of the pipeline with the stats of its "
-                "stages to this path (HTML) after the run."
-            ),
-        )
-
-        for name, field in config.parameters.items():
-            dtype = field.dtype
-            kwargs: dict[str, Any] = {
-                "required": not explaining and not field.optional,
-                "help": field.help,
-                "dest": name,
-                "default": field.default,
-            }
-
-            match dtype:
-                case _ if isinstance(dtype, type) and issubclass(dtype, Enum):
-                    kwargs["choices"] = [e.name for e in dtype]
-                    if isinstance(field.default, Enum):
-                        kwargs["default"] = field.default.name
-
-                case _ if dtype is bool:
-                    kwargs["action"] = (
-                        "store_true" if not field.default else "store_false"
-                    )
-                    kwargs["action"] = BooleanOptionalAction
-                    kwargs.pop("required", None)
-
-                case _:
-                    kwargs["type"] = dtype
-
-            parser.add_argument(
-                _convert_to_argname(name),
-                **kwargs,
+        return {
+            name: _parse_inputs(
+                (
+                    [str(value)]
+                    if isinstance(value, (str, os.PathLike))
+                    else [str(item) for item in value]
+                ),
             )
-
-        args = parser.parse_args()
-        if args.placement is not None:
-            self.placement = _placement_mode(args.placement)
-        if args.explain is not None:
-            self.set_parameters(_cli_parameters(config, args))
-            self.explain(args.explain, _cluster_of(args.explain_gpus))
-            return
-        if args.profile is not None:
-            self.set_profile(args.profile)
-        if args.num_loaders is not None:
-            self.num_loaders = args.num_loaders
-        if args.run_dir is not None:
-            self.run_store = FileRunStore(args.run_dir)
-        if args.no_checkpoint_outputs:
-            self.checkpoint_outputs = False
-        if args.unique_elements is not None:
-            self.unique_elements = UniqueElements(args.unique_elements)
-
-        inputs = {
-            name: _parse_inputs(val) if isinstance(val, list) else val
-            for name in config.inputs
-            if (val := getattr(args, name, None)) is not None
+            for name, value in inputs.items()
+            if value is not None
         }
 
-        self.set_parameters(_cli_parameters(config, args))
-        self.run(
-            inputs,
-        )
-        if args.report is not None:
-            _write_report(self.report(), args.report)
+
+@dataclass(frozen=True)
+class RunOption:
+    """An option of a run: its help, how it changes the runner, its current
+    value as a plain value, and the kind of its command line argument."""
+
+    help: str
+    apply: Callable[[RayPipelineRunner, Any], None]
+    current: Callable[[RayPipelineRunner], Any]
+    argument: Mapping[str, Any]
+
+
+def _set(attribute: str, convert: Callable[[Any], Any]) -> Callable[[Any, Any], None]:
+    """Sets ``attribute`` of the runner to the converted value."""
+    return lambda runner, value: setattr(runner, attribute, convert(value))
+
+
+def _get(attribute: str) -> Callable[[Any], Any]:
+    return lambda runner: getattr(runner, attribute)
+
+
+def _no_runner_state(runner: RayPipelineRunner, value: Any) -> None:
+    """For options of ``launch`` itself (``explain``, ``report``)."""
+
+
+def _env(name: str, value: Any) -> Any:
+    """The environment variable ``name`` if it is set, else ``value``."""
+    return os.environ.get(name, value)
+
+
+def _limit(value: str) -> Optional[int]:
+    """A limit on the command line: a number, or ``none`` for no limit."""
+    return None if value.lower() == "none" else int(value)
+
+
+def _store_path(runner: RayPipelineRunner) -> Optional[str]:
+    store = runner.run_store
+    return str(store.path) if isinstance(store, FileRunStore) else None
+
+
+# The options of a run, by name; values from the environment variables
+# SCIPION_STREAM_* still override them, as they override the constructor.
+RUN_OPTIONS: Dict[str, RunOption] = {
+    "run_dir": RunOption(
+        "Record the manifest of the run and the lineage of its items in this "
+        "directory, readable while the run goes. Running again in it continues "
+        "the run.",
+        _set(
+            "run_store",
+            lambda value: None if value is None else FileRunStore(Path(value)),
+        ),
+        _store_path,
+        {"type": str},
+    ),
+    "checkpoint_outputs": RunOption(
+        "Keep the outputs of every protocol in the run directory, to inspect "
+        "them and to rerun from (default: yes).",
+        _set("checkpoint_outputs", bool),
+        _get("checkpoint_outputs"),
+        {"action": BooleanOptionalAction},
+    ),
+    "unique_elements": RunOption(
+        "What the sink does with an element (e.g. a particle) it writes a "
+        "second time: off (default), warn, or raise to fail the run.",
+        _set("unique_elements", UniqueElements),
+        lambda runner: runner.unique_elements.value,
+        {"choices": [u.value for u in UniqueElements]},
+    ),
+    "num_loaders": RunOption(
+        "Number of loader actors resolving the files of an input given as "
+        "several paths or quoted glob patterns, e.g. 'run_a/extra/*.xmd' "
+        "'run_b/extra/*.xmd'.",
+        _set(
+            "num_loaders",
+            lambda value: int(_env("SCIPION_STREAM_NUM_LOADERS", value)),
+        ),
+        _get("num_loaders"),
+        {"type": int},
+    ),
+    "loader_cpus": RunOption(
+        "CPUs reserved for each loader actor.",
+        _set(
+            "loader_cpus",
+            lambda value: float(_env("SCIPION_STREAM_LOADER_CPUS", value)),
+        ),
+        _get("loader_cpus"),
+        {"type": float},
+    ),
+    "placement": RunOption(
+        "managed (default) reserves the GPUs the planner gives every "
+        "long-running protocol; ray lets Ray place them, for clusters shared "
+        "with other jobs.",
+        _set(
+            "placement",
+            lambda value: _placement_mode(
+                _env("SCIPION_STREAM_PLACEMENT", value),
+            ),
+        ),
+        _get("placement"),
+        {"choices": ["managed", "ray"]},
+    ),
+    "queue_size": RunOption(
+        "Number of items each pipeline stage reads ahead.",
+        _set(
+            "queue_size",
+            lambda value: int(_env("SCIPION_STREAM_QUEUE_SIZE", value)),
+        ),
+        _get("queue_size"),
+        {"type": int},
+    ),
+    "max_in_flight": RunOption(
+        "Number of items on the routes out of a stage at once.",
+        _set(
+            "max_in_flight",
+            lambda value: _env_int("SCIPION_STREAM_MAX_IN_FLIGHT", value),
+        ),
+        _get("max_in_flight"),
+        {"type": int},
+    ),
+    "buffer_size": RunOption(
+        "Most items waiting for a stage before the stages upstream wait; "
+        "none for no limit.",
+        _set(
+            "buffer_size",
+            lambda value: _env_limit("SCIPION_STREAM_BUFFER_SIZE", value),
+        ),
+        _get("buffer_size"),
+        {"type": _limit},
+    ),
+    "spill_threshold": RunOption(
+        "Number of waiting items a stage keeps in the object store before "
+        "spilling; none to never spill.",
+        _set(
+            "spill_threshold",
+            lambda value: _env_limit("SCIPION_STREAM_SPILL_THRESHOLD", value),
+        ),
+        _get("spill_threshold"),
+        {"type": _limit},
+    ),
+    "profile": RunOption(
+        "Profile the pipeline into a trace file at this path (a timestamped "
+        "file without a path), which can be opened in https://ui.perfetto.dev "
+        "while the pipeline runs.",
+        _set("profile", _env_profile),
+        lambda runner: None if runner.profile is None else str(runner.profile),
+        {"nargs": "?", "const": True},
+    ),
+    "profile_log_level": RunOption(
+        "Level of the profiling log of the workers, e.g. debug to log every item.",
+        _set(
+            "profile_log_level",
+            lambda value: _env_log_level(
+                "SCIPION_STREAM_PROFILE_LOG_LEVEL",
+                logging.getLevelNamesMapping()[str(value).upper()],
+            ),
+        ),
+        lambda runner: logging.getLevelName(runner.profile_log_level).lower(),
+        {"type": str},
+    ),
+    "explain": RunOption(
+        "Do not run the pipeline: print its stages and write its report to "
+        f"this path (HTML, default {_DEFAULT_REPORT}) and a DOT file next to it.",
+        _no_runner_state,
+        lambda runner: None,
+        {"nargs": "?", "const": _DEFAULT_REPORT},
+    ),
+    "explain_gpus": RunOption(
+        "The GPUs of every node of the cluster --explain plans for, e.g. 4 or "
+        "4,4 (default: the GPUs of this machine).",
+        _no_runner_state,
+        lambda runner: None,
+        {"type": str},
+    ),
+    "report": RunOption(
+        "Write the report of the pipeline with the stats of its stages to this "
+        "path (HTML) after the run.",
+        _no_runner_state,
+        lambda runner: None,
+        {"type": str},
+    ),
+}

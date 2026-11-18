@@ -33,7 +33,9 @@ files, and hands the outputs to a sink:
 
     with RayPipelineRunner(
         Denoise(),
-        parameters={"chunk_size": 512, "weights": "/opt/models/cryodenoise.pt"},
+        parameters={
+            "Denoise": {"chunk_size": 512, "weights": "/opt/models/cryodenoise.pt"},
+        },
         sink=OutputsToZarr("denoised.zarr"),
     ) as runner:
         runner.run(particles=Path("particles.star"))
@@ -79,15 +81,17 @@ protocol's declarations and runs the protocol with the parsed arguments:
 
     python -m scipion_denoise.run --help
     python -m scipion_denoise.run --particles particles.star \
-        --weights /opt/models/cryodenoise.pt --chunk-size 512
+        --Denoise.weights /opt/models/cryodenoise.pt --Denoise.chunk-size 512
 
 The protocol's docstring becomes the program description. Inputs become path
-arguments; field names become kebab-case options (``chunk_size`` becomes
-``--chunk-size``); ``bool`` fields become ``--name`` / ``--no-name``; ``Enum``
-fields accept the member names. A field that is not optional is a required
-option, even when it has a default; declare ``optional=True`` to make such an
-option optional on the command line. Every program also accepts
-``--profile [PATH]``.
+arguments; parameters become kebab-case options under the instance name of
+their protocol (``chunk_size`` of ``Denoise`` becomes
+``--Denoise.chunk-size``); ``bool`` fields become ``--Denoise.name`` /
+``--no-Denoise.name``; ``Enum`` fields accept the member names. A parameter
+without a value, a constructor value or a default is reported missing. Every
+program also accepts the options of the runner (``--run-dir``,
+``--profile [PATH]``, ...). The command line is one frontend of a run's
+configuration (see :ref:`ray-configuring-a-run`).
 
 Running on a cluster
 --------------------

@@ -178,7 +178,8 @@ Backends
 
    * - ``scipion_bridge.backend.configure_default_env``
      - Wire the standalone container.
-   * - ``scipion_bridge.backend.ray.RayPipelineRunner``
+   * - ``scipion_bridge.backend.ray.RayPipelineRunner``,
+       ``scipion_bridge.backend.ray.RUN_OPTIONS``
      - Run a protocol on Ray, from Python or as a command line program.
    * - ``scipion_bridge.backend.ray.RayBackend``
      - The Ray streaming backend.

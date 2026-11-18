@@ -12,11 +12,14 @@ InputSelf = TypeVar("InputSelf", bound="Input")
 
 
 class BoundField(Marker[T]):
+    """A field of a protocol instance: its value is looked up under the
+    instance name of the protocol (``scope``)."""
 
     def __init__(
         self,
         name: str,
         *,
+        scope: Optional[str] = None,
         dtype: Optional[Any] = None,
         default: Optional[T] = None,
         optional: Optional[bool] = None,
@@ -26,6 +29,7 @@ class BoundField(Marker[T]):
     ):
         Marker.__init__(self, dtype=dtype)
         self.name = name
+        self.scope = scope
         self.default = default
         self.optional = optional
         self.label = label
@@ -44,8 +48,8 @@ class BoundField(Marker[T]):
             "protocol_config_provider"
         ],
     ) -> T:
-        assert self.name is not None
-        return config_provider.get_value(self.name, default=self.default)
+        assert self.name is not None and self.scope is not None
+        return config_provider.get_value(self.scope, self.name, default=self.default)
 
 
 class Field(Marker[T]):
@@ -87,8 +91,11 @@ class Field(Marker[T]):
 
         return BoundField(
             name=self._bound_name,
+            scope=instance.name,
             dtype=self.dtype,
-            default=self.default,
+            # A value given to the constructor of the protocol replaces the
+            # declared default for this instance.
+            default=instance.field_default(self._bound_name, self.default),
             optional=self.optional,
             label=self.label,
             group=self.group,

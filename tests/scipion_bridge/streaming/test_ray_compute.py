@@ -164,7 +164,7 @@ def test_ephemeral_calls_are_queued_on_the_gpus():
     protocol = PerKeyWork()
     protocol.recorder = Recorder.remote()
     collector = Collector.remote()
-    pipeline = _compile(protocol, collector, parameters={"offset": 100})
+    pipeline = _compile(protocol, collector, parameters={"PerKeyWork": {"offset": 100}})
 
     try:
         # Child pipelines start one after another; start all before measuring.

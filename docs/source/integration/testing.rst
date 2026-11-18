@@ -255,7 +255,7 @@ started with a fixed, small number of CPUs and logical GPUs:
 
         with RayPipelineRunner(
             DenoiseExternal(),
-            parameters={"chunk_size": 4},
+            parameters={"DenoiseExternal": {"chunk_size": 4}},
             sink=lambda out: ray.get(collector.append.remote(len(out["particles"]))),
         ) as runner:
             runner.run(particles=star_path)

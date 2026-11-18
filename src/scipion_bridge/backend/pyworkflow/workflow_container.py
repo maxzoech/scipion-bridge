@@ -201,7 +201,9 @@ class _PyWorkflowProtocolConfigurationProvider(ProtocolConfigurationProvider):
             return args[0]
         return None
 
-    def get_value(self, name: str, default: Any = None) -> Any:
+    def get_value(self, scope: str, name: str, default: Any = None) -> Any:
+        # A Scipion 3 protocol runs one protocol: its form holds the
+        # parameters under their own names, whatever the instance name.
         assert hasattr(
             self.backend, name
         ), f"Attribute '{name}' was not found on Scipion protocol instance '{self.backend}'."

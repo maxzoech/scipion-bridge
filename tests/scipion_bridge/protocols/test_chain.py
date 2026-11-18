@@ -1,7 +1,9 @@
 import pytest
+from dependency_injector import providers
 
 import scipion_bridge as B
 from scipion_bridge import ChainedProtocol, Protocol
+from scipion_bridge.core.environment import StaticProtocolConfigurationProvider
 from scipion_bridge.core.protocol import ChainError
 from scipion_bridge.core.streaming import LoweringContext, Source
 from scipion_bridge.single_particle import Particle
@@ -98,7 +100,11 @@ def test_configuration_merge():
     config = chain.configuration
 
     assert list(config.inputs) == ["particles", "mask"]
-    assert list(config.parameters) == ["scale"]
+    # Parameters stay with their protocols.
+    assert config.parameters is None
+    assert {
+        name: list(fields) for name, fields in chain.parameters_by_name().items()
+    } == {"Stage1": ["scale"], "Stage2": ["scale"]}
     assert chain.outputs() == Stage2().outputs()
 
 
@@ -130,14 +136,58 @@ def test_unknown_mapping_raises():
         Stage1().pipe(Stage2(), mapping={"other": "missing"})
 
 
-def test_conflicting_parameter_raises():
-    with pytest.raises(ChainError):
-        Stage1().pipe(ConflictingParameter(), mapping={"other": "micrographs"})
+def test_parameters_of_the_same_name_with_other_defaults_chain():
+    chain = Stage1().pipe(ConflictingParameter(), mapping={"other": "micrographs"})
+
+    defaults = {
+        name: fields["scale"].default
+        for name, fields in chain.parameters_by_name().items()
+    }
+    assert defaults == {"Stage1": 1.0, "ConflictingParameter": 2.0}
 
 
-def test_shared_parameter_is_merged():
-    chain = Stage1() | Stage2()
-    assert list(chain.configuration.parameters) == ["scale"]
+def test_protocols_of_the_same_class_are_numbered_in_chain_order():
+    chain = Stage1() | (Stage2() | Stage1().pipe(Stage2(), mapping={"other": "mask"}))
+
+    assert chain.names() == ("Stage1", "Stage2", "Stage1_2", "Stage2_2")
+
+
+def test_names_given_to_the_constructors_are_kept():
+    chain = Stage1(name="first") | Stage2()
+
+    assert chain.names() == ("first", "Stage2")
+
+
+def test_two_protocols_cannot_share_a_name():
+    with pytest.raises(ValueError, match="'Stage2'"):
+        (Stage1(name="Stage2") | Stage2()).names()
+    with pytest.raises(ValueError, match="'same'"):
+        (Stage1(name="same") | Stage2(name="same")).names()
+
+
+def test_constructor_values_are_the_defaults_of_their_instance():
+    chain = Stage1(scale=3.0) | Stage2()
+
+    defaults = {
+        name: fields["scale"].default
+        for name, fields in chain.parameters_by_name().items()
+    }
+    assert defaults == {"Stage1": 3.0, "Stage2": 1.0}
+
+
+def test_each_protocol_reads_its_own_value(setup_test_container):
+    chain = Stage1(scale=3.0) | Stage2()
+
+    with setup_test_container.protocol_config_provider.override(
+        providers.Singleton(
+            StaticProtocolConfigurationProvider,
+            values={"Stage2": {"scale": 5.0}},
+        ),
+    ):
+        chain.get_pipeline()
+        values = (chain.first.scale.value, chain.second.scale.value)
+
+    assert values == (3.0, 5.0)
 
 
 def test_steps_have_one_source_per_name():

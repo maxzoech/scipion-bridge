@@ -74,7 +74,20 @@ A ``Field[T]`` is a parameter. Its value is read with ``.value``:
 
 Values are supplied by the backend: by ``RayPipelineRunner(parameters=...)``,
 by command line arguments, or by the Scipion form. A parameter without a value
-falls back to its default. ``.value`` works on the driver inside ``steps()``
+falls back to the value given to the constructor, else to its default:
+
+.. code-block:: python
+
+    Denoise(chunk_size=512)              # the default of this instance
+    Denoise(name="denoise", chunk_size=512)
+
+The backend configures parameters under the instance name of the protocol,
+``name`` (by default its class name, numbered in a chain holding the class
+several times), so the protocols of a chain declaring a parameter of the same
+name get values of their own. ``name`` and ``protocol_id`` are the arguments
+of the constructor: declaring a field, input or attribute with these names
+raises ``TypeError``. A protocol overriding ``__init__`` forwards its keyword
+arguments (``super().__init__(**kwargs)``). ``.value`` works on the driver inside ``steps()``
 and inside every stage, because each backend serves the parameter values to
 its worker processes. It does not work at import time or in ``__init__``,
 before a backend has provided the values.

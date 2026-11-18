@@ -37,7 +37,8 @@ def configure_worker_env(
     """Wire a ``RayWorkerContainer`` in a worker process.
 
     Args:
-        parameters: Values of the protocol parameters, served to ``Field.value``.
+        parameters: Values of the protocol parameters by protocol name,
+            ``{name: {parameter: value}}``, served to ``Field.value``.
     """
     container = RayWorkerContainer(
         parameters=providers.Object(dict(parameters or {})),

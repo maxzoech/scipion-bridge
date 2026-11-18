@@ -16,6 +16,27 @@
 - The standalone backend serves the declared defaults of parameters, as the
   Ray backend does for parameters without a value.
 - `B.ValidationError` and `B.SealedProtocolError` are exported.
+- Protocols have an instance name, `Protocol(name=...)`, by default their
+  class name, numbered in a chain holding a class several times (`Align_2`).
+  Parameters are configured under it.
+- The constructor of a protocol takes values of its parameters,
+  `Align(num_classes=50)`: the defaults of the instance, which the
+  configuration of a run overrides.
+- **Breaking:** chains no longer merge the parameters of their protocols by
+  name: protocols declaring a parameter of the same name get values of their
+  own (`parameters_by_name()`); `configuration.parameters` is `None` for a
+  chain. `ProtocolConfigurationProvider.get_value(scope, name, default)`
+  takes the instance name.
+- **Breaking:** `name` and `protocol_id` cannot be declared by a protocol.
+- `RayPipelineRunner.launch(inputs=, parameters=, **options)` runs a
+  protocol from one mapping of plain values (Hydra's `DictConfig`, YAML, any
+  custom parser), without a dependency on Hydra; `default_config()` gives
+  the whole mapping at its defaults, `RUN_OPTIONS` lists the options.
+  `argument_parser()` and `config_of()` make the command line one frontend
+  of it, to which programs add arguments of their own.
+- **Breaking:** `RayPipelineRunner(parameters=...)` takes the values by
+  instance name, `{"Align": {"num_classes": 50}}`, and parameter flags are
+  `--Align.num-classes`.
 
 ### Imports and public API
 - `import scipion_bridge` no longer loads Ray or any backend (about 0.4 s

@@ -118,7 +118,7 @@ def test_convert_scipion_to_python_enum_with_protocol_configuration():
         backend, configuration=proto._configuration
     )
 
-    assert provider.get_value("color") == Color.GREEN
+    assert provider.get_value("EnumProtocol", "color") == Color.GREEN
 
 
 class CloudpickleTestProtocol(Protocol):

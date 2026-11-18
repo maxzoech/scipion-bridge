@@ -45,8 +45,7 @@ Running a protocol: RayPipelineRunner
     from scipion_bridge.backend.ray import RayPipelineRunner
 
     with RayPipelineRunner(
-        FoundationModelInference(),
-        parameters={"chunk_size": 512},
+        FoundationModelInference(chunk_size=512),
         sink=OutputsToZarr("latents.zarr"),      # see "Persisting outputs" below
     ) as runner:
         runner.run(particles=Path("particles.star"))
@@ -65,10 +64,12 @@ profile_log_level=logging.INFO, num_loaders=4, loader_cpus=0,
 run_store=None)``
 
 ``parameters``
-   Values of the protocol's fields. Unknown names raise ``ValueError``, and so
-   do missing required fields when the pipeline is compiled. Parameters
-   without a value use their default. ``set_parameters`` replaces them before
-   the first run.
+   Values of the parameters by the instance name of their protocol,
+   ``{"FoundationModelInference": {"chunk_size": 512}}``; enums may be given
+   by name. Unknown names raise ``ValueError``, and so do missing required
+   parameters when the pipeline is compiled. Parameters without a value use
+   the value given to the constructor of their protocol, else their default.
+   ``set_parameters`` replaces them before the first run.
 
 ``origin_types``
    The type each input is given as, by input name. The default is ``Path``.
@@ -194,17 +195,82 @@ Each output then appears under ``<root>/<output name>/<field path>``. Any
 other ``SinkWriter`` or callback works the same way (see
 :doc:`/user_guide/streaming/sinks`).
 
+.. _ray-configuring-a-run:
+
+Configuring a run
+-----------------
+
+A run is configured by one mapping of plain values: the inputs, the
+parameters by the instance name of their protocol, and the options of the
+runner. ``launch`` takes it::
+
+    runner = RayPipelineRunner(Embed() | Cluster(num_classes=50), sink=...)
+    runner.launch(
+        inputs={"particles": ["Runs/000042_Extract/extra/*.xmd"]},
+        parameters={"Cluster": {"cluster_sample_size": 100_000}},
+        run_dir="runs/a",
+        num_loaders=8,
+    )
+
+As YAML:
+
+.. code-block:: yaml
+
+    inputs:
+      particles: ["Runs/000042_Extract/extra/*.xmd"]
+    parameters:
+      Embed: {model_type: CRYO_IEF_SMALL}      # enums by name
+      Cluster: {cluster_sample_size: 100000}
+    run_dir: runs/a
+    num_loaders: 8
+    explain: null      # a path: write the report instead of running
+    report: null       # a path: write the report with the stats after the run
+
+* **Instance names.** Parameters are scoped by the instance name of their
+  protocol (``Protocol.name``): its class name, or the name given to its
+  constructor (``Cluster(name="clusters")``); a chain holding a class twice
+  numbers the second one (``Cluster_2``). Protocols of a chain declaring a
+  parameter of the same name get values of their own.
+* **Precedence.** A value in the configuration overrides the value given to
+  the constructor of the protocol (``Cluster(num_classes=50)``), which
+  overrides the declared default.
+* **Options.** ``RUN_OPTIONS`` lists them: ``run_dir``,
+  ``checkpoint_outputs``, ``unique_elements``, ``num_loaders``,
+  ``loader_cpus``, ``placement``, ``queue_size``, ``max_in_flight``,
+  ``buffer_size``, ``spill_threshold``, ``profile``, ``profile_log_level``,
+  and ``explain``, ``explain_gpus`` and ``report``. They replace those given
+  to the constructor; the ``SCIPION_STREAM_*`` environment variables still
+  override them.
+* **Errors.** Unknown options, inputs, protocol names and parameters raise,
+  so a typo in a configuration file fails instead of being ignored.
+* ``runner.default_config()`` gives the whole mapping with every value at
+  its default, as plain values: a file to start from.
+
+Any frontend can produce the mapping. Mappings and sequences are read
+through ``collections.abc``, so Hydra's ``DictConfig`` works as it is,
+without the library depending on Hydra:
+
+.. code-block:: python
+
+    @hydra.main(config_path="conf", config_name="classify", version_base=None)
+    def main(cfg):
+        runner = RayPipelineRunner(build_workflow(cfg.workflow), sink=make_sink(cfg.sink))
+        runner.launch(**cfg.run)
+
 Command line applications
 -------------------------
 
-``launch_as_terminal_application()`` builds an ``argparse`` parser from the
-protocol's declarations and runs the protocol with the parsed arguments.
-Inputs become path arguments. An input takes one or more paths or quoted
-glob patterns (``**`` matches directories). A single path is resolved on the
-driver; anything else gives the list of all matching files, which the
-runner loads in parallel. Field names are converted to kebab case, so
-``chunk_size`` becomes ``--chunk-size``. The protocol's docstring becomes the
-program description.
+The command line is one more frontend of the same configuration.
+``launch_as_terminal_application()`` builds an ``argparse`` parser
+(``argument_parser()``), turns the parsed arguments into the configuration
+(``config_of``) and launches it. Inputs become path arguments. An input
+takes one or more paths or quoted glob patterns (``**`` matches
+directories). A single path is resolved on the driver; anything else gives
+the list of all matching files, which the runner loads in parallel.
+Parameters become options under the instance name of their protocol, in
+kebab case: ``chunk_size`` of ``FoundationModelInference`` becomes
+``--FoundationModelInference.chunk-size``. The protocol's docstring becomes
+the program description.
 
 .. code-block:: python
 
@@ -215,18 +281,33 @@ program description.
 .. code-block:: bash
 
     python embed.py --help
-    python embed.py --particles particles.star --chunk-size 512 --model-type CRYO_IEF_SMALL
+    python embed.py --particles particles.star \
+        --FoundationModelInference.chunk-size 512 \
+        --FoundationModelInference.model-type CRYO_IEF_SMALL
     python embed.py --particles 'Runs/000042_Extract/extra/*.xmd' --num-loaders 8
     python embed.py --particles 'Runs/000042_Extract/extra/*.xmd' 'Runs/000057_Extract/extra/*.xmd'
 
-``bool`` fields become ``--name`` / ``--no-name``, and ``Enum`` fields accept
-the member names. A field that is not optional is a required option, even
-when it has a default. Every application also accepts ``--profile [PATH]``,
-``--num-loaders N`` and ``--run-dir PATH`` (see `The lineage of a run`_), and
-``--no-checkpoint-outputs``, which does not keep the outputs of every
-protocol in the run directory, and ``--unique-elements warn|raise``, which
-checks that the sink writes no element twice (see :doc:`/user_guide/streaming/sinks`,
-"Elements written twice").
+``bool`` fields become ``--P.name`` / ``--no-P.name``, and ``Enum`` fields
+accept the member names. Every option of the runner is a flag too:
+``--profile [PATH]``, ``--num-loaders N``, ``--run-dir PATH`` (see `The
+lineage of a run`_), ``--no-checkpoint-outputs``, which does not keep the
+outputs of every protocol in the run directory, ``--unique-elements
+warn|raise``, which checks that the sink writes no element twice (see
+:doc:`/user_guide/streaming/sinks`, "Elements written twice"), and the
+others of ``RUN_OPTIONS``.
+
+A program with options of its own adds them to the parser instead of
+parsing the command line twice:
+
+.. code-block:: python
+
+    runner = RayPipelineRunner(Align(keep_members=True), sink=...)
+    parser = runner.argument_parser()
+    parser.add_argument("--launch-dashboard", action="store_true")
+    args = parser.parse_args()
+    if args.launch_dashboard:
+        ...
+    runner.launch(**runner.config_of(args))
 
 Buffering and spilling
 ----------------------

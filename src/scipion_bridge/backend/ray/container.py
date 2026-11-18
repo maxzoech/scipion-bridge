@@ -13,7 +13,8 @@ def configure_ray_env(
     """Configure and wire RayContainer.
 
     Args:
-        parameters: Values of the protocol parameters, served to ``Field.value``.
+        parameters: Values of the protocol parameters by protocol name,
+            ``{name: {parameter: value}}``, served to ``Field.value``.
     """
     if packages is None:
         packages = ["scipion_bridge"]

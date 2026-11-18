@@ -314,13 +314,17 @@ following the type system's reduction semantics:
 
     with RayPipelineRunner(
         classification,
-        parameters={"num_classes": 100, "cluster_sample_size": 100_000},
+        parameters={
+            "ClusterLatents": {"num_classes": 100, "cluster_sample_size": 100_000},
+        },
         sink=OutputsToZarr("classes.zarr"),
     ) as runner:
         runner.run(particles=Path("particles.star"))
 
-The parameters of both protocols are set together, because the chain merges
-them.
+Parameters are set per protocol, by its instance name: the class name unless
+the protocol was given one (``ClusterLatents(name="clusters")``). Values can
+also be given to the constructor, ``ClusterLatents(num_classes=100)``; the
+configuration of a run overrides them.
 
 At the end, the runner prints per-stage statistics. If the embedding stage
 shows a high ``process_s`` while the stages after it are mostly ``idle_s``, the

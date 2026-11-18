@@ -596,7 +596,10 @@ def convert_protocol_to_scipion3_protocol(
                 )
 
             form.addSection(label="Parameters")
-            for key, param_element in protocol.configuration.parameters.items():
+            # A Scipion 3 protocol wraps one protocol, not a chain.
+            parameters = protocol.configuration.parameters
+            assert parameters is not None, "chains cannot be Scipion 3 protocols"
+            for key, param_element in parameters.items():
                 dtype = param_element.dtype
                 param, args = _get_param_type_and_kwargs(param_element, dtype, key=key)
 

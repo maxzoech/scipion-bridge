@@ -13,7 +13,7 @@ from typing import (
 
 from ..streaming.node import Node, replace_node
 from ..streaming.ops import Op, Source
-from .fields import Field, Input, Resource
+from .fields import Input, Resource
 
 
 class ChainError(TypeError):
@@ -148,10 +148,6 @@ def _merge(
     )
 
 
-def _same_field(a: Field, b: Field) -> bool:
-    return a == b and a.dtype == b.dtype
-
-
 def _same_resource(a: Resource, b: Resource) -> bool:
     return a.builder == b.builder and a.scope == b.scope and a.dtype == b.dtype
 
@@ -164,13 +160,6 @@ def merge_inputs(
     """Inputs of the chain: those of ``first`` plus the unwired ones of ``second``."""
     remaining = {k: v for k, v in second.items() if k not in wired}
     return _merge("inputs", first, remaining, lambda a, b: a.dtype == b.dtype)
-
-
-def merge_parameters(
-    first: Mapping[str, Field],
-    second: Mapping[str, Field],
-) -> "OrderedDict[str, Field]":
-    return _merge("parameters", first, second, _same_field)
 
 
 def merge_resources(

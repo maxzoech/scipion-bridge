@@ -96,6 +96,22 @@ class HoldingSubclass(Holding):
     pass
 
 
+class Scaling(B.Protocol):
+    """Takes its parameter values from its constructor."""
+
+    particles: B.Input[B.Set[Particle]] = B.Input()
+    scale: B.Field[float] = B.Field(default=1.0)
+
+    def outputs(self):
+        return {"particles": B.Set[Particle]}
+
+    def _apply(self, particles):
+        return {"particles": particles}
+
+    def steps(self):
+        return self.particles.map(self._apply)
+
+
 class TwoChunks(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
 
@@ -317,11 +333,20 @@ def test_the_fingerprint_changes_with_a_parameter_value(setup_test_container):
     default = _sealed(Holding()).fingerprint()
 
     with setup_test_container.protocol_config_provider.override(
-        providers.Singleton(StaticProtocolConfigurationProvider, values={"scale": 2.0}),
+        providers.Singleton(
+            StaticProtocolConfigurationProvider,
+            values={"Holding": {"scale": 2.0}},
+        ),
     ):
         scaled = _sealed(Holding()).fingerprint()
 
     assert default != scaled
+
+
+def test_the_fingerprint_changes_with_a_value_given_to_the_constructor():
+    assert _sealed(Scaling()).fingerprint() != (
+        _sealed(Scaling(scale=2.0)).fingerprint()
+    )
 
 
 def test_the_fingerprint_is_stable_when_pickled():

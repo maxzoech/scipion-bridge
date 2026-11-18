@@ -87,8 +87,10 @@ A protocol instance passes through the same phases on every backend:
    annotations and sorts them into inputs, fields, resources and state, in
    declaration order. Unannotated attributes raise ``TypeError`` here.
 2. **Configuration.** The backend provides parameter values: from
-   ``RayPipelineRunner(parameters=...)``, from command line arguments, or
-   from the Scipion form.
+   ``RayPipelineRunner(parameters=...)`` or ``launch(**config)``, from
+   command line arguments, or from the Scipion form, by the instance name of
+   the protocol. Values given to the constructor (``Align(num_classes=50)``)
+   are the defaults of the instance.
 3. **Compilation.** The backend calls ``get_pipeline()``, which calls
    ``steps()``, assigns the protocol's compute resources to its maps, and
    appends the validation of outputs. The graph is compiled into the

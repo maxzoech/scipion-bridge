@@ -26,7 +26,8 @@ default of a parameter, and ``@inject`` on the function:
         self,
         config_provider: ProtocolConfigurationProvider = Provide["protocol_config_provider"],
     ):
-        return config_provider.get_value(self.name, default=self.default)
+        # Values are scoped by the instance name of the protocol.
+        return config_provider.get_value(self.scope, self.name, default=self.default)
 
 The service interfaces live in ``core/environment``:
 
