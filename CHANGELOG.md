@@ -72,6 +72,9 @@
   `--logdir`: it lists every run below it (running ones marked, new ones
   appear) and browses the one picked; its API is `/api/runs` and
   `/api/run/<name>/...`.
+- Arrays with an axis of size 0 (e.g. the members of an empty class) no
+  longer kill the process (SIGFPE in PyArrow) when converted to Arrow or
+  pickled.
 - The lineage viewer draws the graph of the pipeline (the runner records its
   report in the run directory) and overlays the ancestry or descendants of an
   item, or the items holding an element: items per stage as badges, and the

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import awkward as ak
 import numpy as np
@@ -54,7 +55,12 @@ def build_tensor_array(
     flat_data = np.ascontiguousarray(data, dtype=dtype).ravel()
     flat_pa = pa.array(flat_data, type=pa_dtype)
     pa_mask = pa.array(mask, type=pa.bool_()) if mask is not None else None
-    storage = pa.FixedSizeListArray.from_arrays(flat_pa, cell_size, mask=pa_mask)
+    storage = fixed_size_list(
+        flat_pa,
+        pa.list_(pa_dtype, cell_size),
+        len(flat_data) // cell_size if cell_size else len(data),
+        mask=pa_mask,
+    )
     tensor_type = pa.fixed_shape_tensor(pa_dtype, shape)
     return pa.ExtensionArray.from_storage(tensor_type, storage)
 
@@ -195,8 +201,11 @@ def extract_field_from_arrow(col: pa.Array, field_name: str) -> pa.Array:
             return type(col).from_arrays(col.offsets, inner, mask=mask)
         case pa.FixedSizeListArray():
             inner = extract_field_from_arrow(col.values, field_name)
-            base = pa.FixedSizeListArray.from_arrays(
-                inner, col.type.list_size, mask=mask
+            base = fixed_size_list(
+                inner,
+                pa.list_(inner.type, col.type.list_size),
+                col.offset + len(col),
+                mask=mask,
             )
             return base.slice(col.offset, len(col))
         case _:
@@ -225,8 +234,11 @@ def unwrap_extension_for_compute(
             if ext_type is not None:
                 mask = arr.is_null() if arr.null_count > 0 else None
                 if isinstance(arr, pa.FixedSizeListArray):
-                    base = pa.FixedSizeListArray.from_arrays(
-                        inner, arr.type.list_size, mask=mask
+                    base = fixed_size_list(
+                        inner,
+                        pa.list_(inner.type, arr.type.list_size),
+                        arr.offset + len(arr),
+                        mask=mask,
                     )
                     return base.slice(arr.offset, len(arr)), ext_type
                 else:
@@ -258,8 +270,11 @@ def rewrap_extension_after_compute(
         wrapped_values = rewrap_extension_after_compute(arr.values, ext_type)
 
         if isinstance(arr, pa.FixedSizeListArray):
-            base = pa.FixedSizeListArray.from_arrays(
-                wrapped_values, arr.type.list_size, mask=mask
+            base = fixed_size_list(
+                wrapped_values,
+                pa.list_(wrapped_values.type, arr.type.list_size),
+                arr.offset + len(arr),
+                mask=mask,
             )
             return base.slice(arr.offset, len(arr))
         else:
@@ -425,14 +440,43 @@ def regular_numpy_to_arrow(data: np.ndarray) -> pa.Array:
     The type matches what ``ak.to_arrow`` produces for a regular Awkward
     Array, so columns exported either way concatenate. A contiguous buffer is
     wrapped without copying.
+
+    Axes of size 0 are allowed (see ``fixed_size_list``).
     """
     values: pa.Array = pa.array(np.ascontiguousarray(data).reshape(-1))
-    for size in reversed(data.shape[1:]):
-        values = pa.FixedSizeListArray.from_arrays(
+    for axis in reversed(range(1, data.ndim)):
+        values = fixed_size_list(
             values,
-            type=pa.list_(pa.field("item", values.type, nullable=False), size),
+            pa.list_(pa.field("item", values.type, nullable=False), data.shape[axis]),
+            math.prod(data.shape[:axis]),
         )
     return values
+
+
+def fixed_size_list(
+    values: pa.Array,
+    list_type: pa.DataType,
+    length: int,
+    mask: Optional[pa.Array] = None,
+) -> pa.FixedSizeListArray:
+    """A FixedSizeListArray of ``length`` lists of ``values``, null where
+    ``mask`` is true, without copying ``values``.
+
+    ``pa.FixedSizeListArray.from_arrays`` derives the length by dividing by
+    the list size, which kills the process (SIGFPE) for lists of size 0.
+    """
+    if mask is None:
+        return pa.Array.from_buffers(list_type, length, [None], children=[values])
+    else:
+        assert len(mask) == length, (len(mask), length)
+        validity = pa.array(~mask.to_numpy(zero_copy_only=False))
+        return pa.Array.from_buffers(
+            list_type,
+            length,
+            [validity.buffers()[1]],
+            null_count=mask.true_count,
+            children=[values],
+        )
 
 
 def is_regular_arrow(column: pa.Array) -> bool:
@@ -541,9 +585,10 @@ def null_row(example: pa.Array) -> pa.Array:
                 null_row(example.storage),
             )
         case pa.FixedSizeListArray():
-            return pa.FixedSizeListArray.from_arrays(
+            return fixed_size_list(
                 example.slice(0, 1).flatten(),
-                type=example.type,
+                example.type,
+                1,
                 mask=pa.array([True]),
             )
         case _:

@@ -1,5 +1,8 @@
 """Converting Arrow arrays to NumPy, independently of the pyarrow version."""
 
+import subprocess
+import sys
+
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -55,3 +58,41 @@ def test_permuted_tensor_layouts_are_rejected():
 
     with pytest.raises(AssertionError, match="Permuted"):
         tensor_to_numpy(column)
+
+
+# Converts arrays with axes of size 0 in a fresh interpreter: PyArrow kills the
+# process (SIGFPE) instead of raising if a conversion divides by a list size
+# of 0, which would take pytest down with it.
+_EMPTY_AXES = """
+import pickle
+import numpy as np
+import scipion_bridge as B
+from scipion_bridge.core.struct.utils.arrow_utils import (
+    regular_arrow_to_numpy,
+    regular_numpy_to_arrow,
+)
+
+for shape in [(3, 0), (3, 0, 4), (3, 4, 0), (0, 0)]:
+    data = np.zeros(shape, np.float32)
+    restored = regular_arrow_to_numpy(regular_numpy_to_arrow(data))
+    assert restored.shape == shape, (restored.shape, shape)
+
+class Members(B.Struct):
+    x: B.Array[np.float64] = B.Array(shape=(None,))
+
+members = Members(x=np.zeros(0))
+assert pickle.loads(pickle.dumps(members)).x.shape == (0,)
+print("ok")
+"""
+
+
+def test_arrays_with_axes_of_size_0_convert_and_pickle():
+    result = subprocess.run(
+        [sys.executable, "-c", _EMPTY_AXES],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
