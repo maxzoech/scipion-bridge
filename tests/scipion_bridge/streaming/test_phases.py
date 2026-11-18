@@ -3,6 +3,7 @@
 from scipion_bridge.backend.ray.backend import (
     _Placement,
     _boundary_targets,
+    _kept_after,
     _host_of,
     _is_hosted,
     _pool_hosts,
@@ -74,7 +75,7 @@ def _placement(nodes, gpus):
 def test_the_first_map_of_a_later_phase_gets_an_actor_of_its_own():
     nodes, labels, a, b = _pipeline()
 
-    targets = _boundary_targets(nodes, labels, _placement(nodes, gpus=1))
+    targets = _boundary_targets(nodes, labels, _placement(nodes, gpus=1), {})
 
     assert targets == {b}
     assert not _is_hosted(b, targets)
@@ -82,11 +83,37 @@ def test_the_first_map_of_a_later_phase_gets_an_actor_of_its_own():
     assert _is_hosted(a, targets)
 
 
+def test_a_boundary_in_front_of_a_left_out_checkpoint_moves_past_it():
+    nodes, labels, a, b = _pipeline()
+    placement = _placement(nodes, gpus=1)
+    (target,) = {target for _, target in placement.plan.boundaries}
+
+    # As if b were behind a checkpoint left out of the pipeline.
+    targets = _boundary_targets(
+        [n for n in nodes if n is not b],
+        labels,
+        placement,
+        {target: frozenset({labels[nodes[-1]]})},
+    )
+
+    assert targets == {nodes[-1]}
+
+
+def test_the_stages_after_a_left_out_node_are_found_through_it():
+    nodes, labels, a, b = _pipeline()
+
+    kept = _kept_after(nodes, labels, lambda node: node is b)
+
+    assert kept == {labels[b]: frozenset({labels[nodes[-1]]})}
+
+
 def test_one_phase_has_no_boundaries():
     nodes, labels, _, _ = _pipeline()
 
-    assert _boundary_targets(nodes, labels, _placement(nodes, gpus=2)) == frozenset()
-    assert _boundary_targets(nodes, labels, None) == frozenset()
+    assert (
+        _boundary_targets(nodes, labels, _placement(nodes, gpus=2), {}) == frozenset()
+    )
+    assert _boundary_targets(nodes, labels, None, {}) == frozenset()
 
 
 def test_the_hosts_of_a_pool_are_the_actors_running_its_maps():

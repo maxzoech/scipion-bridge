@@ -17,7 +17,7 @@ from scipion_bridge.core.typed import current_registry
 from scipion_bridge.core.streaming.ops import Source, MapOp
 from scipion_bridge.core.streaming import Pipeline
 from scipion_bridge.core.streaming import CallbackSinkWriter
-from scipion_bridge.core.streaming import FileRunStore, LineageGraph
+from scipion_bridge.core.streaming import FileRunStore, IRSink, LineageGraph
 from scipion_bridge.core.struct import identity, references
 from scipion_bridge.core.struct.source import FileId
 from scipion_bridge.single_particle import XmippParticleStackProxy
@@ -634,6 +634,13 @@ def test_a_run_records_its_manifest_and_the_lineage_of_its_outputs(tmp_path):
     assert all(p["fingerprint"] for p in manifest["protocols"])
     assert manifest["parameters"]["scale"] == 3
     assert manifest["inputs"]["particles"] == {"value": str(star_path), "count": 1}
+    # The outputs of both protocols are kept.
+    checkpoints = store.read_checkpoints()
+    assert sorted(label.split(":")[-1] for label in checkpoints) == [
+        "checkpoint(ParameterProtocol)",
+        "checkpoint(RechunkProtocol)",
+    ]
+    assert all(c.complete and c.items for c in checkpoints.values())
     graph = LineageGraph.of(store)
     # The outputs are the particles of the stack, by their rows.
     outputs = [
@@ -838,3 +845,24 @@ def test_ray_pipeline_runner_cli_expands_patterns(tmp_path, monkeypatch):
 
     run.assert_called_once_with({"particles": [*run_b, run_a[1], run_a[0]]})
     assert runner.num_loaders == 3
+
+
+def test_the_cli_sets_what_the_sink_does_with_repeated_elements(tmp_path, monkeypatch):
+    star_path, _ = _create_sample_particles(tmp_path, n_particles=4)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prog",
+            *["--particles", str(star_path), "--precision", "FP16", "--scale", "5"],
+            *["--unique-elements", "warn"],
+        ],
+    )
+    runner = RayPipelineRunner(ParameterProtocol(), sink=lambda outputs: None)
+
+    with patch.object(runner, "run"):
+        runner.launch_as_terminal_application()
+
+    # The runner attaches the sink, so it sets its check.
+    (sink,) = runner.ir_sinks
+    assert isinstance(sink, IRSink)
+    assert sink.unique_elements is B.UniqueElements.WARN

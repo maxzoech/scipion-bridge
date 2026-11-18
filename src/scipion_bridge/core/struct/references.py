@@ -17,6 +17,7 @@ import contextlib
 import contextvars
 import enum
 import os
+import pickle
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -80,10 +81,13 @@ class PicklingMode(enum.Enum):
     ``TRANSFER``: to another process that uses it now (Ray's object store).
     ``SPILL``: to disk, until a stage takes it; the rows of references can be
     read again from their sources instead.
+    ``STORE``: to the run store (checkpoints), to be read in this run or a
+    later one; the rows of references are read again from their sources.
     """
 
     TRANSFER = "transfer"
     SPILL = "spill"
+    STORE = "store"
 
 
 _mode: contextvars.ContextVar[PicklingMode] = contextvars.ContextVar(
@@ -104,6 +108,13 @@ def pickling(mode: PicklingMode) -> Iterator[None]:
 
 def current_mode() -> PicklingMode:
     return _mode.get()
+
+
+def dumps(obj: Any, mode: PicklingMode) -> bytes:
+    """``obj`` pickled for ``mode``, e.g. ``STORE``: rows that reference
+    input files this process can read unchanged are kept as references."""
+    with pickling(mode):
+        return pickle.dumps(obj)
 
 
 # Set to 0 to spill the rows of references as bytes, e.g. when the input
@@ -138,6 +149,16 @@ class ReferencePolicy:
         """
         enabled = os.environ.get(SPILL_REFERENCES_ENV, "1") != "0"
         return not (enabled and all(file.matches() for file in state.files))
+
+    def keep_bytes_when_storing(self, state: ColumnState) -> bool:
+        """Whether an item kept in the run store keeps the rows of a reference.
+
+        The rows are dropped if this process can read the files of the
+        source, unchanged: the store keeps the reference, and reading the
+        item reads the rows from the files. If the files change before the
+        item is read, reading its rows fails.
+        """
+        return not all(file.matches() for file in state.files)
 
     def keep_bytes_in_transfer(self, state: ColumnState) -> bool:
         """Whether an item sent to another process keeps the rows.
@@ -331,7 +352,7 @@ def pickled_references(obj: Stored) -> Tuple[List[PickledReference], frozenset]:
         # Most Sets have no references: pickling costs nothing more.
         return [], frozenset()
     mode = current_mode()
-    if mode is PicklingMode.SPILL:
+    if mode is not PicklingMode.TRANSFER:
         verify(obj)
     pickled: List[PickledReference] = []
     omitted = set()
@@ -382,9 +403,13 @@ def _keeps_bytes(mode: PicklingMode, state: ColumnState) -> bool:
 
     Rows that are kept but not read yet are read by the export.
     """
-    if mode is PicklingMode.SPILL:
-        return _policy.keep_bytes_when_spilling(state)
-    return _policy.keep_bytes_in_transfer(state)
+    match mode:
+        case PicklingMode.TRANSFER:
+            return _policy.keep_bytes_in_transfer(state)
+        case PicklingMode.SPILL:
+            return _policy.keep_bytes_when_spilling(state)
+        case PicklingMode.STORE:
+            return _policy.keep_bytes_when_storing(state)
 
 
 def restore_references(obj: Stored, pickled: List[PickledReference]) -> None:

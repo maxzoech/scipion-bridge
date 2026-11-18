@@ -37,8 +37,10 @@ Lowering ends with the fusion pass (`Fusing cheap maps`_), which runs the
 fusable maps inside a neighbouring stage.
 
 Only nodes reachable upstream from the given sinks are lowered. This is why a
-``checkpoint`` sink must be passed to ``Pipeline.from_sink`` explicitly, and
+sink on a side branch must be passed to ``Pipeline.from_sink`` explicitly, and
 why dangling branches are silently absent from a compiled pipeline.
+``checkpoint`` and ``tap`` are stages in the stream, not side branches, so
+they are always compiled.
 
 .. list-table::
    :header-rows: 1
@@ -63,8 +65,12 @@ why dangling branches are silently absent from a compiled pipeline.
      - ``IRAccumulate(tag_inputs=True)``
    * - ``group_by``
      - ``IRDemux(key_fn, template, source_name, max_keys, workers)``
-   * - ``sink``, ``write_to``, ``checkpoint``
+   * - ``sink``, ``write_to``
      - ``IRSink(writer)``
+   * - ``checkpoint``, ``tap``
+     - ``IRCheckpoint(name, replay)``: the backend keeps the items in its run
+       store (``RayCheckpointActor``) or, without one, leaves the node out
+       (``ir.bypass``, keeping the labels of the other stages)
 
 ``Protocol.get_pipeline()`` adds two things before lowering: it assigns the
 protocol's ``ComputeAssignment`` to every ``MapOp`` and ``MapElementOp`` of
@@ -199,8 +205,8 @@ Item ids
 
 On Ray, every item between two stages carries a 16-byte *item id* next to
 it, never inside it: user functions do not see it. Item ids link the items of
-a run to the items they were made from (lineage), and the checkpointing of
-runs will use them to skip outputs a sink already committed. They are
+a run to the items they were made from (lineage), and sinks skip the items
+a run in the same run store already committed. They are
 deterministic: the same inputs, received in the same order, give the same ids
 in every run. ``core/streaming/lineage.py`` derives them with one
 ``LineagePolicy`` per kind of stage, pure functions tested in-process:
@@ -268,6 +274,30 @@ Ids depend on the order in which a stage receives items. That order can
 differ between runs where several producers meet: several loaders feeding a
 source, stages with several inputs, and the results of ``group_by`` children.
 Resuming a run will log and replay the order at these points.
+
+Commits of sinks
+^^^^^^^^^^^^^^^^
+
+With a run store, ``RaySinkActor`` appends a ``Commit`` (item id, sink label,
+element count, receipt) after every write returns, batched like lineage
+records (``_Batches``) and drained at FLUSH after ``finalize``. Before its
+first item it reads the commits of its label: their ids are skipped
+(``StageStats.skipped``), and a ``CommittingSinkWriter`` gets the receipt of
+the last one in ``recover``. The order (data, then commit) means a crash
+leaves at worst writes without a commit, never a commit without its write;
+losing a batch of commits costs only writing those items again, which
+``recover`` makes harmless, so commits need no synchronous write per item.
+The sinks of ``group_by`` children hand results back to their router and
+commit nothing.
+
+Skipping by id is only correct if the run computes the same items, so a
+pipeline checks its ``StageInfo`` against the stored ones when it starts
+(``RunStore.check_stages``) and the runner checks the manifest
+(``_check_continues``). Where the order of arrival changes ids (see above),
+a continued run can make items with other ids from the same rows; the sink
+then writes them again, which ``unique_elements`` reveals. A continued run
+records its items again; ``LineageGraph`` keeps the first record of every
+id.
 
 Adding an operation
 -------------------

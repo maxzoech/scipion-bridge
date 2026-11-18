@@ -111,9 +111,18 @@ class LineageGraph:
             stages: The stages of the run, by label.
         """
         table = table.combine_chunks()
+        ids: List[ItemId] = table.column("item_id").to_pylist()
+        first: Dict[ItemId, int] = {}
+        for row, lid in enumerate(ids):
+            first.setdefault(lid, row)
+        if len(first) < len(ids):
+            # A run continuing an earlier one in its store records the items
+            # again, with the same ids: keep the first record of each.
+            table = table.take(list(first.values())).combine_chunks()
+            ids = list(first)
         self.stages = dict(stages)
         self._table = table
-        self._ids: List[ItemId] = table.column("item_id").to_pylist()
+        self._ids = ids
         self._row = {lid: row for row, lid in enumerate(self._ids)}
         stage = table.column("stage").dictionary_encode().combine_chunks()
         self._stage_labels: List[str] = stage.dictionary.to_pylist()

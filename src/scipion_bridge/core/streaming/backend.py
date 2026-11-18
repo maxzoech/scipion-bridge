@@ -50,7 +50,9 @@ class StageStats:
             items read back from the spill store.
         lineage_s: Time spent recording the lineage of items for a run
             store: building records, writing them, and for a map, finding
-            the element ids of its results.
+            the element ids of its results; for a sink, writing its commits.
+        skipped: Items a sink did not write because a run in the same run
+            store had committed them.
         first_in_t: When the stage received its first item, in seconds since
             the epoch; ``None`` before.
         last_done_t: When the stage finished processing its last item so
@@ -75,6 +77,7 @@ class StageStats:
     spill_bytes: int = 0
     reread_s: float = 0.0
     lineage_s: float = 0.0
+    skipped: int = 0
     first_in_t: Optional[float] = None
     last_done_t: Optional[float] = None
     capacity: Optional[int] = None

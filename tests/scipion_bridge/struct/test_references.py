@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import scipion_bridge as B
+from scipion_bridge.core.streaming import FileRunStore
 from scipion_bridge.core.struct import concat
 from scipion_bridge.core.struct import references
 from scipion_bridge.core.struct.references import PicklingMode
@@ -426,3 +427,51 @@ def test_spilling_by_reference_can_be_turned_off(tmp_path, monkeypatch):
 
     assert _states(restored)[("pixels",)] == "cached"
     assert len(spilled) > _rows(4).nbytes
+
+
+# -- Storing (checkpoints) -----------------------------------------------------
+def _file_backed_rows(tmp_path, n):
+    path = tmp_path / "rows.npy"
+    np.save(path, _rows(n))
+    lazy = B.Set[Image](capacity=n)
+    lazy["defocus"] = np.arange(n, dtype=np.float64)
+    references.set_reference(lazy, ("pixels",), Reference(FileSource(path), range(n)))
+    references.prefetch(lazy)
+    return lazy
+
+
+def test_storing_keeps_references_to_files_instead_of_their_rows(tmp_path, monkeypatch):
+    # Independent of spilling: its switch does not change what is stored.
+    monkeypatch.setenv(references.SPILL_REFERENCES_ENV, "0")
+    lazy = _file_backed_rows(tmp_path, 64)
+
+    stored = references.dumps(lazy, PicklingMode.STORE)
+
+    assert len(stored) < len(pickle.dumps(lazy)) - _rows(64).nbytes // 2
+    restored = pickle.loads(stored)
+    assert _states(restored)[("pixels",)] == "reference"
+    np.testing.assert_array_equal(restored["pixels"], _rows(64))
+
+
+def test_storing_keeps_the_rows_of_owned_columns():
+    _, eager, _ = _referencing(64)
+
+    restored = pickle.loads(references.dumps(eager, PicklingMode.STORE))
+
+    assert _states(restored)[("pixels",)] == "owned"
+    _same(restored, eager)
+
+
+def test_checkpoints_keep_references_in_the_run_store(tmp_path):
+    lazy = _file_backed_rows(tmp_path, 64)
+    store = FileRunStore(tmp_path / "run")
+    store.begin_checkpoint("1:checkpoint", replay=True)
+
+    store.store_item("1:checkpoint", b"i" * 16, lazy)
+
+    (kept,) = (tmp_path / "run").rglob("*.pickle")
+    assert kept.stat().st_size < _rows(64).nbytes
+    np.testing.assert_array_equal(
+        store.read_item("1:checkpoint", b"i" * 16)["pixels"],
+        _rows(64),
+    )

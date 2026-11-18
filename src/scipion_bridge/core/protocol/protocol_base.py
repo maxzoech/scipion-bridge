@@ -31,7 +31,7 @@ from ..environment.compute import (
     TaskType,
 )
 from ..environment.resource_provider import ResourceScope
-from ..streaming.ops import MapElementOp, MapOp, Op, lineage
+from ..streaming.ops import CheckpointOp, MapElementOp, MapOp, Op, lineage
 from .chain_utils import (
     merge_inputs,
     merge_parameters,
@@ -258,10 +258,18 @@ class Protocol(metaclass=abc.ABCMeta):
         return self._verified_steps()
 
     def _verified_steps(self) -> Op:
-        """``_tagged_steps()`` followed by the validation of the outputs."""
-        verified = self._tagged_steps().map(self._verify_outputs)
+        """``_tagged_steps()`` followed by the validation of the outputs, and a
+        checkpoint keeping them (in the run store of the backend, if any)."""
+        outputs = self._tagged_steps().map(self._verify_outputs)
+        verified = outputs.op(
+            CheckpointOp(self._output_name(), protocol_output=True),
+        )
         self._tag_stages(verified)
         return verified
+
+    def _output_name(self) -> str:
+        """Names the checkpoint of the outputs."""
+        return type(self).__name__
 
     def _tagged_steps(self) -> Op:
         """Return ``steps()`` and seal the protocol, with its stages tagged.
@@ -612,6 +620,9 @@ class ChainedProtocol(Protocol):
 
     def outputs(self) -> Dict[str, Type]:
         return self.second.outputs()
+
+    def _output_name(self) -> str:
+        return self.second._output_name()
 
     def steps(self) -> Op:
         # The hooks of both protocols ran in the hooks of the chain.

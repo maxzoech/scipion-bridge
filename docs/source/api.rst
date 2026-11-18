@@ -72,7 +72,7 @@ Streaming
      - A stream. Methods: ``map``, ``map_batch``, ``map_element``, ``chunk``,
        ``collect``, ``flatten``, ``scan``, ``combine_latest``, ``merge``,
        ``group_by``, ``sink``,
-       ``write_to``, ``checkpoint``.
+       ``write_to``, ``checkpoint``, ``tap``.
    * - :py:obj:`B.Source <scipion_bridge.core.streaming.ops.Source>`
      - A named entry point of a graph.
    * - :py:obj:`B.Sink <scipion_bridge.core.streaming.sink.Sink>`
@@ -84,6 +84,13 @@ Streaming
        :py:obj:`B.CallbackSinkWriter <scipion_bridge.core.streaming.sink_writer.CallbackSinkWriter>`
      - The protocol for asynchronous output writers (``write``, ``finalize``),
        and a writer calling a function.
+   * - :py:obj:`B.CommittingSinkWriter <scipion_bridge.core.streaming.sink_writer.CommittingSinkWriter>`,
+       :py:obj:`B.StoreSinkWriter <scipion_bridge.core.streaming.sink_writer.StoreSinkWriter>`,
+       :py:obj:`B.UniqueElements <scipion_bridge.core.streaming.sink_writer.UniqueElements>`
+     - Writers that undo writes no commit of the run store covers, a writer
+       keeping every item in a file named by its id, and what a sink does
+       with elements it writes twice (``RayPipelineRunner(unique_elements=)``,
+       ``write_to(..., unique_elements=)``).
    * - :py:obj:`B.FLUSH <scipion_bridge.core.streaming.node.FLUSH>`,
        :py:obj:`B.FlushSignal <scipion_bridge.core.streaming.node.FlushSignal>`
      - The end-of-stream signal.

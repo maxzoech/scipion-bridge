@@ -72,12 +72,55 @@
   `--logdir`: it lists every run below it (running ones marked, new ones
   appear) and browses the one picked; its API is `/api/runs` and
   `/api/run/<name>/...`.
+- Sinks commit: with a run store, a sink records a commit per item it wrote
+  (`commits/` of the run directory), and a run continuing in the store of an
+  earlier run skips the items committed there that it receives again with
+  the same ids (`skipped` in the stats). Ids follow arrival order, so this
+  needs the order of the earlier run (one loader, no order-dependent stage
+  before the sink); skipping by input rows comes with reruns from
+  checkpoints. A run store of a run with other protocols, parameters, inputs,
+  chunking or stages is refused (`RunStoreMismatchError`).
+- `CommittingSinkWriter`: writers that undo the writes no commit covers
+  after a crash. `TensorStoreSinkWriter` is one: it records the rows of its
+  arrays and cuts them back. `StoreSinkWriter(path)` keeps every item in a
+  file named by its id.
+- Sinks can check the element ids they write and warn about, or refuse,
+  elements written a second time: `RayPipelineRunner(unique_elements=...)` or
+  `--unique-elements warn|raise` for the sink the runner attaches, and
+  `write_to(writer, unique_elements=)` in pipelines built by hand.
+- Sinks keep no state across items: state belongs in `scan` or `accumulate`
+  stages, where lineage and checkpoints see it (Sinks guide).
+- The lineage viewer marks the items sinks wrote and counts them per sink.
+- `stream.checkpoint(name)` and `stream.tap(name)` keep the items passing
+  through in the run store, by item id, while the stream goes on
+  (`checkpoints/` of the run directory, complete once FLUSH passed them).
+  Every protocol ends with a checkpoint of its outputs
+  (`checkpoint(<Protocol>)`); `--no-checkpoint-outputs` leaves them out.
+  Without a run store they are left out of the pipeline, keeping the labels
+  of the other stages. Checkpoints are the points reruns will replay. Rows
+  read from input files are kept as references to the files, not as bytes
+  (`StoreSinkWriter` too); rows computed in the pipeline as bytes.
+- **Breaking:** `Op.checkpoint(writer)` (a side sink) is replaced by
+  `checkpoint()`/`tap()`, whose writer the backend provides; to write to a
+  writer of your own on a side branch, use `write_to(writer)` and pass the
+  sink to `Pipeline.from_sink`.
+- The lineage viewer lists the checkpoints of a run and their items, and
+  previews a kept item: its fields, small values and thumbnails of 2D images
+  (e.g. class averages).
+- The lineage viewer lists the items the sinks wrote as the outputs of a
+  run, and the items nothing was made from that no sink wrote as its dead
+  ends (often a branch leading nowhere), instead of mixing both.
 - `B.astype(value, T)` changes the type of a Set or Struct without copying
   its columns, as `Op.astype` does for a stream: e.g. dropping the pixels of
   the members of a class keeps their element ids and file references.
 - Arrays with an axis of size 0 (e.g. the members of an empty class) no
   longer kill the process (SIGFPE in PyArrow) when converted to Arrow or
   pickled.
+- The preview of a kept item shows unset fields (e.g. the CTF of a class
+  average) as unset instead of failing.
+- The lineage viewer works on a single run directory in browsers: the run is
+  named after its directory instead of `.`, which browsers dropped from
+  URLs, and links into a single run no longer jump to its outputs.
 - The lineage viewer draws the graph of the pipeline (the runner records its
   report in the run directory) and overlays the ancestry or descendants of an
   item, or the items holding an element: items per stage as badges, and the

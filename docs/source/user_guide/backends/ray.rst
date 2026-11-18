@@ -222,7 +222,11 @@ program description.
 ``bool`` fields become ``--name`` / ``--no-name``, and ``Enum`` fields accept
 the member names. A field that is not optional is a required option, even
 when it has a default. Every application also accepts ``--profile [PATH]``,
-``--num-loaders N`` and ``--run-dir PATH`` (see `The lineage of a run`_).
+``--num-loaders N`` and ``--run-dir PATH`` (see `The lineage of a run`_), and
+``--no-checkpoint-outputs``, which does not keep the outputs of every
+protocol in the run directory, and ``--unique-elements warn|raise``, which
+checks that the sink writes no element twice (see :doc:`/user_guide/streaming/sinks`,
+"Elements written twice").
 
 Buffering and spilling
 ----------------------
@@ -433,15 +437,31 @@ runner a directory with ``--run-dir`` (or ``run_store=FileRunStore(path)``):
 The directory holds:
 
 * ``manifest.json``: the run id, the library version, the protocols with
-  their fingerprints, the parameters, the inputs (with the size and
-  modification time of the input files) and the chunking;
+  their fingerprints, the parameters, the inputs and the chunking;
 * ``stages/``: every stage with its label and ``stage_fp``, including the
   children of a ``group_by``;
 * ``lineage/``: Parquet files with a record per item a stage made: its id,
   the ids of the items it was made from, the element ids it holds, and, for
   the items read from inputs, the input files. Every stage writes its records
   in the background, every 2000 records or 30 seconds while items arrive, and
-  the rest at every FLUSH, so the records of a run can be read while it goes.
+  the rest at every FLUSH, so the records of a run can be read while it goes;
+* ``commits/``: a record per item a sink wrote, after the write;
+* ``checkpoints/``: the items every ``checkpoint()`` and ``tap()`` kept,
+  among them the outputs of every protocol (see
+  :doc:`/user_guide/streaming/checkpoints`). The viewer shows them, with
+  thumbnails of their images.
+
+Running again with the same ``--run-dir`` continues the run: the sinks skip
+the items committed before that they receive again with the same item ids
+(the ``skipped`` column of the stats counts them). Ids follow the order
+items arrive in, so this needs the order of the earlier run: with
+``--num-loaders`` above 1, or a ``scan`` or ``group_by`` with several
+workers before a sink, ids differ and nothing is skipped. The protocols,
+parameters, inputs and chunking must be the ones of the run in the
+directory; otherwise the runner refuses it. The run still reads and
+computes every item; skipping the inputs of committed items needs
+checkpoints of the stages, which come later. See
+:ref:`Commits and reruns <commits-and-reruns>` for what sinks must do.
 
 The manifest lists the inputs as they were given; the input files the run
 read, with their size and modification time, are in the records of the
@@ -485,7 +505,9 @@ they can be shared. The two runs used last stay loaded.
 
 For the run picked, the page lists the run (protocols and fingerprints, parameters, inputs), every
 stage with the items it made and the share of their elements that are rows of
-input files, and the outputs. From an output it follows the items it was made
+input files, the outputs (the items the sinks wrote), and the dead ends:
+items nothing was made from that no sink wrote and no checkpoint kept, often
+a branch that leads nowhere. From an output it follows the items it was made
 from, the members of every class, and for every member the input file and row
 it came from and every item that held it; from an input file, the rows the run
 read and where they went. A stage whose share of input rows drops created new
@@ -513,8 +535,8 @@ Recording costs tens of microseconds per item and stage for a chunk of
 particles, and below a millisecond for the classes of a classification
 (``benchmarks/bench_lineage.py --recording``), mostly in the background. The
 ``lineage_s`` column of the stats shows the time every stage spent on it:
-recording and writing its records, and for a map, finding the element ids of
-its results (after the call, outside the lock of its executor). The Scipion 3
+recording and writing its records (for a sink, its commits), and for a map,
+finding the element ids of its results (after the call, outside the lock of its executor). The Scipion 3
 backend records no lineage.
 
 Running on a cluster

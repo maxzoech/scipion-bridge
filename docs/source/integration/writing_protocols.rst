@@ -247,9 +247,10 @@ Everything must lead to the returned node
 
 Backends compile only the nodes upstream of the node that ``steps()``
 returns. A branch that does not lead to it, such as a ``map`` whose result is
-never used or a sink attached with ``checkpoint``, is not compiled and does
-not run. Persist intermediate results by returning them as additional outputs
-instead.
+never used or a sink on a side branch, is not compiled and does not run.
+Persist intermediate results by returning them as additional outputs, or keep
+them in the run store with ``checkpoint()`` or ``tap()``, which are stages in
+the stream (see :doc:`/user_guide/streaming/checkpoints`).
 
 Validate parameters in ``steps()``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

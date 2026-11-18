@@ -11,15 +11,19 @@ import time
 import numpy as np
 import pytest
 import ray
+import tensorstore as ts
 
 import scipion_bridge as B
 from scipion_bridge.backend.ray import RayBackend, RayCompiledPipeline
+from scipion_bridge.backend.ray.sinks import TensorStoreSinkWriter
 from scipion_bridge.core.streaming import (
     CallbackSinkWriter,
     FileRunStore,
     LineageGraph,
     Pipeline,
     Source,
+    StoreSinkWriter,
+    UniqueElements,
 )
 from scipion_bridge.core.struct import identity, references
 from scipion_bridge.core.struct.id_column import IdColumn
@@ -297,3 +301,83 @@ def test_lineage_is_written_while_the_pipeline_runs(tmp_path, stack):
         assert stats["1:map(_scaled)"].lineage_s > 0
     finally:
         pipeline.close()
+
+
+# -- Commits of sinks --------------------------------------------------------------
+def _sink_stats(stats):
+    (sink,) = [s for label, s in stats.items() if "sink" in label]
+    return sink
+
+
+def test_a_rerun_in_the_same_run_store_writes_nothing_again(tmp_path):
+    store = FileRunStore(tmp_path / "run")
+    inputs = [_values(3 * k, 3) for k in range(4)]
+
+    def run():
+        writer = StoreSinkWriter(tmp_path / "outputs")
+        return _run(
+            Source("x").map(_scaled).write_to(writer),
+            inputs,
+            run_store=store,
+        )
+
+    first, first_stats = run()
+    second, second_stats = run()
+
+    assert len(first) == 4 and second == []
+    assert _sink_stats(second_stats).skipped == 4
+    assert sorted(c.item_id for c in store.read_commits()) == sorted(first)
+    assert {c.elements for c in store.read_commits()} == {3}
+    assert len(list((tmp_path / "outputs").iterdir())) == 4
+
+
+def _fail_if(marker):
+    def fail(values):
+        if marker.exists() and np.asarray(values["value"]).min() >= 9:
+            raise RuntimeError("crash")
+        return values
+
+    return fail
+
+
+def test_a_run_continuing_a_failed_one_writes_every_row_once(tmp_path):
+    store = FileRunStore(tmp_path / "run")
+    marker = tmp_path / "fail"
+    marker.touch()
+    inputs = [_values(3 * k, 3) for k in range(5)]
+
+    def run():
+        sink = (
+            Source("x")
+            .map(_fail_if(marker))
+            .write_to(TensorStoreSinkWriter(tmp_path / "out.zarr"))
+        )
+        return _run(sink, inputs, run_store=store, lineage_batch=1)
+
+    with pytest.raises(Exception, match="crash"):
+        run()
+    marker.unlink()
+    written, stats = run()
+
+    values = ts.open(
+        {
+            "driver": "zarr",
+            "kvstore": {"driver": "file", "path": str(tmp_path / "out.zarr/value")},
+        },
+    ).result()
+    assert sorted(np.asarray(values.read().result()).ravel()) == list(range(15))
+    assert len(written) + _sink_stats(stats).skipped == 5
+    assert len({c.item_id for c in store.read_commits()}) == 5
+
+
+def test_a_sink_can_refuse_elements_written_twice():
+    twice = [_values(0, 3), _values(2, 3)]
+
+    with pytest.raises(Exception, match="1 elements a second time"):
+        _run(
+            Source("x").write_to(
+                _collecting(Collector.remote()),
+                unique_elements=UniqueElements.RAISE,
+            ),
+            twice,
+        )

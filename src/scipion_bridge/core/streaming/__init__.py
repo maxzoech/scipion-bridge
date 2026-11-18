@@ -16,6 +16,7 @@ from .ir import (
     IRMap,
     IROp,
     IRSink,
+    IRCheckpoint,
     IRSource,
     Keyed,
     Tagged,
@@ -31,7 +32,14 @@ from .lineage_graph import Ancestry, ElementOrigin, LineageGraph
 from .node import FLUSH, FlushSignal, LoweringContext, lower
 from .ops import Op, Source
 from .pipeline import Pipeline
-from .run_store import FileRunStore, RunStore, StageInfo
+from .run_store import (
+    CheckpointInfo,
+    Commit,
+    FileRunStore,
+    RunStore,
+    RunStoreMismatchError,
+    StageInfo,
+)
 from .report.model import (
     GpuMapPanel,
     GpuOccupant,
@@ -44,7 +52,13 @@ from .report.model import (
     report_of,
 )
 from .sink import Sink
-from .sink_writer import CallbackSinkWriter, SinkWriter
+from .sink_writer import (
+    CallbackSinkWriter,
+    CommittingSinkWriter,
+    SinkWriter,
+    StoreSinkWriter,
+    UniqueElements,
+)
 from .spill import PickleSpillStore, SpillStore, SpillStoreFactory, pickle_spill_store
 
 __all__ = [
@@ -55,6 +69,9 @@ __all__ = [
     "Pipeline",
     "SinkWriter",
     "CallbackSinkWriter",
+    "CommittingSinkWriter",
+    "StoreSinkWriter",
+    "UniqueElements",
     "FlushSignal",
     "FLUSH",
     "Keyed",
@@ -70,6 +87,9 @@ __all__ = [
     "RunStore",
     "FileRunStore",
     "StageInfo",
+    "Commit",
+    "CheckpointInfo",
+    "RunStoreMismatchError",
     "LineageGraph",
     "LineageRecord",
     "ElementSegment",
@@ -97,6 +117,7 @@ __all__ = [
     "IRMap",
     "IRAccumulate",
     "IRSink",
+    "IRCheckpoint",
     "IRDemux",
     "Tagged",
     "WorkersFrom",

@@ -44,6 +44,7 @@ SHAPES: Mapping[NodeKind, str] = {
     "source": "ellipse",
     "map": "box",
     "accumulate": "box3d",
+    "checkpoint": "cylinder",
     "sink": "box",
     "group_by": "folder",
 }

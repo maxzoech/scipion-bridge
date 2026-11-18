@@ -45,7 +45,7 @@ def test_ray_basic_pipeline():
     assert ray.get(collector.get.remote()) == [10, 20]
 
 
-def test_ray_checkpoint_and_branching():
+def test_ray_branching_into_two_sinks():
     ckpt_collector = Collector.remote()
     final_collector = Collector.remote()
 
@@ -56,14 +56,9 @@ def test_ray_checkpoint_and_branching():
 
     source = Source("input")
     stage1 = source.map_batch(lambda x: x + 10)
-    stage1.checkpoint(ckpt_writer)
+    ckpt_sink = stage1.write_to(ckpt_writer)
     stage2 = stage1.map_batch(lambda x: x * 2)
     final_sink = stage2.write_to(final_writer)
-
-    # Note: checkpoint attaches a sink to stage1
-    from scipion_bridge.core.streaming import Sink
-
-    ckpt_sink = [n for n in stage1.downstream if isinstance(n, Sink)][0]
 
     backend = RayBackend(init_ray=False)
     with Pipeline.from_sink(final_sink, ckpt_sink, backend=backend) as pipeline:

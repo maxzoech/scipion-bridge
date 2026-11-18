@@ -16,7 +16,8 @@ run selected, the page shows:
 - every stage, with the items it made and how many of their elements are
   rows of input files (a stage whose items hold fewer input rows than its
   parents' created new rows: views or ``astype`` would keep them);
-- the outputs of the run, and for every item its parents, children, groups
+- the outputs of the run (the items its sinks wrote), its dead ends (items
+  nothing was made from that no sink wrote), and for every item its parents, children, groups
   of elements (e.g. the members of every class) and ancestry;
 - for every element, where it came from (an input file and row, or the item
   a stage created it in) and every item holding it;
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 import os
 import threading
 from collections import OrderedDict, deque
@@ -56,6 +58,7 @@ from ..lineage_graph import LineageGraph, element_arrays
 from ..run_store import FileRunStore, RunStore
 from .drawing import drawing_of
 from .model import PipelineReport, template_label
+from .preview import preview_of
 from .render import render_svg
 
 # Items, elements or files a list shows per page, unless asked otherwise.
@@ -77,8 +80,25 @@ class LineageView:
         manifest = self._store.read_manifest()
         report = self._store.read_report()
         ops = None if report is None else _OpsGraph(PipelineReport.from_json(report))
+        checkpoints = self._store.read_checkpoints()
+        # Items written by sinks, and kept at checkpoints (in their order).
+        written: Dict[ItemId, List[str]] = {}
+        kept: Dict[ItemId, List[str]] = {}
+        stored: Dict[str, List[ItemId]] = {label: [] for label in checkpoints}
+        sinks: Dict[str, Dict[str, int]] = {}
+        for commit in self._store.read_commits():
+            if commit.sink in checkpoints:
+                kept.setdefault(commit.item_id, []).append(commit.sink)
+                stored[commit.sink].append(commit.item_id)
+                continue
+            written.setdefault(commit.item_id, []).append(commit.sink)
+            counts = sinks.setdefault(commit.sink, {"items": 0, "elements": 0})
+            counts["items"] += 1
+            counts["elements"] += commit.elements
         with self._lock:
             self.graph, self.manifest, self.ops = graph, manifest, ops
+            self.written, self.sinks = written, sinks
+            self.checkpoints, self.kept, self.stored = checkpoints, kept, stored
         # The first pages would wait for the indices otherwise.
         threading.Thread(target=graph.warm, daemon=True).start()
         return {"records": len(graph)}
@@ -89,8 +109,13 @@ class LineageView:
         return {
             "manifest": _manifest_summary(self.manifest),
             "records": len(graph),
-            "outputs": len(graph.leaves()),
+            "outputs": len(self.written),
+            "dead_ends": len(self.dead_ends()),
             "files": graph.files(),
+            "sinks": [
+                {"label": label, **counts} for label, counts in self.sinks.items()
+            ],
+            "checkpoints": [asdict(info) for info in self.checkpoints.values()],
             "stages": [
                 {
                     "label": s.stage.label,
@@ -106,12 +131,27 @@ class LineageView:
         }
 
     def outputs(self, offset: int = 0, limit: int = PAGE) -> Dict[str, Any]:
-        """The items no stage made anything from, by stage."""
-        leaves = self.graph.leaves()
+        """The items the sinks wrote, in the order of their commits."""
+        return self._page(list(self.written), offset, limit)
+
+    def dead_ends(self) -> List[ItemId]:
+        """The items no stage made anything from, that no sink wrote and no
+        checkpoint kept: items a stage absorbed without emitting, or the
+        items of a branch leading nowhere, often a wiring mistake."""
+        return [
+            lid
+            for lid in self.graph.leaves()
+            if lid not in self.written and lid not in self.kept
+        ]
+
+    def dead_end_page(self, offset: int = 0, limit: int = PAGE) -> Dict[str, Any]:
+        return self._page(self.dead_ends(), offset, limit)
+
+    def _page(self, items: List[ItemId], offset: int, limit: int) -> Dict[str, Any]:
         return {
-            "total": len(leaves),
+            "total": len(items),
             "offset": offset,
-            "items": [self._item_row(lid) for lid in leaves[offset : offset + limit]],
+            "items": [self._item_row(lid) for lid in items[offset : offset + limit]],
         }
 
     def stage(self, label: str, offset: int = 0, limit: int = PAGE) -> Dict[str, Any]:
@@ -122,6 +162,46 @@ class LineageView:
             "total": len(items),
             "offset": offset,
             "items": [self._item_row(lid) for lid in items[offset : offset + limit]],
+        }
+
+    def checkpoint(
+        self,
+        label: str,
+        offset: int = 0,
+        limit: int = PAGE,
+    ) -> Dict[str, Any]:
+        """The items a checkpoint or tap kept, in the order they passed."""
+        items = self.stored[label]
+        return {
+            **asdict(self.checkpoints[label]),
+            "total": len(items),
+            "offset": offset,
+            "items": [
+                self._item_row(lid) if lid in self.graph else self._unrecorded_row(lid)
+                for lid in items[offset : offset + limit]
+            ],
+        }
+
+    def _unrecorded_row(self, item_id: ItemId) -> Dict[str, Any]:
+        """A kept item whose lineage record is not written yet."""
+        return {
+            **self._link(item_id),
+            "kind": None,
+            "elements": 0,
+            "input_elements": 0,
+            "written": self.written.get(item_id, []),
+            "kept": self.kept.get(item_id, []),
+        }
+
+    def kept_item(self, label: str, item_id: ItemId) -> Dict[str, Any]:
+        """The preview of an item a checkpoint kept: its structure, values
+        and thumbnails."""
+        if item_id not in self.stored[label]:
+            raise KeyError(f"{label} kept no item {item_id.hex()}.")
+        return {
+            "label": label,
+            **self._link(item_id),
+            "preview": preview_of(self._store.read_item(label, item_id)),
         }
 
     def item(self, item_id: ItemId) -> Dict[str, Any]:
@@ -194,7 +274,6 @@ class LineageView:
         """An element: where it came from, and the items holding it."""
         graph = self.graph
         holders = graph.holders(namespace, position)
-        leaves = set(graph.leaves())
         try:
             origin = graph.trace_element(namespace, position)
         except KeyError:
@@ -210,7 +289,9 @@ class LineageView:
                 else self._link(origin.created_by.item_id)
             ),
             "holders": len(holders),
-            "outputs": [self._link(lid) for lid in holders if lid in leaves][:PAGE],
+            "outputs": [self._link(lid) for lid in holders if lid in self.written][
+                :PAGE
+            ],
             "stages": [
                 {"label": label, "items": items[:PAGE], "count": len(items)}
                 for label, items in per_stage.items()
@@ -221,7 +302,11 @@ class LineageView:
         """The graph of the pipeline, with the items every stage made."""
         if self.ops is None:
             return {"svg": None}
-        totals = {s.stage.label: s.items for s in self.graph.stage_summaries()}
+        totals = {
+            **{s.stage.label: s.items for s in self.graph.stage_summaries()},
+            # Checkpoints make no items; they count the items they kept.
+            **{label: info.items for label, info in self.checkpoints.items()},
+        }
         return {
             "svg": self.ops.svg,
             "nodes": self.ops.nodes(self.graph.stages, totals),
@@ -303,6 +388,8 @@ class LineageView:
             "kind": self.graph.kind_of(item_id),
             "elements": elements,
             "input_elements": inputs,
+            "written": self.written.get(item_id, []),
+            "kept": self.kept.get(item_id, []),
         }
 
     def _link(self, item_id: ItemId) -> Dict[str, Any]:
@@ -367,7 +454,7 @@ class _OpsGraph:
         self._pass_through = {
             i
             for i, node in enumerate(report.nodes)
-            if node.kind in ("group_by", "sink")
+            if node.kind in ("group_by", "sink", "checkpoint")
             or (node.kind == "source" and node.parent is not None)
         }
         self._paths: Dict[Tuple[int, int], Optional[_Path]] = {}
@@ -499,13 +586,15 @@ def _manifest_summary(manifest: Mapping[str, Any]) -> Dict[str, Any]:
 
 # -- The runs of a log directory --------------------------------------------------
 def find_runs(logdir: Path) -> Dict[str, Path]:
-    """Every run directory in ``logdir``, by its path relative to it (``.``
-    for ``logdir`` itself). A run's own directories are not searched."""
+    """Every run directory in ``logdir``, by its path relative to it, or by
+    its name if ``logdir`` is a run itself (``.`` would vanish from URLs,
+    which browsers normalize). A run's own directories are not searched."""
     found: Dict[str, Path] = {}
     for root, dirs, files in os.walk(logdir):
         here = Path(root)
         if "manifest.json" in files or "lineage" in dirs:
-            found[here.relative_to(logdir).as_posix()] = here
+            name = here.relative_to(logdir).as_posix()
+            found[logdir.resolve().name if name == "." else name] = here
             dirs.clear()
         else:
             dirs[:] = sorted(d for d in dirs if not d.startswith("."))
@@ -586,6 +675,7 @@ def _route(view: LineageView, path: str, query: Mapping[str, str]) -> Any:
         "summary": view.summary,
         "reload": view.reload,
         "outputs": lambda: view.outputs(offset, limit),
+        "dead_ends": lambda: view.dead_end_page(offset, limit),
         "stage": lambda: view.stage(query["label"], offset, limit),
         "item": lambda: view.item(bytes.fromhex(parts[1])),
         "elements": lambda: view.elements(
@@ -611,6 +701,8 @@ def _route(view: LineageView, path: str, query: Mapping[str, str]) -> Any:
             else view.overlay(parts[1], bytes.fromhex(parts[2]))
         ),
         "file": lambda: view.file(int(parts[1]), offset, limit),
+        "checkpoint": lambda: view.checkpoint(query["label"], offset, limit),
+        "kept": lambda: view.kept_item(query["label"], bytes.fromhex(parts[1])),
     }
     return routes[parts[0]]()
 
@@ -631,10 +723,18 @@ def make_handler(runs: Runs) -> type:
             try:
                 body = json.dumps(_route_runs(runs, url.path, query)).encode()
             except (KeyError, ValueError, IndexError) as error:
-                message = json.dumps({"error": f"{type(error).__name__}: {error}"})
-                self._send(404, "application/json", message.encode())
+                self._send_error(404, error)
+                return
+            except Exception as error:
+                # E.g. a kept item whose classes this process cannot import:
+                # the page shows the error instead of a dropped connection.
+                self._send_error(500, error)
                 return
             self._send(200, "application/json", body)
+
+        def _send_error(self, status: int, error: Exception) -> None:
+            message = json.dumps({"error": f"{type(error).__name__}: {error}"})
+            self._send(status, "application/json", message.encode())
 
         def _send(self, status: int, content_type: str, body: bytes) -> None:
             self.send_response(status)
@@ -728,6 +828,9 @@ a { color: var(--accent); text-decoration: none; cursor: pointer; }
 a:hover { text-decoration: underline; }
 code, .id { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
 .muted { color: var(--muted); }
+.preview ul { list-style: none; padding-left: 1em; margin: 0.2em 0; }
+.preview table { margin: 0.2em 0; }
+img.thumb { width: 96px; height: 96px; image-rendering: pixelated; border: 1px solid var(--line); }
 .input { color: var(--good); }
 .created { color: var(--warn); }
 .bar { display: inline-block; height: 8px; border-radius: 4px; background: var(--good);
@@ -814,9 +917,27 @@ function pager(data, route) {
   const next = offset + size < total ? `<a href="${route(offset + 100)}">next →</a>` : "";
   return `<div class="pager">${prev}<span class="muted">${num(offset + 1)}–${num(offset + size)} of ${num(total)}</span>${next}</div>`;
 }
+function previewHtml(p) {
+  const fields = (p.fields || []).map((f) => `<tr><td>${esc(f.name)}</td><td class="muted">${esc(f.dtype)}
+    [${f.shape.map((n) => n === null ? "n" : n).join(", ")}]</td><td>${f.thumbnail
+      ? `<img class="thumb" src="${f.thumbnail}" alt="${esc(f.name)}">`
+      : f.unset ? '<span class="muted">unset</span>'
+      : f.value !== undefined ? esc(JSON.stringify(f.value)) : ""}</td></tr>`).join("");
+  const entries = Object.entries(p.entries || {}).map(([key, value]) =>
+    `<li><b>${esc(key)}</b>: ${previewHtml(value)}</li>`).join("");
+  const more = p.length > Object.keys(p.entries || {}).length && p.entries
+    ? `<li class="muted">… ${num(p.length)} in all</li>` : "";
+  return `<div class="preview"><span class="muted">${esc(p.kind)}${p.length !== undefined && !p.entries
+      ? ` of ${num(p.length)}` : ""}${p.value !== undefined ? ` ${esc(p.value)}` : ""}${p.shape
+      ? ` [${p.shape.join(", ")}] ${esc(p.dtype)}` : ""}</span>
+    ${fields ? `<table>${fields}</table>` : ""}${entries || more ? `<ul>${entries}${more}</ul>` : ""}</div>`;
+}
+
 function itemsTable(items) {
   return `<table><tr><th>Item</th><th>Stage</th><th class="num">Elements</th><th>Input rows</th></tr>` +
-    items.map((it) => `<tr><td>${itemLink(it)}</td><td>${esc(it.stage)}</td>
+    items.map((it) => `<tr><td>${itemLink(it)}${it.written.length
+        ? ` <span class="muted" title="${esc(it.written.join(", "))}">written</span>` : ""}${it.kept.length
+        ? ` <span class="muted" title="${esc(it.kept.join(", "))}">kept</span>` : ""}</td><td>${esc(it.stage || "")}</td>
       <td class="num">${num(it.elements)}</td><td>${share(it.input_elements, it.elements)}</td></tr>`).join("") +
     `</table>`;
 }
@@ -831,6 +952,7 @@ async function showNav() {
     <p><a href="${base}graph">Graph of the pipeline →</a></p>
     <dl><dt>Records</dt><dd>${num(s.records)}</dd>
       <dt>Outputs</dt><dd><a href="${base}outputs">${num(s.outputs)}</a></dd>
+      <dt>Dead ends</dt><dd><a href="${base}dead_ends">${num(s.dead_ends)}</a></dd>
       <dt>Input files</dt><dd>${num(s.files)}</dd>
       <dt>Library</dt><dd>${esc(m.library_version)}</dd></dl>
     <h3>Protocols</h3>
@@ -843,6 +965,14 @@ async function showNav() {
     <dl>${Object.entries(m.inputs || {}).map(([k, v]) =>
       `<dt>${esc(k)}</dt><dd>${v.values.map(esc).join("<br>")}${v.count > v.values.length
         ? `<br><span class="muted">… ${num(v.count)} in all</span>` : ""}</dd>`).join("")}</dl>
+    ${s.sinks.length ? `<h3>Written by sinks</h3>
+    <table><tr><th>Sink</th><th class="num">Items</th><th class="num">Elements</th></tr>
+    ${s.sinks.map((k) => `<tr><td>${esc(k.label)}</td><td class="num">${num(k.items)}</td>
+      <td class="num">${num(k.elements)}</td></tr>`).join("")}</table>` : ""}
+    ${s.checkpoints.length ? `<h3>Checkpoints</h3>
+    <table><tr><th>Checkpoint</th><th class="num">Items</th><th></th></tr>
+    ${s.checkpoints.map((c) => `<tr><td><a href="${base}checkpoint/${encodeURIComponent(c.label)}">${esc(c.label)}</a></td>
+      <td class="num">${num(c.items)}</td><td class="muted">${c.complete ? "complete" : "running"}</td></tr>`).join("")}</table>` : ""}
     <h3>Stages</h3>
     <table><tr><th>Stage</th><th class="num">Items</th><th>Input rows</th></tr>
     ${s.stages.map((st) => `<tr><td>${stageLink(st.label)}<br>
@@ -856,14 +986,41 @@ async function showNav() {
 const views = {
   async outputs([offset = 0]) {
     const d = await api(`outputs?offset=${offset}`);
-    return `<h2>Outputs</h2><p class="muted">Items no stage made anything from: the
-      outputs of the run, and items a stage absorbed without emitting.</p>
+    return `<h2>Outputs</h2><p class="muted">The items the sinks wrote, in the
+      order they wrote them.</p>
       ${pager(d, (o) => `${base}outputs/${o}`)}${itemsTable(d.items)}`;
+  },
+  async dead_ends([offset = 0]) {
+    const d = await api(`dead_ends?offset=${offset}`);
+    return `<h2>Dead ends</h2><p class="muted">Items no stage made anything from,
+      that no sink wrote and no checkpoint kept: items a stage absorbed without
+      emitting, or the items of a branch that leads nowhere, often a wiring
+      mistake.</p>
+      ${pager(d, (o) => `${base}dead_ends/${o}`)}${itemsTable(d.items)}`;
   },
   async stage([label, offset = 0]) {
     const d = await api(`stage?label=${encodeURIComponent(label)}&offset=${offset}`);
     return `<h2>${esc(d.label)}</h2>
       ${pager(d, (o) => `${base}stage/${encodeURIComponent(label)}/${o}`)}${itemsTable(d.items)}`;
+  },
+  async checkpoint([label, offset = 0]) {
+    const d = await api(`checkpoint?label=${encodeURIComponent(label)}&offset=${offset}`);
+    const enc = encodeURIComponent(label);
+    return `<h2>${esc(d.label)}</h2>
+      <p class="muted">${d.replay ? "A checkpoint: a rerun replays these items." : "A tap: kept to inspect."}
+        ${d.complete ? `Complete${d.repeated ? `; ${num(d.repeated)} elements reached it twice` : ""}.`
+          : "Running: FLUSH has not passed it yet."}</p>
+      ${pager(d, (o) => `${base}checkpoint/${enc}/${o}`)}
+      <table><tr><th>Item</th><th>Made by</th><th class="num">Elements</th><th></th></tr>
+      ${d.items.map((it) => `<tr><td>${it.stage ? itemLink(it) : `<span class="id">${short(it.id)}</span>`}</td>
+        <td>${esc(it.stage || "(lineage not written yet)")}</td><td class="num">${num(it.elements)}</td>
+        <td><a href="${base}kept/${enc}/${it.id}">preview →</a></td></tr>`).join("")}</table>`;
+  },
+  async kept([label, id]) {
+    const d = await api(`kept/${id}?label=${encodeURIComponent(label)}`);
+    return `<h2>Kept at ${esc(d.label)}</h2>
+      <p>Item ${d.stage ? itemLink(d) : `<span class="id">${esc(d.id)}</span>`}</p>
+      ${previewHtml(d.preview)}`;
   },
   async item([id]) {
     const d = await api(`item/${id}`);
@@ -876,7 +1033,10 @@ const views = {
         <dt>Parents</dt><dd>${list(d.parents, d.parent_count) || '<span class="muted">none</span>'}</dd>
         <dt>Children</dt><dd>${list(d.children, d.child_count) || '<span class="muted">none</span>'}</dd>
         ${d.file_count ? `<dt>Files</dt><dd>${d.files.map(esc).join("<br>")}${d.file_count > d.files.length
-          ? `<br>… ${num(d.file_count)} in all` : ""}</dd>` : ""}</dl>
+          ? `<br>… ${num(d.file_count)} in all` : ""}</dd>` : ""}
+        ${d.kept.length ? `<dt>Kept at</dt><dd>${d.kept.map((label) =>
+          `<a href="${base}kept/${encodeURIComponent(label)}/${d.id}">${esc(label)}</a>`).join("<br>")}</dd>` : ""}
+        ${d.written.length ? `<dt>Written by</dt><dd>${d.written.map(esc).join("<br>")}</dd>` : ""}</dl>
       <p><a href="${base}ancestry/${d.id}">Ancestry: what it was made from →</a><br>
         On the graph: <a href="${base}graph/ancestry/${d.id}">ancestry</a> ·
         <a href="${base}graph/descendants/${d.id}">descendants</a></p>
@@ -1073,8 +1233,8 @@ async function route() {
   const [run, name, ...args] = location.hash.slice(2).split("/").map(decodeURIComponent);
   if (!runs.some((r) => r.name === run)) {
     await showRuns();
-    if (runs.length === 1) { location.hash = `#/${encodeURIComponent(runs[0].name)}/outputs`; return; }
     if (!runs.some((r) => r.name === run)) {
+      if (runs.length === 1) { location.hash = `#/${encodeURIComponent(runs[0].name)}/outputs`; return; }
       RUN = null; $("nav").innerHTML = ""; $("run").textContent = "";
       $("page").innerHTML = runsPage();
       return;

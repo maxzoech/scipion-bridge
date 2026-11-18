@@ -48,7 +48,7 @@ plan, which the backend derives:
     @resources(gpus/min_vram/task)  →  IRMap.compute, stage_fp             →  executor pools per compute group
     .map/.chunk/.group_by/.astype/.apply   IRDemux.keys (planned)              placement planner (planned)
     sealed protocol instances                                                   data path: references, push_many (planned)
-                                                                                checkpoints: barriers, commit log (planned)
+                                                                                checkpoints, commit log, reruns (in progress)
                                                                                 runtime controller (planned, optional)
 
 A compute group (one protocol) runs on a **pool of executor replicas** on GPUs
@@ -61,9 +61,10 @@ The three features share foundations:
   also makes the fingerprint of a stage stable, which lineage, checkpoints and
   profiles of earlier runs need.
 * **Key-path provenance** gives the cost model its byte terms, gives transport
-  and spilling their references, and gives checkpoints compact snapshots.
-* **One barrier and ordering mechanism** (``FlushSignal``, and a checkpoint
-  barrier): transport batching must never reorder them against items.
+  and spilling their references, and lets checkpoints keep references instead
+  of pixels.
+* **One ordering mechanism** (``FlushSignal``): transport batching must never
+  reorder it against items.
 
 Status
 ------
@@ -265,23 +266,27 @@ the input references, fingerprints and parameters.
 Checkpointing (step 6)
 ^^^^^^^^^^^^^^^^^^^^^^
 
-After sealing, only accumulators and the ``group_by`` router hold state; map
-pools are rebuilt by warm-up. That bounds what a checkpoint captures.
+Checkpoints are stages of the stream, not snapshots of state, so no barrier
+travels the stream.
 
-* **Manifest and commit log** (stateless pipelines). A manifest written at
-  compile time holds the run id, the stages with their fingerprints, the inputs
-  as references and the parameters; resume is refused if the fingerprints
-  differ. Sink writers record the ids and input references they durably
-  wrote, data first and record second. An input is done once every sink
-  reachable from it has committed it, and resume skips it.
-* **Barrier snapshots** (``scan``, accumulators, ``group_by``). A checkpoint
-  barrier flows like ``FlushSignal`` without flushing. Accumulators snapshot
-  their state, the router its key assignment, sources their offset. State is
-  stored with references kept as references. The store must be durable and
-  visible from every node (a shared storage domain), or compilation fails.
-  A snapshot is complete once every sink acknowledged the barrier.
-* **Inspection.** ``Op.checkpoint(writer)`` outputs become readable while the
-  stream runs, with a manifest of the committed ids.
+* **Done: manifest and commit log.** The run store holds the manifest and
+  the stages with their fingerprints; a run continuing in it is refused if
+  they differ. Sinks commit every item after writing it and skip the items
+  committed before (``CommittingSinkWriter`` undoes writes without a commit).
+* **Done: checkpoints and taps.** ``checkpoint()`` and ``tap()`` keep the
+  items passing through in the run store, by item id; every protocol ends
+  with one for its outputs. The lineage viewer shows them, with previews.
+* **Next: reruns from coverage.** A rerun loads the lineage of the earlier
+  run, finds the input rows every sink and checkpoint completed, replays the
+  checkpoints and computes only the other rows; a stage nothing needs is
+  pruned. Stages that depend on all their inputs (``collect``, ``scan``)
+  receive all of them unless a checkpoint in front of them kept them. Rows,
+  not item ids, decide what is recomputed, so the nondeterministic order of
+  arrival does not matter and no arrival logs are needed.
+* **Dropped: barrier snapshots** (Flink-style). They would save the state of
+  every stage at the cost of a barrier aligned across inputs, which stalls
+  branches; checkpoints placed after expensive work, and in front of stages
+  that depend on all their inputs, cover the same reruns without it.
 
 Cost model and local I/O (step 7)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

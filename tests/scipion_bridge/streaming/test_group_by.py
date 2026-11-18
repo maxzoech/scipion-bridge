@@ -149,11 +149,12 @@ def test_pipeline_consuming_another_source_raises():
 
 
 def test_pipeline_with_branch_off_its_result_raises():
-    def checkpointed(stream):
-        return stream.checkpoint(CallbackSinkWriter(_discard)).map(_second)
+    def branched(stream):
+        stream.write_to(CallbackSinkWriter(_discard))
+        return stream.map(_second)
 
     with pytest.raises(ValueError, match="must lead to the stream it returns"):
-        Source("x").group_by(0, checkpointed)
+        Source("x").group_by(0, branched)
 
 
 def test_pipeline_returning_a_sink_raises():

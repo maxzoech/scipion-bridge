@@ -1,12 +1,12 @@
 from __future__ import annotations
-from typing import Dict, Any, Union, List
+from typing import Dict, Any, Union, List, Optional, Set as SetType
 from pathlib import Path
 import asyncio
 import numpy as np
 
 import tensorstore as ts
 
-from scipion_bridge.core.streaming.sink_writer import SinkWriter
+from scipion_bridge.core.streaming.sink_writer import CommittingSinkWriter, Receipt
 from scipion_bridge.core.struct import Struct, Set
 from scipion_bridge.core.struct.collection import Collection
 from scipion_bridge.core.struct.schema import (
@@ -39,18 +39,27 @@ def _get_schema_tree(item: SchemaConvertible) -> Schema:
             )
 
 
-class TensorStoreSinkWriter(SinkWriter):
+class TensorStoreSinkWriter(CommittingSinkWriter):
     """
     Asynchronous SinkWriter persisting SchemaConvertible items to Zarr groups via TensorStore.
 
     Implements the core reduction algebra:
     - SetEntryBase (ArraySetEntry) -> Concat / Append along axis 0.
     - ArrayEntry -> Last-Writer-Wins overwrite.
+
+    With a run store, the writer owns its directory: the receipt of a write
+    holds the rows of every appended array and the overwritten arrays, and
+    ``recover`` cuts every array back to the rows of the last commit (arrays
+    created after it, to none), so that the items written again are not
+    appended twice.
     """
 
     def __init__(self, path: Union[str, Path]):
         self.path = Path(path)
         self._stores: Dict[str, Any] = {}
+        # The paths of the arrays appended to and of those overwritten.
+        self._appended: SetType[str] = set()
+        self._overwritten: SetType[str] = set()
 
     async def _get_or_open_store(
         self,
@@ -122,6 +131,7 @@ class TensorStoreSinkWriter(SinkWriter):
 
             if isinstance(leaf_entry, SetEntryBase):
                 # Concat / Append reduction algebra
+                self._appended.add(path_str)
                 current_len = store.shape[0]
                 new_len = current_len + arr.shape[0]
                 store = await store.resize(exclusive_max=[new_len, *store.shape[1:]])
@@ -130,6 +140,7 @@ class TensorStoreSinkWriter(SinkWriter):
 
             else:
                 # Last-Writer-Wins overwrite reduction algebra
+                self._overwritten.add(path_str)
                 if list(store.shape) != list(arr.shape):
                     store = await store.resize(exclusive_max=list(arr.shape))
                     self._stores[path_str] = store
@@ -138,6 +149,44 @@ class TensorStoreSinkWriter(SinkWriter):
         if commit_futures:
             await asyncio.gather(*commit_futures)
 
+    async def write_identified(self, item: Any, lid: bytes) -> Optional[Receipt]:
+        """Write ``item``; the receipt holds the rows of the appended arrays
+        and the overwritten arrays after it."""
+        await self.write(item)
+        return {
+            "rows": {path: int(self._stores[path].shape[0]) for path in self._appended},
+            "overwritten": sorted(self._overwritten),
+        }
+
+    async def recover(self, receipt: Optional[Receipt]) -> None:
+        """Cut every array in the directory back to the rows of ``receipt``;
+        an array it does not hold, to none."""
+        rows: Dict[str, int] = {} if receipt is None else receipt["rows"]
+        overwritten = set() if receipt is None else set(receipt["overwritten"])
+        for path_str in _arrays_in(self.path):
+            store = await ts.open(
+                {
+                    "driver": "zarr",
+                    "kvstore": {"driver": "file", "path": str(self.path / path_str)},
+                    "open": True,
+                },
+            )
+            if path_str not in overwritten and store.rank > 0:
+                store = await store.resize(
+                    exclusive_max=[rows.get(path_str, 0), *store.shape[1:]],
+                    shrink_only=True,
+                )
+            self._stores[path_str] = store
+        self._appended = set(rows)
+        self._overwritten = overwritten
+
     async def finalize(self) -> None:
         """Finalize all open stores."""
         self._stores.clear()
+
+
+def _arrays_in(path: Path) -> List[str]:
+    """The Zarr arrays below ``path``, as paths relative to it."""
+    return sorted(
+        array.parent.relative_to(path).as_posix() for array in path.rglob(".zarray")
+    )

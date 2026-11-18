@@ -26,13 +26,14 @@ from ..struct.collection import Collection
 from ..struct.struct import Struct
 from .node import Node, LoweringContext
 from .sink import Sink
-from .sink_writer import SinkWriter, CallbackSinkWriter
+from .sink_writer import SinkWriter, CallbackSinkWriter, UniqueElements
 from .ir import (
     GroupByWorkers,
     IROp,
     IRSource,
     IRMap,
     IRAccumulate,
+    IRCheckpoint,
     IRDemux,
     Tagged,
     WorkersFrom,
@@ -192,6 +193,13 @@ class Op(Node):
 
             model = particles.collect(5_000).map(train)
 
+        The first ``n`` elements to *arrive* are collected: with several
+        loaders, and wherever streams meet, they differ between runs. Do not
+        use it to select training and validation sets; select those by
+        their values or element ids in a map. Its state is not kept: after
+        a crash it needs all its inputs again, so put a ``checkpoint()`` in
+        front of a long ``collect``.
+
         Args:
             n: Number of elements to collect. Must be > 0.
         """
@@ -238,6 +246,9 @@ class Op(Node):
         state that downstream stages waiting for a complete state can use.
         It is not called for a stream (or key) without items.
 
+        Its state is not kept: after a crash it needs all its inputs again,
+        so put a ``checkpoint()`` in front of a long scan.
+
         Args:
             func: Function computing the next state from the state and an
                 item.
@@ -264,6 +275,10 @@ class Op(Node):
 
             model = particles.collect(5_000).map(train)
             particles.chunk(256).combine_latest(model).map(predict)
+
+        The latest item of ``other`` is not kept: after a crash, ``other``
+        needs all its inputs again, so put a ``checkpoint()`` after the
+        expensive stage producing it (e.g. ``map(train).checkpoint()``).
 
         Args:
             other: Stream providing the latest value. Must be a different stream
@@ -387,17 +402,55 @@ class Op(Node):
             KeyedOp(_make_key_extractor(key), entry, exit_, max_keys, workers),
         )
 
-    def write_to(self, writer: SinkWriter) -> Sink:
-        """Attach a terminal SinkWriter."""
-        sink_node = Sink(writer)
+    def write_to(
+        self,
+        writer: SinkWriter,
+        *,
+        unique_elements: UniqueElements = UniqueElements.OFF,
+    ) -> Sink:
+        """Attach a terminal SinkWriter.
+
+        The low-level way to end a pipeline built by hand. Protocols do not
+        call it: the environment running them attaches the sink (e.g.
+        ``RayPipelineRunner(sink=..., unique_elements=...)``).
+
+        Args:
+            writer: Writes every item on its own (see ``sink_writer``).
+            unique_elements: What the sink does with an element it writes a
+                second time, told by its element id: nothing, warn, or fail
+                the pipeline.
+        """
+        sink_node = Sink(writer, unique_elements=unique_elements)
         self.op(sink_node)
         return sink_node
 
-    def checkpoint(self, writer: SinkWriter) -> Op:
-        """Attach an asynchronous persistence checkpoint without cutting off the stream."""
-        sink_node = Sink(writer)
-        self.op(sink_node)
-        return self
+    def checkpoint(self, name: Optional[str] = None) -> CheckpointOp:
+        """Keep the items passing here in the run store, as a point to rerun from.
+
+        A rerun of a pipeline in the run store of an earlier run replays the
+        items a checkpoint kept and computes only the input rows none of its
+        checkpoints and sinks kept a result of. Put checkpoints after
+        expensive work, and in front of stages that depend on all their
+        inputs (``collect``, ``scan``, ``combine_latest``), which otherwise
+        receive all of them again. Without a run store, a checkpoint does
+        nothing.
+
+        Args:
+            name: Names the checkpoint in its label, e.g. ``checkpoint(embeddings)``.
+        """
+        return self.op(CheckpointOp(name))
+
+    def tap(self, name: Optional[str] = None) -> CheckpointOp:
+        """Keep the items passing here in the run store, to inspect them.
+
+        Like ``checkpoint``, the items are kept by their item id and can be
+        read while the pipeline runs (e.g. in the lineage viewer); a rerun
+        does not replay them. Without a run store, a tap does nothing.
+
+        Args:
+            name: Names the tap in its label, e.g. ``tap(classes)``.
+        """
+        return self.op(CheckpointOp(name, replay=False))
 
     def sink(self, callback: Callable[[Any], Any]) -> Sink:
         """Attach a callback-based sink (convenience for testing/debugging)."""
@@ -420,6 +473,29 @@ class Source(Op):
         ir = IRSource(name=self.name)
         ctx.sources[self.name] = ir
         return ir
+
+
+class CheckpointOp(Op):
+    """Operation node keeping the items passing through in the run store."""
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        *,
+        replay: bool = True,
+        protocol_output: bool = False,
+    ) -> None:
+        super().__init__(upstream=None)
+        self.name = name
+        self.replay = replay
+        self.protocol_output = protocol_output
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        return IRCheckpoint(
+            name=self.name,
+            replay=self.replay,
+            protocol_output=self.protocol_output,
+        )
 
 
 class MapOp(Op):

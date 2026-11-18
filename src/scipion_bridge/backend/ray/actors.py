@@ -17,6 +17,7 @@ from typing import (
     Coroutine,
     Dict,
     FrozenSet,
+    Generic,
     List,
     Mapping,
     Optional,
@@ -24,6 +25,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    TypeVar,
     Union,
     cast,
 )
@@ -62,6 +64,7 @@ from scipion_bridge.core.streaming.lineage import (
     LineagePolicy,
     LineageRecord,
     PassThrough,
+    SeenElements,
     SourceLineage,
     call_elements,
     element_segments,
@@ -69,10 +72,14 @@ from scipion_bridge.core.streaming.lineage import (
     input_files,
     map_id,
 )
-from scipion_bridge.core.streaming.run_store import RunStore
+from scipion_bridge.core.streaming.run_store import Commit, RunStore
 from scipion_bridge.core.streaming.node import FlushSignal, FLUSH
 from scipion_bridge.core.streaming.provenance import ProvenanceSampler, StageSamples
-from scipion_bridge.core.streaming.sink_writer import SinkWriter
+from scipion_bridge.core.streaming.sink_writer import (
+    CommittingSinkWriter,
+    SinkWriter,
+    UniqueElements,
+)
 from scipion_bridge.core.streaming.spill import SpillStoreFactory
 
 from .function_table import table_of
@@ -229,6 +236,65 @@ class _StageConfig:
     lineage_batch: int = 2000
 
 
+_T = TypeVar("_T")
+
+
+class _Batches(Generic[_T]):
+    """Values a stage writes to its run store in the background.
+
+    They are written in batches of ``size``, at least every
+    ``_LINEAGE_INTERVAL_S`` while values arrive, and the rest on ``drain``.
+    A write starts after the writes before it, so that the parts of a stage
+    keep their order. The time writing adds to ``lineage_s`` of ``stats``.
+    """
+
+    def __init__(
+        self,
+        write: Callable[[List[_T]], None],
+        size: int,
+        stats: StageStats,
+    ) -> None:
+        self._write = write
+        self._size = size
+        self._stats = stats
+        self._values: List[_T] = []
+        self._last_write = time.monotonic()
+        self._writes: Optional[asyncio.Task[None]] = None
+
+    def add(self, value: _T) -> None:
+        """Write ``value`` with the next batch; start it if it is full or the
+        last one is old enough."""
+        self._values.append(value)
+        if (
+            len(self._values) >= self._size
+            or time.monotonic() - self._last_write >= _LINEAGE_INTERVAL_S
+        ):
+            self._start()
+
+    async def drain(self) -> None:
+        """Write the values not written yet, and wait until every write
+        started has finished."""
+        self._start()
+        assert self._writes is not None
+        await self._writes
+
+    def _start(self) -> None:
+        values, self._values = self._values, []
+        self._last_write = time.monotonic()
+        self._writes = asyncio.create_task(self._append(self._writes, values))
+
+    async def _append(
+        self,
+        previous: Optional[asyncio.Task[None]],
+        values: List[_T],
+    ) -> None:
+        if previous is not None:
+            await previous
+        t_start = time.perf_counter()
+        await asyncio.to_thread(self._write, values)
+        self._stats.lineage_s += time.perf_counter() - t_start
+
+
 def _fail(barriers: List[_Barrier], error: BaseException) -> None:
     """Fail pending FLUSH barriers."""
     for barrier in barriers:
@@ -335,13 +401,17 @@ class _PipelinedStage(abc.ABC):
         self._label = label
         self._lineage = self._lineage_policy(label)
         self._run_store = config.run_store
-        # Lineage records not written yet; they are written in batches of
-        # ``lineage_batch``, at least every ``_LINEAGE_INTERVAL_S`` while
-        # items arrive, and at every FLUSH.
-        self._records: List[LineageRecord] = []
-        self._lineage_batch = config.lineage_batch
-        self._last_lineage_write = time.monotonic()
-        self._lineage_writes: Optional[asyncio.Task[None]] = None
+        # Lineage records, written in batches while items arrive and the
+        # rest at every FLUSH.
+        self._records: Optional[_Batches[LineageRecord]] = (
+            None
+            if config.run_store is None
+            else _Batches(
+                config.run_store.append_lineage,
+                config.lineage_batch,
+                self._stats,
+            )
+        )
         self._recorder = make_recorder(config.profile, label)
         self._mailbox = Mailbox(
             self._stats,
@@ -645,42 +715,15 @@ class _PipelinedStage(abc.ABC):
             )
 
     def _keep(self, record: LineageRecord) -> None:
-        """Buffer a record; write the buffer once it is full or old enough."""
-        self._records.append(record)
-        if (
-            len(self._records) >= self._lineage_batch
-            or time.monotonic() - self._last_lineage_write >= _LINEAGE_INTERVAL_S
-        ):
-            self._start_lineage_write()
-
-    def _start_lineage_write(self) -> None:
-        """Write the buffered records in the background, after the writes
-        started before, so that the parts of the stage keep their order."""
-        records, self._records = self._records, []
-        self._last_lineage_write = time.monotonic()
-        self._lineage_writes = asyncio.create_task(
-            self._append_lineage(self._lineage_writes, records),
-        )
-
-    async def _append_lineage(
-        self,
-        previous: Optional[asyncio.Task[None]],
-        records: List[LineageRecord],
-    ) -> None:
-        if previous is not None:
-            await previous
-        assert self._run_store is not None
-        t_start = time.perf_counter()
-        await asyncio.to_thread(self._run_store.append_lineage, records)
-        self._stats.lineage_s += time.perf_counter() - t_start
+        """Write ``record`` with the next batch."""
+        assert self._records is not None
+        self._records.add(record)
 
     async def _write_lineage(self) -> None:
         """Write the records not written yet, and wait until every write
         started has finished: once FLUSH has passed, readers see them all."""
-        if self._run_store is not None:
-            self._start_lineage_write()
-            assert self._lineage_writes is not None
-            await self._lineage_writes
+        if self._records is not None:
+            await self._records.drain()
 
     async def _run_emit(self) -> None:
         while True:
@@ -1950,8 +1993,14 @@ class _Completions:
 class RaySinkActor(_PipelinedStage):
     """Terminal stage wrapping a SinkWriter, finalized on FLUSH.
 
+    With a run store, the sink records a ``Commit`` after every write
+    (batched, like lineage records), and skips the items committed in the
+    store before, by an earlier run: rerunning a pipeline in the store of a
+    run writes only what that run did not. Before its first item it lets a
+    ``CommittingSinkWriter`` remove the writes no commit covers.
+
     The sink of a ``group_by`` child hands its results back to the router
-    with their ids (``_ResultWriter``).
+    with their ids (``_ResultWriter``); it commits nothing.
     """
 
     def __init__(
@@ -1960,19 +2009,53 @@ class RaySinkActor(_PipelinedStage):
         config: _StageConfig,
         spill: Optional[SpillPolicy],
         label: str,
+        unique_elements: UniqueElements = UniqueElements.OFF,
     ):
         super().__init__(config, spill, label)
         self.writer = writer
         # The ids of the items written, in order.
         self._received: List[ItemId] = []
+        self._unique_elements = unique_elements
+        self._seen = SeenElements()
+        self._commits: Optional[_Batches[Commit]] = (
+            None
+            if config.run_store is None or isinstance(writer, _ResultWriter)
+            else _Batches(
+                config.run_store.append_commits,
+                config.lineage_batch,
+                self._stats,
+            )
+        )
+        # The ids committed by earlier runs, read before the first item.
+        self._committed: Optional[FrozenSet[ItemId]] = None
 
     async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
+        if self._commits is not None and self._committed is None:
+            await self._recover()
+        if self._committed is not None and lid in self._committed:
+            self._stats.skipped += 1
+            return []
+
+        elements = (
+            element_segments(item)
+            if self._commits is not None
+            or self._unique_elements is not UniqueElements.OFF
+            else ()
+        )
+        self._check_unique(elements, lid)
+        receipt = None
         match self.writer:
             case _ResultWriter():
                 await self.writer.write_identified(item, lid)
+            case CommittingSinkWriter():
+                receipt = await self.writer.write_identified(item, lid)
             case _:
                 await self.writer.write(item)
         self._received.append(lid)
+        if self._commits is not None:
+            self._commits.add(
+                Commit(lid, self._label, sum(e.count for e in elements), receipt),
+            )
         return []
 
     async def received_ids(self) -> List[ItemId]:
@@ -1981,7 +2064,123 @@ class RaySinkActor(_PipelinedStage):
 
     async def on_flush(self) -> List[Any]:
         await self.writer.finalize()
+        if self._commits is not None:
+            await self._commits.drain()
         return []
+
+    async def _recover(self) -> None:
+        """Read the commits of earlier runs; let the writer remove the writes
+        after the last one."""
+        assert self._run_store is not None
+        commits = await asyncio.to_thread(self._run_store.read_commits, self._label)
+        self._committed = frozenset(commit.item_id for commit in commits)
+        if isinstance(self.writer, CommittingSinkWriter):
+            await self.writer.recover(commits[-1].receipt if commits else None)
+
+    def _check_unique(self, elements: Tuple[ElementSegment, ...], lid: ItemId) -> None:
+        """Warn about or refuse elements written before, by their ids."""
+        if self._unique_elements is UniqueElements.OFF:
+            return
+        repeated = self._seen.add(elements)
+        if repeated == 0:
+            return
+        message = (
+            f"The sink {self._label} writes {repeated} elements a second time, "
+            f"in the item {lid.hex()}."
+        )
+        if self._unique_elements is UniqueElements.RAISE:
+            raise ValueError(message)
+        else:
+            logger.warning(message)
+
+
+# Items a checkpoint writes at once at most; beyond, it waits before taking
+# the next item, so that a slow disk holds up the stream instead of filling
+# the memory of the actor.
+_CHECKPOINT_WRITES = 8
+
+
+@ray.remote
+class RayCheckpointActor(_PipelinedStage):
+    """Stage keeping the items passing through in the run store
+    (``IRCheckpoint``).
+
+    An item is forwarded at once; it is written in the background, and
+    committed once written, so the commits list the items kept, in order.
+    The checkpoint is complete once FLUSH passed it and every item was
+    written.
+    """
+
+    def __init__(
+        self,
+        config: _StageConfig,
+        spill: Optional[SpillPolicy],
+        label: str,
+        replay: bool,
+    ):
+        super().__init__(config, spill, label)
+        assert config.run_store is not None, "A checkpoint needs a run store."
+        self._store = config.run_store
+        self._store.begin_checkpoint(label, replay)
+        self._commits: _Batches[Commit] = _Batches(
+            self._store.append_commits,
+            config.lineage_batch,
+            self._stats,
+        )
+        self._slots = asyncio.Semaphore(_CHECKPOINT_WRITES)
+        self._writes: Optional[asyncio.Task[None]] = None
+        self._seen = SeenElements()
+        self._repeated = 0
+
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
+        elements = element_segments(item)
+        self._repeated += self._seen.add(elements)
+        await self._slots.acquire()
+        self._writes = asyncio.create_task(
+            self._write(
+                self._writes,
+                item,
+                Commit(lid, self._label, sum(e.count for e in elements)),
+            ),
+        )
+        return [item]
+
+    async def on_flush(self) -> List[Any]:
+        if self._writes is not None:
+            await self._writes
+        await self._commits.drain()
+        await asyncio.to_thread(
+            self._store.complete_checkpoint,
+            self._label,
+            self._repeated,
+        )
+        return []
+
+    async def _write(
+        self,
+        previous: Optional[asyncio.Task[None]],
+        item: Any,
+        commit: Commit,
+    ) -> None:
+        """Write ``item``, then commit it after the items before it."""
+        try:
+            t_start = time.perf_counter()
+            await asyncio.to_thread(
+                self._store.store_item,
+                self._label,
+                commit.item_id,
+                item,
+            )
+            self._stats.lineage_s += time.perf_counter() - t_start
+            if previous is not None:
+                await previous
+            self._commits.add(commit)
+        except Exception as error:
+            # Fails the pipeline now rather than at FLUSH.
+            self._set_error(error)
+            raise
+        finally:
+            self._slots.release()
 
 
 class _ResultWriter(abc.ABC):

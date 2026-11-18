@@ -38,12 +38,15 @@ from .core.environment import ComputeResources, Domain, ResourceScope, TaskType
 from .core.streaming import (
     FLUSH,
     CallbackSinkWriter,
+    CommittingSinkWriter,
     FlushSignal,
     Op,
     Pipeline,
     Sink,
     SinkWriter,
     Source,
+    StoreSinkWriter,
+    UniqueElements,
 )
 
 # Type resolution and proxies
@@ -106,6 +109,9 @@ __all__ = [
     "Pipeline",
     "SinkWriter",
     "CallbackSinkWriter",
+    "CommittingSinkWriter",
+    "StoreSinkWriter",
+    "UniqueElements",
     "FlushSignal",
     "FLUSH",
     # Type resolution and proxies

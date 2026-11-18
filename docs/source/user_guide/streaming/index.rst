@@ -99,9 +99,10 @@ Operations at a glance
    * - ``sink(callback)`` / ``write_to(writer)``
      - terminal
      - Consume the stream.
-   * - ``checkpoint(writer)``
+   * - ``checkpoint(name)`` / ``tap(name)``
      - pass-through
-     - Attach a sink without ending the stream.
+     - Keep the items in the run store, to inspect them; a rerun replays
+       checkpoints (:doc:`checkpoints`).
 
 Articles in this section
 ------------------------
@@ -113,6 +114,7 @@ Articles in this section
    stateful_operations
    group_by
    sinks
+   checkpoints
    pipelines
    reports
 
@@ -125,6 +127,8 @@ Articles in this section
   processes.
 * :doc:`sinks` covers terminal nodes, the ``SinkWriter`` protocol and writing
   a custom writer.
+* :doc:`checkpoints` keeps intermediate items in the run store, to inspect
+  them and to rerun from.
 * :doc:`pipelines` covers compilation, sending data, flushing, statistics,
   backpressure and error handling.
 * :doc:`reports` draws the graph of a pipeline, with the stats of a run.

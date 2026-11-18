@@ -1,6 +1,7 @@
 """The lineage viewer: its pages, and its server (in-process)."""
 
 import json
+import struct
 import threading
 import urllib.error
 import urllib.request
@@ -10,7 +11,9 @@ import numpy as np
 import pytest
 
 import scipion_bridge as B
+from scipion_bridge import single_particle as spa
 from scipion_bridge.core.streaming import (
+    Commit,
     ElementSegment,
     FileRunStore,
     LineageRecord,
@@ -19,7 +22,7 @@ from scipion_bridge.core.streaming import (
     lower,
 )
 from scipion_bridge.core.streaming.lineage import element_segments
-from scipion_bridge.core.streaming.report import lineage_view, report_of
+from scipion_bridge.core.streaming.report import lineage_view, preview, report_of
 from scipion_bridge.core.streaming.report.lineage_view import LineageView
 from scipion_bridge.core.struct import concat, identity
 from scipion_bridge.core.struct.id_column import IdColumn
@@ -105,6 +108,7 @@ def store(tmp_path):
             ),
         ],
     )
+    store.append_commits([Commit(O1, "3:sink(W)", 5)])
     return store
 
 
@@ -112,6 +116,7 @@ def test_the_summary_shows_the_run_and_its_stages(store):
     summary = LineageView(store).summary()
 
     assert summary["records"] == 4 and summary["outputs"] == 1
+    assert summary["dead_ends"] == 0
     assert summary["manifest"]["inputs"]["particles"]["count"] == 2
     stages = {s["label"]: s for s in summary["stages"]}
     assert list(stages) == ["0:source(x)", "1:map(f)", "2:map(g)"]
@@ -120,6 +125,99 @@ def test_the_summary_shows_the_run_and_its_stages(store):
         3,
     )
     assert stages["1:map(f)"]["stage_fp"] == "fp1"
+
+
+def test_items_of_a_branch_leading_nowhere_are_dead_ends_not_outputs(store):
+    unused = bytes([9]) * 16
+    store.append_lineage(
+        [
+            LineageRecord(
+                unused,
+                "1:map(f)",
+                "map",
+                (S2,),
+                (ElementSegment("", "", 2, item_id(unused, b""), 0, 2),),
+            ),
+        ],
+    )
+
+    view = LineageView(store)
+
+    assert [o["id"] for o in view.outputs()["items"]] == [O1.hex()]
+    assert [d["id"] for d in view.dead_end_page()["items"]] == [unused.hex()]
+
+
+def test_the_items_sinks_wrote_are_marked(store):
+    view = LineageView(store)
+
+    assert view.summary()["sinks"] == [
+        {"label": "3:sink(W)", "items": 1, "elements": 5}
+    ]
+    (output,) = view.outputs()["items"]
+    assert output["written"] == ["3:sink(W)"]
+    assert view.stage("1:map(f)")["items"][0]["written"] == []
+
+
+class Average(B.Struct):
+    pixels: B.Array[np.float32] = B.Array(shape=(8, 8))
+    count: int
+
+
+def test_checkpoints_list_their_items_and_preview_them(store):
+    label = "3:checkpoint(classes)"
+    average = Average(pixels=np.arange(64, dtype=np.float32).reshape(8, 8), count=5)
+    store.begin_checkpoint(label, replay=True)
+    store.store_item(
+        label,
+        O1,
+        {"average": average, "members": _values(IdColumn.of(A.namespace, range(3)))},
+    )
+    store.append_commits([Commit(O1, label, 3)])
+
+    view = LineageView(store)
+
+    (checkpoint,) = view.summary()["checkpoints"]
+    assert (checkpoint["label"], checkpoint["items"], checkpoint["complete"]) == (
+        label,
+        1,
+        False,
+    )
+    (row,) = view.checkpoint(label)["items"]
+    assert row["id"] == O1.hex() and row["kept"] == [label]
+    assert view.item(O1)["kept"] == [label]
+    preview = view.kept_item(label, O1)["preview"]
+    fields = {f["name"]: f for f in preview["entries"]["average"]["fields"]}
+    assert fields["count"]["value"] == [5]
+    assert fields["pixels"]["thumbnail"].startswith("data:image/png;base64,")
+    assert preview["entries"]["members"]["length"] == 3
+    with pytest.raises(KeyError):
+        view.kept_item(label, M1)
+
+
+def test_unset_fields_are_previewed_as_unset():
+    with_average = spa.Class2D(
+        class_id=3,
+        representative=spa.Particle(pixels=np.ones((8, 8), np.float32)),
+    )
+    without_average = spa.Class2D(class_id=4)
+    classes = B.Collection[spa.Class2D](2, [with_average, without_average])
+
+    entries = preview.preview_of(classes)["entries"]
+
+    first = {f["name"]: f for f in entries["0"]["fields"]}
+    assert first["representative/pixels"]["thumbnail"].startswith("data:image/png")
+    assert first["representative/ctf/defocus_u"]["unset"]
+    assert first["class_id"]["value"] == [3]
+    second = {f["name"]: f for f in entries["1"]["fields"]}
+    assert second["representative/pixels"]["unset"]
+
+
+def test_thumbnails_are_valid_pngs():
+    data = preview.png(np.arange(12, dtype=np.uint8).reshape(3, 4))
+
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    width, height = struct.unpack(">II", data[16:24])
+    assert (width, height) == (4, 3)
 
 
 def test_an_item_shows_its_links_and_element_groups(store):
@@ -155,6 +253,8 @@ def test_an_element_shows_its_origin_and_holders(store):
     assert {s["label"] for s in row["stages"]} == {"0:source(x)", "2:map(g)"}
     assert [o["id"] for o in row["outputs"]] == [O1.hex()]
     assert created["created_by"]["id"] == M1.hex()
+    # O1 holds rows of several files in one segment (a namespace table).
+    assert view.element(B_FILE.namespace, 0)["holders"] == 2
 
 
 def test_ancestry_search_and_files(store):
@@ -194,14 +294,17 @@ def _get(url):
         return response.headers["Content-Type"], response.read()
 
 
-def test_the_server_serves_the_page_and_the_api(server):
+def test_the_server_serves_the_page_and_the_api(server, store):
     url = server
 
     content_type, page = _get(url + "/")
     assert content_type.startswith("text/html") and b"Run lineage" in page
     _, body = _get(f"{url}/api/runs")
-    assert [run["name"] for run in json.loads(body)] == ["."]
-    run = f"{url}/api/run/."
+    # A run served on its own is named after its directory: browsers drop
+    # "." from URLs.
+    (name,) = [run["name"] for run in json.loads(body)]
+    assert name == store.path.name
+    run = f"{url}/api/run/{name}"
     _, body = _get(f"{run}/item/{O1.hex()}")
     assert json.loads(body)["stage"] == "2:map(g)"
     _, body = _get(f"{run}/element?namespace={A.namespace.hex()}&position=1")
@@ -339,7 +442,7 @@ def test_runs_are_found_below_a_directory_but_not_inside_runs(tmp_path):
     (tmp_path / "empty").mkdir()
 
     assert list(lineage_view.find_runs(tmp_path)) == ["a", "group/b"]
-    assert list(lineage_view.find_runs(tmp_path / "a")) == ["."]
+    assert list(lineage_view.find_runs(tmp_path / "a")) == ["a"]
 
 
 def test_the_list_of_runs_reads_their_manifests(tmp_path):

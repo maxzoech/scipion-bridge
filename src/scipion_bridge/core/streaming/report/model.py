@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple,
 from ...environment.compute import ComputeAssignment
 from ..ir import (
     IRAccumulate,
+    IRCheckpoint,
     IRDemux,
     IRMap,
     IROp,
@@ -37,7 +38,7 @@ from ..ir import (
 Value = Union[str, int, float, bool, None, Tuple["Value", ...]]
 Annotations = Mapping[str, Value]
 
-NodeKind = Literal["source", "map", "accumulate", "sink", "group_by"]
+NodeKind = Literal["source", "map", "accumulate", "checkpoint", "sink", "group_by"]
 
 
 @dataclass(frozen=True)
@@ -329,6 +330,8 @@ def _kind(node: IROp) -> NodeKind:
             return "accumulate"
         case IRSink():
             return "sink"
+        case IRCheckpoint():
+            return "checkpoint"
         case IRDemux():
             return "group_by"
         case _:

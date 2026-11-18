@@ -12,6 +12,7 @@ from functools import cache
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
     FrozenSet,
     List,
@@ -65,8 +66,10 @@ from scipion_bridge.core.streaming.ir import (
     IRMap,
     IRAccumulate,
     IRSink,
+    IRCheckpoint,
     IRDemux,
     WorkersFrom,
+    bypass,
     stage_labels,
     topological_order,
 )
@@ -91,6 +94,7 @@ from .actors import (
     RayComputeGroup,
     RayDemuxActor,
     RayMergeActor,
+    RayCheckpointActor,
     RaySinkActor,
     RaySourceActor,
     _Apply,
@@ -308,6 +312,9 @@ class _PipelinePlan:
     # All nodes in topological order (upstream first), with their labels.
     nodes: Tuple[IROp, ...]
     labels: Mapping[IROp, str]
+    # The labels of the stages of the IR, in topological order, those left
+    # out of the pipeline (checkpoints without a run store) included.
+    ir_labels: Tuple[str, ...]
     # All maps, those in the templates of group_by included.
     maps: Tuple[IRMap, ...]
     # The Ray options of the calls of the maps, by compute assignment.
@@ -330,11 +337,6 @@ class _PipelinePlan:
     def sources(self) -> Dict[str, IRSource]:
         """The sources of the pipeline, by name."""
         return {node.name: node for node in self.nodes if isinstance(node, IRSource)}
-
-    @property
-    def stage_labels(self) -> List[str]:
-        """The labels of the stages, in topological order."""
-        return [self.labels[node] for node in self.nodes]
 
     def host_of(self, node: IROp) -> IROp:
         """The stage whose actor runs ``node``."""
@@ -513,7 +515,7 @@ class RayCompiledPipeline(CompiledPipeline):
         Before the pipeline has started, every stage has empty stats.
         """
         if self._runtime is None:
-            return {label: StageStats() for label in self._plan.stage_labels}
+            return {label: StageStats() for label in self._plan.ir_labels}
         else:
             return self._runtime_stats(self._runtime)
 
@@ -571,15 +573,17 @@ class RayCompiledPipeline(CompiledPipeline):
             [demux.children_stats.remote() for demux in runtime.demuxes],
         )
         own_actor_maps = self._plan.own_actor_maps
+        stats = {
+            label: _stats_of(
+                map_stats.get(label),
+                stage_stats[host],
+                own_actor=label in own_actor_maps,
+            )
+            for label, (host, _) in runtime.stages.items()
+        }
+        # Stages left out of the pipeline did nothing.
         return {
-            **{
-                label: _stats_of(
-                    map_stats.get(label),
-                    stage_stats[host],
-                    own_actor=label in own_actor_maps,
-                )
-                for label, (host, _) in runtime.stages.items()
-            },
+            **{label: stats.get(label, StageStats()) for label in self._plan.ir_labels},
             **{label: stage for child in children for label, stage in child.items()},
         }
 
@@ -691,6 +695,7 @@ class RayBackend(StreamingBackendProvider):
         placement: PlacementMode = "managed",
         run_store: Optional[RunStore] = None,
         lineage_batch: int = 2000,
+        checkpoint_outputs: bool = True,
     ):
         """
         Args:
@@ -747,6 +752,9 @@ class RayBackend(StreamingBackendProvider):
             lineage_batch: Lineage records a stage writes to the run store
                 at once. Stages also write the records they hold every 30
                 seconds while items arrive, and at every FLUSH.
+            checkpoint_outputs: Whether the checkpoints of the outputs of
+                protocols keep their items. Checkpoints and taps keep items
+                only with a run store; without one they are left out.
         """
         if queue_size <= 0:
             raise ValueError(f"Queue size must be positive, got {queue_size}.")
@@ -784,6 +792,7 @@ class RayBackend(StreamingBackendProvider):
         self.placement: PlacementMode = placement
         self.run_store = run_store
         self.lineage_batch = lineage_batch
+        self.checkpoint_outputs = checkpoint_outputs
         # The driver imported NumPy before; the workers get the environment.
         configure_numpy_hugepages()
 
@@ -852,8 +861,12 @@ class RayBackend(StreamingBackendProvider):
         if not ir_sinks:
             raise ValueError("RayBackend.compile() requires at least one IRSink.")
 
-        nodes = topological_order(ir_sinks)
-        labels = stage_labels(nodes, name)
+        # Checkpoints that keep nothing are left out; the other stages keep
+        # their labels, so that stats and reports match.
+        all_labels = stage_labels(topological_order(ir_sinks), name)
+        kept, originals = bypass(ir_sinks, self._leaves_out)
+        nodes = topological_order(kept)
+        labels = {node: all_labels[originals[node]] for node in nodes}
         # The maps of the children of group_by share the pools of this
         # pipeline, so the claims cover them too.
         maps = all_maps(nodes)
@@ -866,6 +879,7 @@ class RayBackend(StreamingBackendProvider):
             nodes,
             labels,
             None if pools is None else pools.placement,
+            _kept_after(topological_order(ir_sinks), all_labels, self._leaves_out),
         )
         # The stages behind a phase boundary have an actor of their own, whose
         # mailbox takes the backlog of the earlier phases without bound: the
@@ -890,6 +904,7 @@ class RayBackend(StreamingBackendProvider):
             abort_targets=tuple(abort_targets),
             nodes=tuple(nodes),
             labels=labels,
+            ir_labels=tuple(all_labels.values()),
             maps=tuple(maps),
             claims=claims,
             pools=pools,
@@ -968,13 +983,13 @@ class RayBackend(StreamingBackendProvider):
             lineage_batch=self.lineage_batch,
         )
         if self.run_store is not None:
-            self.run_store.write_stages(
-                plan.pipeline_id,
-                [
-                    StageInfo(labels[node], type(node).__name__, node.stage_fp)
-                    for node in plan.nodes
-                ],
-            )
+            infos = [
+                StageInfo(labels[node], type(node).__name__, node.stage_fp)
+                for node in plan.nodes
+            ]
+            # Its sinks would skip items that other stages made.
+            self.run_store.check_stages(infos)
+            self.run_store.write_stages(plan.pipeline_id, infos)
         boundary_config = dataclasses.replace(
             config,
             buffer_size=None,
@@ -1090,6 +1105,16 @@ class RayBackend(StreamingBackendProvider):
         else:
             return _SpillConfig(self.spill_threshold, self.spill_store), None
 
+    def _leaves_out(self, node: IROp) -> bool:
+        """Whether ``node`` is a checkpoint that keeps nothing."""
+        match node:
+            case IRCheckpoint(protocol_output=protocol_output):
+                return self.run_store is None or (
+                    protocol_output and not self.checkpoint_outputs
+                )
+            case _:
+                return False
+
     def _stage_actor(
         self,
         node: IROp,
@@ -1133,12 +1158,20 @@ class RayBackend(StreamingBackendProvider):
                     "flush_fn": flush_fn,
                     "tag_inputs": tag_inputs,
                 }
-            case IRSink(writer=writer):
+            case IRCheckpoint(replay=replay):
+                return RayCheckpointActor, {
+                    "config": config,
+                    "spill": spill,
+                    "label": label,
+                    "replay": replay,
+                }
+            case IRSink(writer=writer, unique_elements=unique_elements):
                 return RaySinkActor, {
                     "writer": writer,
                     "config": config,
                     "spill": spill,
                     "label": label,
+                    "unique_elements": unique_elements,
                 }
             case IRDemux(
                 key_fn=key_fn,
@@ -1199,6 +1232,7 @@ class RayBackend(StreamingBackendProvider):
             placement=self.placement,
             run_store=config.run_store,
             lineage_batch=config.lineage_batch,
+            checkpoint_outputs=self.checkpoint_outputs,
         )
 
     def _group_by_workers(self, workers: GroupByWorkers) -> Optional[int]:
@@ -1567,13 +1601,39 @@ def _boundary_targets(
     nodes: Sequence[IROp],
     labels: Mapping[IROp, str],
     placement: Optional[_Placement],
+    left_out: Mapping[str, FrozenSet[str]],
 ) -> FrozenSet[IROp]:
-    """The stages that the plan puts behind a phase boundary."""
+    """The stages that the plan puts behind a phase boundary.
+
+    A boundary in front of a stage left out of the pipeline (``left_out``,
+    by label) is in front of the stages it would feed.
+    """
     if placement is None:
         return frozenset()
     else:
-        targets = {target for _, target in placement.plan.boundaries}
+        targets = {
+            label
+            for _, target in placement.plan.boundaries
+            for label in left_out.get(target, frozenset({target}))
+        }
         return frozenset(node for node in nodes if labels[node] in targets)
+
+
+def _kept_after(
+    nodes: Sequence[IROp],
+    labels: Mapping[IROp, str],
+    leaves_out: Callable[[IROp], bool],
+) -> Dict[str, FrozenSet[str]]:
+    """For every node ``leaves_out`` selects, the labels of the nearest
+    downstream nodes it does not."""
+
+    def kept(node: IROp) -> FrozenSet[str]:
+        if leaves_out(node):
+            return frozenset().union(*(kept(down) for down in node.downstream))
+        else:
+            return frozenset({labels[node]})
+
+    return {labels[node]: kept(node) for node in nodes if leaves_out(node)}
 
 
 def _pooled_group(

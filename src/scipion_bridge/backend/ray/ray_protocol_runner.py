@@ -4,6 +4,7 @@ from enum import Enum
 import datetime
 import glob
 import importlib.metadata
+import json
 import logging
 import os
 from pathlib import Path
@@ -34,11 +35,15 @@ from ...core.streaming.backend import StageStats, throughput_of
 from ...core.streaming.ir import IROp
 from ...core.streaming.node import lower
 from ...core.streaming.pipeline import Pipeline
-from ...core.streaming.run_store import FileRunStore, RunStore
+from ...core.streaming.run_store import (
+    FileRunStore,
+    RunStore,
+    RunStoreMismatchError,
+)
 from ...core.streaming.report.model import Layer, PipelineReport, report_of
 from ...core.streaming.report.render import render_dot, render_html, render_text
 from ...core.streaming.sink import Sink
-from ...core.streaming.sink_writer import SinkWriter
+from ...core.streaming.sink_writer import SinkWriter, UniqueElements
 from ...core.streaming.spill import SpillStoreFactory, pickle_spill_store
 from .backend import (
     DEFAULT_BUFFER_SIZE,
@@ -67,7 +72,7 @@ def _format_stats(stats: Dict[str, StageStats]) -> str:
         f"{'stage':<40} {'in':>6} {'out':>6} {'items/s':>8} {'busy':>6} {'util':>6} "
         f"{'idle_s':>8} {'process_s':>10} {'wait_s':>8} {'blocked_s':>10} "
         f"{'emit_s':>8} {'buffered':>8} {'spilled':>8} {'fetch_s':>8} "
-        f"{'spill_s':>8} {'lineage_s':>9}"
+        f"{'spill_s':>8} {'lineage_s':>9} {'skipped':>8}"
     )
     rows = [
         f"{label:<40} {s.items_in:>6} {s.items_out:>6} "
@@ -75,7 +80,8 @@ def _format_stats(stats: Dict[str, StageStats]) -> str:
         f"{_derived(s, 'utilization', 6, 2)} "
         f"{s.idle_s:>8.2f} {s.process_s:>10.2f} {s.wait_s:>8.2f} "
         f"{s.blocked_s:>10.2f} {s.emit_s:>8.2f} {s.buffered_peak:>8} "
-        f"{s.spilled:>8} {s.fetch_s:>8.2f} {s.spill_s:>8.2f} {s.lineage_s:>9.2f}"
+        f"{s.spilled:>8} {s.fetch_s:>8.2f} {s.spill_s:>8.2f} {s.lineage_s:>9.2f} "
+        f"{s.skipped:>8}"
         for label, s in stats.items()
     ]
     return "\n".join([header, *rows])
@@ -185,6 +191,30 @@ def _env_log_level(name: str, value: int) -> int:
 def _default_sink_handler(outputs: Dict[str, Any]) -> None:
     """Default sink handler for compiled Ray pipelines."""
     pass
+
+
+# What a run continuing in the run store of an earlier run must share with
+# it: its sinks skip the items the earlier run committed.
+_CONTINUED = ("protocols", "parameters", "inputs", "chunking")
+
+
+def _check_continues(previous: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
+    """Refuse a run in a run store whose earlier run (``previous``, empty for
+    a new store) computed something else.
+
+    Raises:
+        RunStoreMismatchError: For the parts of the manifest that changed.
+    """
+    if not previous:
+        return
+    # As the store keeps it: JSON values.
+    stored = json.loads(json.dumps(dict(manifest), default=str))
+    changed = [key for key in _CONTINUED if stored[key] != previous[key]]
+    if changed:
+        raise RunStoreMismatchError(
+            f"The run store holds a run with other {changed}; its sinks would "
+            "skip items of that run. Use a new run directory.",
+        )
 
 
 def _validate_parameters(
@@ -338,6 +368,8 @@ class RayPipelineRunner:
         loader_cpus: float = 0,
         placement: PlacementMode = "managed",
         run_store: Optional[RunStore] = None,
+        checkpoint_outputs: bool = True,
+        unique_elements: UniqueElements = UniqueElements.OFF,
     ) -> None:
         """
         Every buffering option is overridden by an environment variable, see
@@ -382,6 +414,13 @@ class RayPipelineRunner:
                 (``SCIPION_STREAM_PLACEMENT``).
             run_store: Where the run records its manifest and the lineage
                 of its items (``--run-dir``); ``None`` records nothing.
+            checkpoint_outputs: Whether the run store keeps the outputs of
+                every protocol, to inspect them and to rerun from
+                (``--no-checkpoint-outputs`` turns it off).
+            unique_elements: What the sink of the run does with an element it
+                writes a second time: nothing, warn, or fail the pipeline
+                (``--unique-elements``). A ``sink`` given as a ``Sink`` keeps
+                its own setting.
         """
         self.protocol = protocol
         self.parameters = _validate_parameters(protocol, parameters or {})
@@ -411,6 +450,8 @@ class RayPipelineRunner:
         )
         self.sink = sink
         self.run_store = run_store
+        self.checkpoint_outputs = checkpoint_outputs
+        self.unique_elements = unique_elements
         self._input_resolvers: Dict[str, ComposedResolver] = {}
         self._pipeline: Optional[Pipeline] = None
         self._ir_sinks: Optional[List[IROp]] = None
@@ -450,6 +491,7 @@ class RayPipelineRunner:
             profile_log_level=self.profile_log_level,
             placement=self.placement,
             run_store=self.run_store,
+            checkpoint_outputs=self.checkpoint_outputs,
         )
         return Pipeline.from_ir(self.ir_sinks, backend=backend)
 
@@ -467,6 +509,7 @@ class RayPipelineRunner:
                 if isinstance(self.sink, Sink)
                 else Sink(
                     self.sink or _default_sink_handler,
+                    unique_elements=self.unique_elements,
                 )
             )
             self.protocol.get_pipeline().op(
@@ -640,9 +683,9 @@ class RayPipelineRunner:
         }
 
         if self.run_store is not None:
-            self.run_store.write_manifest(
-                self.manifest(all_inputs, env_chunk_size, env_target_bytes),
-            )
+            manifest = self.manifest(all_inputs, env_chunk_size, env_target_bytes)
+            _check_continues(self.run_store.read_manifest(), manifest)
+            self.run_store.write_manifest(manifest)
             self.run_store.write_report(self.report().to_json())
 
         t_start = time.perf_counter()
@@ -826,7 +869,26 @@ class RayPipelineRunner:
             type=Path,
             help=(
                 "Record the manifest of the run and the lineage of its items "
-                "in this directory, readable while the run goes."
+                "in this directory, readable while the run goes. Running "
+                "again in it continues the run."
+            ),
+        )
+        parser.add_argument(
+            "--no-checkpoint-outputs",
+            action="store_true",
+            help=(
+                "Do not keep the outputs of every protocol in the run "
+                "directory (kept by default, to inspect them and to rerun "
+                "from)."
+            ),
+        )
+        parser.add_argument(
+            "--unique-elements",
+            choices=[u.value for u in UniqueElements],
+            help=(
+                "What the sink does with an element (e.g. a particle) it "
+                "writes a second time: off (default), warn, or raise to fail "
+                "the run."
             ),
         )
         parser.add_argument(
@@ -881,6 +943,10 @@ class RayPipelineRunner:
             self.num_loaders = args.num_loaders
         if args.run_dir is not None:
             self.run_store = FileRunStore(args.run_dir)
+        if args.no_checkpoint_outputs:
+            self.checkpoint_outputs = False
+        if args.unique_elements is not None:
+            self.unique_elements = UniqueElements(args.unique_elements)
 
         inputs = {
             name: _parse_inputs(val) if isinstance(val, list) else val

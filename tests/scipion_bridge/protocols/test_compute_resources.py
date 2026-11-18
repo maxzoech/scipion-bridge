@@ -17,7 +17,13 @@ from scipion_bridge.core.environment.compute import (
 )
 from scipion_bridge.core.streaming import IRMap
 from scipion_bridge.core.streaming import lower
-from scipion_bridge.core.streaming.ops import MapElementOp, MapOp, Source, lineage
+from scipion_bridge.core.streaming.ops import (
+    CheckpointOp,
+    MapElementOp,
+    MapOp,
+    Source,
+    lineage,
+)
 from scipion_bridge.single_particle import Particle
 
 
@@ -149,8 +155,11 @@ def test_built_in_ops_are_not_assigned():
 def test_verify_outputs_stage_is_not_assigned():
     pipeline = Refine().get_pipeline()
 
-    assert isinstance(pipeline, MapOp)
-    assert pipeline.compute is None
+    # The outputs are verified, then kept by a checkpoint.
+    assert isinstance(pipeline, CheckpointOp) and pipeline.protocol_output
+    (verify,) = pipeline.upstream
+    assert isinstance(verify, MapOp)
+    assert verify.compute is None
 
 
 def test_protocol_without_resources_assigns_nothing():

@@ -3,6 +3,9 @@ from scipion_bridge.core.streaming import Source
 from scipion_bridge.core.streaming import Sink
 from scipion_bridge.core.streaming import CallbackSinkWriter
 from scipion_bridge.core.streaming import IRSource, IRMap, IRSink, IRAccumulate
+from scipion_bridge.core.streaming import IRCheckpoint, NoFusion
+from scipion_bridge.core.streaming import stage_labels, topological_order
+from scipion_bridge.core.streaming.ir import bypass, describe
 from scipion_bridge.core.streaming import lower
 
 
@@ -52,27 +55,55 @@ def test_branching_dag_lowering():
     assert len(src_ir_1.downstream) == 2
 
 
-def test_checkpoint_dag_lowering():
-    w_ckpt = CallbackSinkWriter(lambda x: None)
-    w_terminal = CallbackSinkWriter(lambda x: None)
+def test_checkpoints_and_taps_are_stages_in_the_stream():
+    sink = (
+        Source("input")
+        .map_batch(_double)
+        .checkpoint("doubled")
+        .tap()
+        .write_to(CallbackSinkWriter(_discard))
+    )
 
-    source = Source("input")
-    stage1 = source.map_batch(lambda x: x * 2)
-    stage1.checkpoint(w_ckpt)
-    stage2 = stage1.map_batch(lambda x: x + 10)
-    terminal_sink = stage2.write_to(w_terminal)
+    (ir_sink,) = lower([sink], fusion=NoFusion())
 
-    # Lowering from terminal_sink and finding all sinks
-    # Note: checkpoint attaches a Sink to stage1
-    checkpoint_sink = [n for n in stage1.downstream if isinstance(n, Sink)][0]
+    tap = ir_sink.upstream[0]
+    checkpoint = tap.upstream[0]
+    assert isinstance(tap, IRCheckpoint) and not tap.replay
+    assert isinstance(checkpoint, IRCheckpoint) and checkpoint.replay
+    assert [describe(n) for n in (checkpoint, tap)] == ["checkpoint(doubled)", "tap"]
 
-    ir_sinks = lower([terminal_sink, checkpoint_sink])
-    assert len(ir_sinks) == 2
 
-    # Verify stage1 IR node has 2 downstream nodes (IRSink for checkpoint, IRMap for stage2)
-    stage2_ir_map = ir_sinks[0].upstream[0]
-    stage1_ir_map = stage2_ir_map.upstream[0]
-    assert len(stage1_ir_map.downstream) == 2
+def test_bypassed_nodes_leave_their_input_to_their_downstream():
+    sink = (
+        Source("input")
+        .map_batch(_double)
+        .checkpoint()
+        .map_batch(_double)
+        .write_to(CallbackSinkWriter(_discard))
+    )
+    (ir_sink,) = lower([sink], fusion=NoFusion())
+    labels = stage_labels(topological_order([ir_sink]))
+
+    (copy,), originals = bypass([ir_sink], lambda n: isinstance(n, IRCheckpoint))
+
+    nodes = topological_order([copy])
+    assert [labels[originals[n]] for n in nodes] == [
+        "0:source(input)",
+        "1:map(_double)",
+        "3:map(_double)",
+        "4:sink(CallbackSinkWriter)",
+    ]
+    assert nodes[2].upstream == [nodes[1]]
+    # The original is untouched.
+    assert isinstance(ir_sink.upstream[0].upstream[0], IRCheckpoint)
+
+
+def _double(x):
+    return x * 2
+
+
+def _discard(x):
+    pass
 
 
 def test_chunk_lowering():

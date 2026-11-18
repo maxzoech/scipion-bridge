@@ -87,10 +87,9 @@ def test_order_is_preserved_across_stages():
 
     source = Source("numbers")
     stage = source.map(jittered_increment)
-    stage.checkpoint(_collecting_writer(collector))
+    ckpt_sink = stage.write_to(_collecting_writer(collector))
     final = Collector.remote()
     sink_node = stage.map(jittered_increment).write_to(_collecting_writer(final))
-    ckpt_sink = stage.downstream[0]
 
     backend = RayBackend(init_ray=False, queue_size=2)
     with Pipeline.from_sink(sink_node, ckpt_sink, backend=backend) as pipeline:

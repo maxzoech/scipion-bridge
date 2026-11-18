@@ -23,7 +23,7 @@ from typing import (
 )
 
 from ..environment.compute import ComputeAssignment
-from .sink_writer import SinkWriter
+from .sink_writer import SinkWriter, UniqueElements
 
 
 @dataclass(frozen=True)
@@ -144,6 +144,24 @@ class IRSink(IROp):
     """Terminal/Checkpoint node delegating to an async SinkWriter."""
 
     writer: Optional[SinkWriter] = None
+    # What the sink does with elements it writes a second time.
+    unique_elements: UniqueElements = UniqueElements.OFF
+
+
+@dataclass(eq=False)
+class IRCheckpoint(IROp):
+    """Items passing through, kept in the run store of the pipeline.
+
+    A checkpoint (``Op.checkpoint``) is a point a rerun replays from; a tap
+    (``Op.tap``, ``replay=False``) only keeps the items for inspection. The
+    backend writes them; without a run store it leaves the node out.
+    """
+
+    name: Optional[str] = None
+    replay: bool = True
+    # Set on the checkpoints of the outputs of protocols, which a runner can
+    # leave out.
+    protocol_output: bool = False
 
 
 @dataclass(eq=False)
@@ -203,6 +221,9 @@ def describe(node: IROp) -> str:
             return name
         case IRSink(writer=writer):
             return f"sink({type(writer).__name__})"
+        case IRCheckpoint(name=name, replay=replay):
+            kind = "checkpoint" if replay else "tap"
+            return kind if name is None else f"{kind}({name})"
         case IRDemux(name=name):
             return name
         case _:
@@ -260,3 +281,51 @@ def clone_ir(
         return node_copy
 
     return [copy(sink) for sink in sinks]
+
+
+def bypass(
+    sinks: Sequence[IROp],
+    skip: Callable[[IROp], bool],
+) -> Tuple[List[IROp], Dict[IROp, IROp]]:
+    """Copy the IR DAG upstream of ``sinks`` without the nodes ``skip``
+    selects: their downstream nodes consume their input instead.
+
+    Templates of ``group_by`` are copied unchanged; their pipelines bypass
+    nodes when they are compiled.
+
+    Args:
+        sinks: Exit nodes of the DAG to copy.
+        skip: Selects nodes with a single input to leave out.
+
+    Returns:
+        The copies of ``sinks``, and the original of every copy.
+
+    Raises:
+        ValueError: If leaving a node out makes a stage receive the same
+            stream on two inputs.
+    """
+    copies: Dict[IROp, IROp] = {}
+    originals: Dict[IROp, IROp] = {}
+
+    def copy(node: IROp) -> IROp:
+        if node in copies:
+            return copies[node]
+        if skip(node):
+            (upstream,) = node.upstream
+            copies[node] = copy(upstream)
+            return copies[node]
+
+        node_copy = dataclasses.replace(node, upstream=[], downstream=[])
+        copies[node] = node_copy
+        originals[node_copy] = node
+        for up in node.upstream:
+            up_copy = copy(up)
+            if node_copy in up_copy.downstream:
+                raise ValueError(
+                    f"Leaving out a node makes {describe(node)} receive the "
+                    "same stream on two inputs.",
+                )
+            up_copy.add_downstream(node_copy)
+        return node_copy
+
+    return [copy(sink) for sink in sinks], originals

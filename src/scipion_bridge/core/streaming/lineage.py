@@ -4,8 +4,8 @@ Every item a stage emits gets a 16-byte item id, carried next to the item
 (never inside it, so user code does not see it). Item ids are deterministic:
 the same inputs, received in the same order, give the same ids in every
 run. Lineage links an item to the items it was made from by these ids, and
-sinks will skip items whose id they already committed, which makes a resumed
-run write every output once.
+sinks skip items whose id they already committed (with a run store), which
+makes a run continuing an earlier one write every output once.
 
 Every stage derives the ids of what it emits with a ``LineagePolicy``:
 
@@ -52,7 +52,7 @@ from __future__ import annotations
 import abc
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -182,6 +182,29 @@ class ElementSegment:
         else:
             return np.empty(0, dtype=np.int64)
 
+    def keys(self) -> NDArray[np.void]:
+        """A 24-byte key per element: its namespace and position, or for an
+        explicit id, the id and ``-1``; none for elements without ids."""
+        if self.namespaces is not None and self.indices is not None:
+            table = np.frombuffer(self.namespaces, dtype="V16")
+            namespaces = table[np.frombuffer(self.indices, dtype="<i4")]
+            positions = self.position_array()
+        elif self.explicit is not None:
+            namespaces = np.frombuffer(self.explicit, dtype="V16")
+            positions = np.full(len(namespaces), -1, dtype=np.int64)
+        elif self.namespace is not None:
+            positions = self.position_array()
+            namespaces = np.full(
+                len(positions),
+                np.frombuffer(self.namespace, dtype="V16")[0],
+            )
+        else:
+            return np.empty(0, dtype="V24")
+        keys = np.empty(len(positions), dtype=[("ns", "V16"), ("pos", "<i8")])
+        keys["ns"] = namespaces
+        keys["pos"] = positions
+        return keys.view("V24")
+
     def holds(self, namespace: bytes, position: int) -> bool:
         """Whether the element ``(namespace, position)`` is one of these."""
         if self.namespaces is not None and self.indices is not None:
@@ -243,6 +266,30 @@ def element_segments(item: Any) -> Tuple[ElementSegment, ...]:
         for key, column in sorted(identity.hidden_ids(obj).items())
         for segment in column.segments
     )
+
+
+class SeenElements:
+    """The elements a sink wrote, to find those it writes again.
+
+    Elements are told apart per field of the Sets holding them
+    (``ElementSegment.path``): the members of every class are one field, the
+    references of the classes another.
+    """
+
+    def __init__(self) -> None:
+        self._seen: Dict[str, Set[bytes]] = {}
+
+    def add(self, elements: Tuple[ElementSegment, ...]) -> int:
+        """Add the elements of an item; returns how many were seen before,
+        in earlier items or in this one."""
+        repeated = 0
+        for segment in elements:
+            seen = self._seen.setdefault(segment.path, set())
+            keys = segment.keys().tolist()
+            before = len(seen)
+            seen.update(keys)
+            repeated += len(keys) - (len(seen) - before)
+        return repeated
 
 
 def call_elements(item: Any, result: Any) -> Optional[Tuple[ElementSegment, ...]]:
