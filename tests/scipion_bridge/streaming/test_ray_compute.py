@@ -137,7 +137,8 @@ class PerKeyWork(B.Protocol):
     offset: B.Field[int] = B.Field(default=0)
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -204,7 +205,8 @@ class Inference(B.Protocol):
     model: B.Resource[int] = B.Resource(builder=_build_model)
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -271,7 +273,8 @@ class PooledInference(B.Protocol):
     model: B.Resource[int] = B.Resource(builder=_build_model)
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -339,7 +342,8 @@ class BrokenModel(B.Protocol):
     items: B.Input[int] = B.Input()
     model: B.Resource[int] = B.Resource(builder=_fail_to_load)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -365,7 +369,8 @@ def test_a_failed_warm_up_surfaces_on_the_first_item():
 class OversizedPool(B.Protocol):
     items: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -382,7 +387,8 @@ def test_a_pool_that_does_not_fit_at_once_raises():
 class HalfGpuFirst(B.Protocol):
     items: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -393,7 +399,8 @@ class HalfGpuFirst(B.Protocol):
 class HalfGpuSecond(B.Protocol):
     out: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": int}
 
     def steps(self):
@@ -439,7 +446,8 @@ class RecordingFirst(B.Protocol):
     items: B.Input[int] = B.Input()
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -455,7 +463,8 @@ class RecordingSecond(B.Protocol):
     out: B.Input[int] = B.Input()
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": int}
 
     def steps(self):
@@ -546,7 +555,8 @@ class SlowOneGpuSecond(HalfGpuSecond):
 class OneGpuThird(B.Protocol):
     result: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"final": int}
 
     def steps(self):
@@ -714,7 +724,8 @@ def _pixel_sum(chunk):
 class ImagesFirst(B.Protocol):
     items: B.Input[B.Set[ImageItem]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": B.Set[ImageItem]}
 
     def steps(self):
@@ -725,7 +736,8 @@ class ImagesFirst(B.Protocol):
 class ImagesSecond(B.Protocol):
     out: B.Input[B.Set[ImageItem]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": float}
 
     def steps(self):
@@ -781,7 +793,8 @@ def _copied(chunk):
 class ImagesCopied(B.Protocol):
     out: B.Input[B.Set[ImageItem]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[ImageItem]}
 
     def steps(self):
@@ -829,7 +842,8 @@ def _scored(chunk):
 class ImagesTyped(B.Protocol):
     out: B.Input[B.Set[ImageItem]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[ScoredImageItem]}
 
     def steps(self):
@@ -879,7 +893,8 @@ def _grouped(chunk):
 class ImagesGrouped(B.Protocol):
     out: B.Input[B.Set[ImageItem]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Collection[ImageGroup]}
 
     def steps(self):
@@ -983,7 +998,8 @@ def _group_parity(item):
 class PerKeySecond(B.Protocol):
     out: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": int}
 
     def steps(self):
@@ -1048,7 +1064,8 @@ class SlowInputInference(B.Protocol):
     items: B.Input[SlowItem] = B.Input()
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -1092,7 +1109,8 @@ def test_long_running_calls_overlap_with_the_transfer_of_the_next():
 class TooLarge(B.Protocol):
     items: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -1116,7 +1134,8 @@ def _preprocess_then_sum(task):
     class Preprocess(B.Protocol):
         items: B.Input[list] = B.Input()
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"out": int}
 
         def steps(self):
@@ -1156,7 +1175,8 @@ class Shared(B.Protocol):
         scope=B.ResourceScope.SHARED,
     )
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": dict}
 
     def steps(self):
@@ -1187,7 +1207,8 @@ def _per_key_sleep(**resources):
         items: B.Input[int] = B.Input()
         recorder: Any
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"out": int}
 
         def steps(self):
@@ -1272,7 +1293,8 @@ def _reports_environment(**resources):
     class ReportsEnvironment(B.Protocol):
         items: B.Input[int] = B.Input()
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"out": dict}
 
         def steps(self):
@@ -1330,7 +1352,8 @@ def _reports_process(**resources):
     class ReportsProcess(B.Protocol):
         items: B.Input[int] = B.Input()
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"out": dict}
 
         def steps(self):
@@ -1392,7 +1415,8 @@ def _slow_identity(item):
 class GreedyFirst(B.Protocol):
     items: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -1406,7 +1430,8 @@ class GreedyFirst(B.Protocol):
 class GreedySecond(B.Protocol):
     others: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -1422,7 +1447,8 @@ class PerKeyInference(B.Protocol):
     model: B.Resource[int] = B.Resource(builder=_build_model)
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -1533,7 +1559,8 @@ class GpuBlocker:
 class Bookkeeping(B.Protocol):
     items: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": list}
 
     def steps(self):
@@ -1566,7 +1593,8 @@ class LongRunningWithBookkeeping(B.Protocol):
     items: B.Input[int] = B.Input()
     recorder: Any
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):
@@ -1669,7 +1697,8 @@ def _slow_forward(item):
 class SlowModel(B.Protocol):
     items: B.Input[int] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"out": int}
 
     def steps(self):

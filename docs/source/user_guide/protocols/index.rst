@@ -44,7 +44,8 @@ Anatomy of a protocol
         # Resources: read-only state, built lazily once per process.
         model: B.Resource[torch.nn.Module] = B.Resource(builder=load_model)
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"particles": B.Set[spa.FlexParticle]}
 
         def steps(self) -> B.Op:
@@ -70,10 +71,11 @@ A protocol subclasses ``B.Protocol`` and implements two methods:
    pipeline is compiled. Treat it like the *definition* of a model's forward
    pass, not like a loop over the data.
 
-``outputs(self) -> dict[str, type]``
-   Declares the outputs by name and type. The last stage of ``steps()`` must
-   return a ``dict`` with these keys, and every result is validated against
-   the declaration.
+``outputs(cls) -> dict[str, type]`` (``@classmethod``)
+   Declares the outputs by name and type. Because it is a classmethod, outputs
+   can be inspected on the class before instantiating it. The last stage of
+   ``steps()`` must return a ``dict`` with these keys, and every result is
+   validated against the declaration.
 
 Everything else is declared with annotated class attributes, and an optional
 ``@B.resources`` decorator declares the compute requirements.

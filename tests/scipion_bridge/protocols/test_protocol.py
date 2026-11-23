@@ -38,7 +38,8 @@ class BasicProtocol(Protocol):
     # Fields
     state: int = 42
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {}
 
     def steps(self):
@@ -75,7 +76,8 @@ def test_protocol_untyped_state():
         class UntypedStateProtocol(Protocol):
             state = 42
 
-            def outputs(self):
+            @classmethod
+            def outputs(cls):
                 return {}
 
             def steps(self):
@@ -95,7 +97,8 @@ def test_convert_scipion_to_python_enum_with_protocol_configuration():
     class EnumProtocol(Protocol):
         color: B.Field[Color] = B.Field(default=Color.RED)
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):
@@ -129,7 +132,8 @@ class CloudpickleTestProtocol(Protocol):
     def _compute_latents(self, item: str) -> str:
         return f"transformed_{item}"
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": str}
 
     def steps(self):
@@ -190,7 +194,8 @@ class ResourceTestProtocol(Protocol):
         builder=lambda self: {"loaded_with": self.param.default},
     )
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {}
 
     def steps(self):
@@ -224,7 +229,8 @@ def test_protocol_resource_missing_builder_raises():
         class InvalidResourceProtocol(Protocol):
             missing_model: B.Resource[dict]
 
-            def outputs(self):
+            @classmethod
+            def outputs(cls):
                 return {}
 
             def steps(self):
@@ -255,7 +261,8 @@ def test_protocol_resource_builder_called_exactly_once():
     class CountedResourceProtocol(Protocol):
         heavy_net: B.Resource[str] = B.Resource(builder=mock_builder)
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):
@@ -280,7 +287,8 @@ def test_protocol_resource_dtype_validation():
             dtype=dict,
         )
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):
@@ -295,7 +303,8 @@ def test_protocol_resource_dtype_validation():
             dtype=dict,
         )
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):
@@ -320,7 +329,8 @@ def test_protocol_resource_scopes_standalone():
             scope=B.ResourceScope.SHARED,
         )
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):
@@ -329,6 +339,30 @@ def test_protocol_resource_scopes_standalone():
     proto = MultiScopeProtocol()
     assert proto.proc_res == "process_local"
     assert proto.shared_res == "cluster_shared"
+
+
+def test_protocol_outputs_classmethod():
+    class ExampleProtocol(Protocol):
+        @classmethod
+        def outputs(cls):
+            return {"result": int}
+
+        def steps(self):
+            pass
+
+    # Works on the class without instantiating
+    assert ExampleProtocol.outputs() == {"result": int}
+    # Still works on an instance
+    assert ExampleProtocol().outputs() == {"result": int}
+
+
+def test_protocol_missing_outputs_raises_type_error():
+    class IncompleteProtocol(Protocol):
+        def steps(self):
+            pass
+
+    with pytest.raises(TypeError, match="outputs"):
+        IncompleteProtocol()
 
 
 if __name__ == "__main__":

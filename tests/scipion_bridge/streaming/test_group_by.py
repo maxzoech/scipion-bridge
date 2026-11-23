@@ -528,7 +528,8 @@ class Params(B.Protocol):
     groups: B.Field[int] = B.Field(default=1)
     offset: B.Field[int] = B.Field(default=0)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {}
 
     def steps(self):

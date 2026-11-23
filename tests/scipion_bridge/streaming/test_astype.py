@@ -122,7 +122,8 @@ def test_the_fused_map_writes_new_fields_into_the_cast_item():
 class Typed(B.Protocol):
     items: B.Input[B.Set[Image]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[ScoredImage]}
 
     def steps(self):

@@ -322,7 +322,8 @@ def test_builtin_layout_has_no_overlaps_and_edges_go_down():
 class ExplainedProtocol(Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input(label="Particles", optional=False)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def _infer(self, particles):

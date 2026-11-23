@@ -39,7 +39,8 @@ def _identity(item):
 class Refine(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def steps(self):
@@ -60,7 +61,8 @@ class Refine(B.Protocol):
 class Untagged(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def steps(self):
@@ -71,7 +73,8 @@ class Untagged(B.Protocol):
 class Inference(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def steps(self):
@@ -196,7 +199,8 @@ def test_lowering_keeps_the_assignment():
 class WithBookkeeping(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def steps(self):
@@ -257,7 +261,8 @@ def test_unknown_gpu_memory_claims_whole_gpus_with_a_warning(caplog):
 def test_decorator_passes_min_vram():
     @B.resources(min_vram=6)
     class Small(B.Protocol):
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):
@@ -269,7 +274,8 @@ def test_decorator_passes_min_vram():
 def test_decorator_passes_replicas():
     @B.resources(gpus=1, task=B.TaskType.LONG_RUNNING, replicas=3)
     class Pooled(B.Protocol):
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):
@@ -362,7 +368,8 @@ def test_preparing_builds_the_process_resources_only():
             scope=B.ResourceScope.SHARED,
         )
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {}
 
         def steps(self):

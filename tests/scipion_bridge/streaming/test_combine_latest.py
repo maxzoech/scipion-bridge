@@ -224,7 +224,8 @@ def test_flush_of_failed_two_input_stage_raises():
 class Produce(B.Protocol):
     particles: B.Input[B.Set[Item]] = B.Input()
 
-    def outputs(self) -> Dict[str, Type]:
+    @classmethod
+    def outputs(cls) -> Dict[str, Type]:
         return {"particles": B.Set[Item]}
 
     def _wrap(self, s):
@@ -239,7 +240,8 @@ class Classify(B.Protocol):
 
     particles: B.Input[B.Set[Item]] = B.Input()
 
-    def outputs(self) -> Dict[str, Type]:
+    @classmethod
+    def outputs(cls) -> Dict[str, Type]:
         return {"particles": B.Set[Item]}
 
     def _output(self, pair):

@@ -553,8 +553,9 @@ class Protocol(metaclass=abc.ABCMeta):
 
         return outputs
 
+    @classmethod
     @abc.abstractmethod
-    def outputs(self) -> Dict[str, Type]:
+    def outputs(cls) -> Dict[str, Type]:
         pass
 
     @abc.abstractmethod
@@ -765,7 +766,8 @@ class ChainedProtocol(Protocol):
         self.first.validate_protocol_configuration()
         self.second.validate_protocol_configuration()
 
-    def outputs(self) -> Dict[str, Type]:
+    def outputs(self) -> Dict[str, Type]:  # type: ignore[override]
+        # Outputs of a chain depend on the runtime ``self.second`` instance.
         return self.second.outputs()
 
     def _output_name(self) -> str:

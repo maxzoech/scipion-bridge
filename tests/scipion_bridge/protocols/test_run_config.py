@@ -29,7 +29,8 @@ class Align(B.Protocol):
     num_classes: B.Field[int] = B.Field(default=10)
     precision: B.Field[Precision] = B.Field(default=Precision.FP32)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def steps(self):
@@ -43,7 +44,8 @@ class NeedsModel(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
     model: B.Field[str] = B.Field(optional=False)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def steps(self):
@@ -92,7 +94,8 @@ def test_name_and_protocol_id_cannot_be_declared(declaration):
 class Named(B.Protocol):
     {declaration}
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {{}}
 
     def steps(self):

@@ -239,11 +239,13 @@ an item.
 Outputs and validation
 ----------------------
 
-``outputs()`` maps output names to types:
+``outputs()`` is a ``@classmethod`` that maps output names to types (so they
+can be inspected on the protocol class without instantiating it):
 
 .. code-block:: python
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[spa.FlexParticle]}
 
 The last stage of ``steps()`` must return a dictionary. Every dictionary is

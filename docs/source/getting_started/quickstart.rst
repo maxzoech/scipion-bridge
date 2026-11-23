@@ -153,7 +153,8 @@ streaming backend for Scipion, which is not implemented yet).
         # Fields are parameters. Read them with ``.value``.
         chunk_size: B.Field[int] = B.Field(default=256, label="Chunk size")
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"particles": B.Set[spa.Particle]}
 
         def steps(self) -> B.Op:

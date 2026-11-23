@@ -30,7 +30,8 @@ pytestmark = pytest.mark.usefixtures("ray_cluster")
 class StreamingParticleProtocol(Protocol):
     particles: B.Input[B.Set[Particle]]
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):
@@ -132,7 +133,8 @@ def test_ray_pipeline_runner_compiles_pipeline():
 class InvalidOutputProtocol(Protocol):
     particles: B.Input[B.Set[Particle]]
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):
@@ -217,7 +219,8 @@ class DualInputProtocol(Protocol):
     particles1: B.Input[B.Set[Particle]]
     particles2: B.Input[B.Set[Particle]]
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):
@@ -291,7 +294,8 @@ class MainModuleBoundMethodProtocol(Protocol):
     def _compute_latents(self, particles: B.Set[Particle]):
         return {"output": particles}
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):
@@ -346,7 +350,8 @@ class RayResourceProtocol(Protocol):
         assert model_info["builder_run"] == 1
         return {"output": particles}
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):
@@ -400,7 +405,8 @@ class RaySharedResourceMultiWorkerProtocol(Protocol):
         assert vol.shape == (10, 10)
         return {"output": particles}
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):
@@ -473,7 +479,8 @@ class RayProcessResourceMultiWorkerProtocol(Protocol):
         self._use_resource()
         return {"output": particles}
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):
@@ -504,7 +511,8 @@ def test_ray_pipeline_runner_with_process_resource_multi_worker(tmp_path, monkey
 class RechunkProtocol(Protocol):
     chunked: B.Input[B.Set[Particle]]
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[Particle]}
 
     def steps(self):
@@ -556,7 +564,8 @@ class ParameterProtocol(Protocol):
     precision: B.Field[Precision] = B.Field(default=Precision.FP32)
     scale: B.Field[int] = B.Field(default=1)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle], "tag": tuple}
 
     def _tag(self, particles):
@@ -679,7 +688,8 @@ class RequiredParameterProtocol(Protocol):
     particles: B.Input[B.Set[Particle]]
     model: B.Field[str] = B.Field(optional=False)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output": B.Set[Particle]}
 
     def steps(self):

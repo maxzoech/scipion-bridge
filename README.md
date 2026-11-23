@@ -18,7 +18,8 @@ class FoundationModelInference(B.Protocol):
     chunk_size: B.Field[int] = B.Field(default=256)
     model: B.Resource[Model] = B.Resource(builder=load_model)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[spa.FlexParticle]}
 
     def steps(self) -> B.Op:

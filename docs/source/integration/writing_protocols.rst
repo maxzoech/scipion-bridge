@@ -61,7 +61,8 @@ The complete protocol for the PyTorch version of the denoiser:
         # Resources: expensive, read-only state, built once per process.
         model: B.Resource[torch.nn.Module] = B.Resource(builder=load_denoiser)
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"particles": B.Set[DenoisedParticle]}
 
         def steps(self) -> B.Op:
@@ -361,7 +362,8 @@ declaration becomes ephemeral:
         weights: B.Field[str] = B.Field(default="/opt/models/cryodenoise.pt")
         chunk_size: B.Field[int] = B.Field(default=5_000, label="Batch size")
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"particles": B.Set[DenoisedParticle]}
 
         def steps(self) -> B.Op:

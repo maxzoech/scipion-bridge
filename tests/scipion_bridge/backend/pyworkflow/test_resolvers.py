@@ -754,7 +754,8 @@ def test_set_of_particles_flex_protocol_input_fallback(tmp_path):
 class _DummyParticleProtocol(Protocol):
     input_particles: B.Input[B.Set[BParticle]]
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"output_particles": B.Set[BParticle]}
 
     def steps(self):

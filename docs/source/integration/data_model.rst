@@ -37,7 +37,8 @@ Inputs and outputs of protocols are therefore declared as sets:
 
     particles: B.Input[B.Set[spa.Particle]]
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[DenoisedParticle]}
 
 A ``Collection[T]`` is the other container that commonly appears as an item:

@@ -75,7 +75,8 @@ turns them into batches of the size the GPU wants.
         # Resources: loaded once per worker process
         model: B.Resource[torch.nn.Module] = B.Resource(builder=load_model)
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"particles": B.Set[spa.FlexParticle]}
 
         def steps(self) -> B.Op:
@@ -173,7 +174,8 @@ classify anything. This is a **stateful** stream operation:
         cluster_sample_size: B.Field[int] = B.Field(default=50_000)
         classify_chunk_size: B.Field[int] = B.Field(default=10_000)
 
-        def outputs(self):
+        @classmethod
+        def outputs(cls):
             return {"classes": B.Set[spa.Class2D]}
 
         def steps(self) -> B.Op:

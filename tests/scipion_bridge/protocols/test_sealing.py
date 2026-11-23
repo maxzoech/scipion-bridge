@@ -31,7 +31,8 @@ class Recording(B.Protocol):
         super().__init__()
         self.record = record
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def validate_protocol_configuration(self):
@@ -61,7 +62,8 @@ class Counting(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
     count: int = 0
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def _count(self, particles):
@@ -82,7 +84,8 @@ class Holding(B.Protocol):
         super().__init__()
         self.value = value
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def _apply(self, particles):
@@ -102,7 +105,8 @@ class Scaling(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
     scale: B.Field[float] = B.Field(default=1.0)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def _apply(self, particles):
@@ -115,7 +119,8 @@ class Scaling(B.Protocol):
 class TwoChunks(B.Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle]}
 
     def steps(self):

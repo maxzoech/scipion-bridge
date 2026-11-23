@@ -13,7 +13,8 @@ class Stage1(Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
     scale: B.Field[float] = B.Field(default=1.0)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"particles": B.Set[Particle], "other": B.Set[Particle]}
 
     def steps(self):
@@ -25,7 +26,8 @@ class Stage2(Protocol):
     mask: B.Input[B.Set[Particle]] = B.Input()
     scale: B.Field[float] = B.Field(default=1.0)
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[Particle]}
 
     def steps(self):
@@ -37,7 +39,8 @@ class Stage2(Protocol):
 class SingleOut(Protocol):
     micrographs: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"picked": B.Set[Particle]}
 
     def steps(self):
@@ -47,7 +50,8 @@ class SingleOut(Protocol):
 class SingleIn(Protocol):
     coordinates: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[Particle]}
 
     def steps(self):
@@ -58,7 +62,8 @@ class ConflictingParameter(Protocol):
     scale: B.Field[float] = B.Field(default=2.0)
     micrographs: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[Particle]}
 
     def steps(self):
@@ -105,6 +110,7 @@ def test_configuration_merge():
     assert {
         name: list(fields) for name, fields in chain.parameters_by_name().items()
     } == {"Stage1": ["scale"], "Stage2": ["scale"]}
+    assert chain.outputs() == Stage2.outputs()
     assert chain.outputs() == Stage2().outputs()
 
 
@@ -215,7 +221,8 @@ def test_chain_is_associative():
 class RepeatedAccess(Protocol):
     particles: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[Particle]}
 
     def steps(self):
@@ -236,7 +243,8 @@ class RepeatedInput(Protocol):
 
     particles: B.Input[B.Set[Particle]] = B.Input()
 
-    def outputs(self):
+    @classmethod
+    def outputs(cls):
         return {"result": B.Set[Particle]}
 
     def steps(self):
