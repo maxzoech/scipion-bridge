@@ -918,6 +918,58 @@ class RayMergeActor(_PipelinedStage):
         return [item]
 
 
+_STOP_ITERATION = object()
+
+
+@ray.remote
+class RayFlatMapActor(_PipelinedStage):
+    """Streaming 1:N generator stage (IRFlatMap).
+
+    Pulls one item at a time from ``func(item)`` in a worker thread and
+    forwards each yielded item immediately into the outbox. An infinite
+    generator (such as ``ImportMode.WATCH``) streams continuously and never
+    finishes to forward ``FLUSH``.
+    """
+
+    def __init__(
+        self,
+        func: Callable[[Any], Any],
+        config: _StageConfig,
+        spill: Optional[SpillPolicy],
+        label: str,
+        parameters: Mapping[str, Any],
+    ):
+        configure_worker_env(parameters=parameters)
+        super().__init__(config, spill, label)
+        self.func = func
+
+    def _lineage_policy(self, label: str) -> LineagePolicy:
+        return AccumulatorLineage(label)
+
+    async def process(self, item: Any, port: int, lid: ItemId) -> List[Any]:
+        iterator = iter(await asyncio.to_thread(self.func, item))
+        while True:
+            out_item = await asyncio.to_thread(next, iterator, _STOP_ITERATION)
+            if out_item is _STOP_ITERATION:
+                break
+
+            (out_lid,) = self._lineage.emit(lid, 1)
+            fill_created(out_item, out_lid)
+            if self._run_store is not None:
+                t_lin = time.perf_counter()
+                self._record(
+                    out_lid,
+                    "accumulate",
+                    self._lineage.emitted_parents,
+                    element_segments(out_item),
+                )
+                self._stats.lineage_s += time.perf_counter() - t_lin
+            self._provenance.emit(item, [out_item])
+            await self._outbox.put(_EmitItem(out_item, out_lid))
+
+        return []
+
+
 @ray.remote
 class RayAccumulatorActor(_PipelinedStage):
     """Stateful accumulation stage (IRAccumulate) of the streaming pipeline.

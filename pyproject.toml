@@ -1,35 +1,45 @@
-[tool.poetry]
+[project]
 name = "scipion-bridge"
 version = "0.1.0"
 description = "A Python tool to convert validation data on VRS to a format compatible with 3DBionotes"
-authors = ["Max Zoech <maximilian.zoech@cnb.csic.es>"]
+authors = [{ name = "Max Zoech", email = "maximilian.zoech@cnb.csic.es" }]
 readme = "README.md"
-packages = [{ include = "scipion_bridge", from = "src" }]
-
-[tool.poetry.dependencies]
-python = ">=3.8, <3.13"
-dependency-injector = ">=4.48.1,<5.0.0"
-networkx = ">=3.0.0,<4.0.0"
-tabulate = "^0.9.0"
-scipion-pyworkflow = { version = "^3.11", optional = true }
-scipion-em = { version = "^3.11", optional = true }
-zarr = { version = "^2.16.1", optional = true }
-xmipp-metadata = { version = ">=1.3.0", optional = true }
-numpy = [
-    { version = "^1.24.4", python = "3.8" },
-    { version = ">=1.26.0", python = ">=3.9" }
+requires-python = ">=3.8,<3.13"
+dependencies = [
+    "dependency-injector>=4.48.1,<5.0.0",
+    "networkx>=3.0.0,<4.0.0",
+    "tabulate>=0.9.0,<0.10.0",
+    "numpy>=1.24.4,<2.0.0; python_version < '3.9'",
+    "numpy>=1.26.0; python_version >= '3.9'",
+    "pyrsistent>=0.20.0,<0.21.0",
+    "mrcfile>=1.4.3,<2.0.0",
+    "starfile>=0.5.2,<0.6.0",
+    "tqdm>=4.70.0,<5.0.0",
+    "pyinstrument>=5.1.3,<6.0.0",
+    "pyarrow>=14.0.0",
+    "awkward>=2.6.0",
+    "cloudpickle>=3.0.0",
+    "xxhash>=3.0.0",
+    "watchfiles>=1.0.0",
 ]
-pyrsistent = { version = "^0.20.0" }
-mrcfile = { version = "^1.4.3" }
-starfile = { version = "^0.5.2" }
-tqdm = { version = "^4.70.0" }
-pyinstrument = "^5.1.3"
-pyarrow = ">=14.0.0"
-awkward = ">=2.6.0"
-cloudpickle = ">=3.0.0"
-xxhash = ">=3.0.0"
-ray = { version = ">=2.49.0", optional = true }
-tensorstore = { version = ">=0.1.45", optional = true }
+
+[project.optional-dependencies]
+pyworkflow = [
+    "scipion-pyworkflow>=3.11,<4.0",
+    "scipion-em>=3.11,<4.0",
+    "zarr>=2.16.1,<3.0.0",
+    "xmipp-metadata>=1.3.0",
+]
+ray = [
+    "ray>=2.49.0",
+    "tensorstore>=0.1.45",
+]
+
+[project.entry-points."scipion_bridge.protocols"]
+canonical_imports = "scipion_bridge.utils.protocols.imports:synthesize_import_protocols"
+
+[tool.poetry]
+packages = [{ include = "scipion_bridge", from = "src" }]
 
 [tool.poetry.group.test]
 optional = true
@@ -41,12 +51,8 @@ pytest-cov = "*"
 pytest-xdist = "*"
 
 [build-system]
-requires = ["poetry-core>=1.0.0,<2.0.0"]
+requires = ["poetry-core>=2.0.0"]
 build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.extras]
-pyworkflow = ["scipion-pyworkflow", "scipion-em", "zarr", "xmipp-metadata"]
-ray = ["ray", "tensorstore"]
 
 [tool.pytest.ini_options]
 markers = [

@@ -64,6 +64,7 @@ from scipion_bridge.core.streaming.ir import (
     IROp,
     IRSource,
     IRMap,
+    IRFlatMap,
     IRAccumulate,
     IRSink,
     IRCheckpoint,
@@ -93,6 +94,7 @@ from .actors import (
     RayAccumulatorActor,
     RayComputeGroup,
     RayDemuxActor,
+    RayFlatMapActor,
     RayMergeActor,
     RayCheckpointActor,
     RaySinkActor,
@@ -1141,6 +1143,14 @@ class RayBackend(StreamingBackendProvider):
                     "config": config,
                     "spill": spill,
                     "label": label,
+                }
+            case IRFlatMap(func=func):
+                return RayFlatMapActor, {
+                    "func": func,
+                    "config": config,
+                    "spill": spill,
+                    "label": label,
+                    "parameters": self.parameters,
                 }
             case IRAccumulate(
                 accumulate_fn=accumulate_fn,

@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, TypeVar, overload, Self
+from typing import Any, Callable, Optional, Tuple, TypeVar, overload, Self
 from dependency_injector.wiring import Provide, inject
 
 from ..environment.protocol_config import ProtocolConfigurationProvider
@@ -26,6 +26,7 @@ class BoundField(Marker[T]):
         label: Optional[str] = None,
         group: Optional[str] = None,
         help: Optional[str] = None,
+        extensions: Optional[Tuple[str, ...]] = None,
     ):
         Marker.__init__(self, dtype=dtype)
         self.name = name
@@ -35,6 +36,7 @@ class BoundField(Marker[T]):
         self.label = label
         self.group = group
         self.help = help
+        self.extensions = extensions
 
     @property
     def value(self) -> T:
@@ -67,6 +69,7 @@ class Field(Marker[T]):
         label: Optional[str] = None,
         group: Optional[str] = None,
         help: Optional[str] = None,
+        extensions: Optional[Tuple[str, ...]] = None,
     ):
         Marker.__init__(self, dtype=dtype)
 
@@ -78,6 +81,7 @@ class Field(Marker[T]):
         self.label = label
         self.group = group
         self.help = help
+        self.extensions = extensions
 
     @overload
     def __get__(self: FieldSelf, instance: None, owner: Any) -> FieldSelf: ...
@@ -100,6 +104,7 @@ class Field(Marker[T]):
             label=self.label,
             group=self.group,
             help=self.help,
+            extensions=self.extensions,
         )
 
     def __eq__(self, other: Any) -> bool:
@@ -111,6 +116,7 @@ class Field(Marker[T]):
             and self.label == other.label
             and getattr(self, "group", None) == getattr(other, "group", None)
             and self.help == other.help
+            and self.extensions == other.extensions
         )
 
 
@@ -125,6 +131,7 @@ class BoundInput(BoundField[T], Source):
         optional: Optional[bool] = None,
         label: Optional[str] = None,
         help: Optional[str] = None,
+        extensions: Optional[Tuple[str, ...]] = None,
     ):
         BoundField.__init__(
             self,
@@ -135,6 +142,7 @@ class BoundInput(BoundField[T], Source):
             label=label,
             group="Input",
             help=help,
+            extensions=extensions,
         )
         Source.__init__(self, name=name)
 
@@ -152,6 +160,7 @@ class Input(Field[T]):
         optional: Optional[bool] = None,
         label: Optional[str] = None,
         help: Optional[str] = None,
+        extensions: Optional[Tuple[str, ...]] = None,
     ):
         Field.__init__(
             self,
@@ -161,6 +170,7 @@ class Input(Field[T]):
             group="Input",
             label=label,
             help=help,
+            extensions=extensions,
         )
 
     @overload
@@ -180,6 +190,7 @@ class Input(Field[T]):
             optional=self.optional,
             label=self.label,
             help=self.help,
+            extensions=self.extensions,
         )
 
 

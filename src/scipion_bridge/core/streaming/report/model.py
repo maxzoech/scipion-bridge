@@ -25,6 +25,7 @@ from ..ir import (
     IRAccumulate,
     IRCheckpoint,
     IRDemux,
+    IRFlatMap,
     IRMap,
     IROp,
     IRSink,
@@ -326,7 +327,7 @@ def _kind(node: IROp) -> NodeKind:
             return "source"
         case IRMap():
             return "map"
-        case IRAccumulate():
+        case IRFlatMap() | IRAccumulate():
             return "accumulate"
         case IRSink():
             return "sink"

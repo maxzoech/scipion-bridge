@@ -1,6 +1,7 @@
 import numpy as np
 
 from ..core.struct import Struct, Array, Set
+from ..core.typed.canonical_types import canonical
 
 
 class CTF(Struct):
@@ -26,6 +27,7 @@ class Acquisition(Struct):
     dose_per_frame: float
 
 
+@canonical
 class Particle(Struct):
     pixels: Array[np.float32] = Array(shape=(None, None))
     ctf: CTF
@@ -38,6 +40,7 @@ class FlexParticle(Particle):
     embeddings: Array[float] = Array(shape=(None,))
 
 
+@canonical
 class Class2D(Struct):
     particles: Set[Particle]
     class_id: int

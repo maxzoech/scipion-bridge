@@ -117,6 +117,20 @@ class IRMap(IROp):
 
 
 @dataclass(eq=False)
+class IRFlatMap(IROp):
+    """Streaming 1:N generator stage.
+
+    Applies ``func(item)`` and yields each item of the returned iterable
+    downstream immediately as it is produced. An infinite generator (such as
+    a directory watcher) streams continuously and never forwards ``FLUSH``.
+    """
+
+    func: Callable[[Any], Any] = field(default=lambda x: (x,))
+    name: Optional[str] = None
+    compute: Optional[ComputeAssignment] = None
+
+
+@dataclass(eq=False)
 class IRAccumulate(IROp):
     """Stateful stream accumulation primitive.
 
@@ -217,6 +231,11 @@ def describe(node: IROp) -> str:
             return f"source({name})"
         case IRMap(func=func, name=name):
             return name or f"map({getattr(func, '__qualname__', type(func).__name__)})"
+        case IRFlatMap(func=func, name=name):
+            return (
+                name
+                or f"flat_map({getattr(func, '__qualname__', type(func).__name__)})"
+            )
         case IRAccumulate(name=name):
             return name
         case IRSink(writer=writer):

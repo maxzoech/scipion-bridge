@@ -4,6 +4,7 @@ The function ``resolve`` is not exported here: it would hide the module
 ``scipion_bridge.core.typed.resolve``. Use ``scipion_bridge.resolve``.
 """
 
+from .canonical_types import canonical, get_canonical_types, unregister_canonical
 from .proxy import Output, Proxy, ProxyGroup, ResolveProxy, namedproxy, proxify
 from .resolve import (
     ComposedResolver,
@@ -33,6 +34,10 @@ __all__ = [
     "estimate_optimal_chunk_size",
     "current_registry",
     "Registry",
+    # Canonical types
+    "canonical",
+    "get_canonical_types",
+    "unregister_canonical",
     # Proxies
     "Proxy",
     "ProxyGroup",

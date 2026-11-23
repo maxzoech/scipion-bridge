@@ -619,6 +619,12 @@ class RayPipelineRunner:
             for name, value in all_inputs.items()
             if name in self._input_resolvers
         }
+        declared_inputs = self.protocol.configuration.inputs
+        passthrough = {
+            name: value
+            for name, value in all_inputs.items()
+            if name not in self._input_resolvers and name in declared_inputs
+        }
         batched = {
             name: value
             for name, value in streamed.items()
@@ -653,6 +659,24 @@ class RayPipelineRunner:
         )
         try:
             with pipeline:
+                for name, raw_value in passthrough.items():
+                    target_dtype = declared_inputs[name].dtype
+                    values_to_send = (
+                        raw_value
+                        if isinstance(raw_value, (list, tuple))
+                        else (raw_value,)
+                    )
+                    for val in values_to_send:
+                        if (
+                            isinstance(val, str)
+                            and isinstance(target_dtype, type)
+                            and issubclass(target_dtype, Path)
+                        ):
+                            val = target_dtype(val)
+                        total_chunks += 1
+                        total_items += 1
+                        pipeline.send(**{name: val})
+
                 while active_iterators:
                     for name in list(active_iterators.keys()):
                         chunk = next(

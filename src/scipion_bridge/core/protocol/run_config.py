@@ -128,6 +128,8 @@ def _converted(field: BoundField, value: Any) -> Any:
     match value:
         case str() if isinstance(dtype, type) and issubclass(dtype, Enum):
             return dtype[value]
+        case str() if isinstance(dtype, type) and issubclass(dtype, PurePath):
+            return dtype(value)
         case str() | bytes():
             return value
         case Sequence():

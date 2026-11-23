@@ -32,6 +32,7 @@ from .ir import (
     IROp,
     IRSource,
     IRMap,
+    IRFlatMap,
     IRAccumulate,
     IRCheckpoint,
     IRDemux,
@@ -96,6 +97,29 @@ class Op(Node):
         the protocol and must not write to ``self`` (see ``map_batch``).
         """
         return self.map_batch(func, cpu_only=cpu_only)
+
+    def flat_map(
+        self,
+        func: Callable[[Any], Iterable[Any]],
+        *,
+        cpu_only: bool = False,
+    ) -> FlatMapOp:
+        """Stream zero or more output items per incoming item (1:N generator).
+
+        Calls ``func(item)`` and emits each element of the returned iterable or
+        generator downstream immediately as it is produced, without buffering
+        the entire sequence in memory.
+
+        If ``func(item)`` returns an infinite generator (for example, watching a
+        directory for newly arriving files), items continue streaming downstream
+        and no ``FlushSignal`` is forwarded until the pipeline is closed.
+
+        Args:
+            func: Function returning an iterable or generator of items.
+            cpu_only: Run without the GPUs of the protocol's compute
+                resources (``@resources``).
+        """
+        return self.op(FlatMapOp(func, cpu_only=cpu_only))
 
     def map_element(
         self,
@@ -511,6 +535,29 @@ class MapOp(Op):
     def lower(self, ctx: LoweringContext) -> IROp:
         func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
         return IRMap(func=self.func, name=f"map({func_name})", compute=self.compute)
+
+
+class FlatMapOp(Op):
+    """1:N streaming generator operation node."""
+
+    def __init__(
+        self,
+        func: Callable[[Any], Iterable[Any]],
+        *,
+        cpu_only: bool = False,
+    ):
+        super().__init__(upstream=None)
+        self.func = func
+        self.cpu_only = cpu_only
+        self.compute: Optional[ComputeAssignment] = None
+
+    def lower(self, ctx: LoweringContext) -> IROp:
+        func_name = getattr(self.func, "__qualname__", type(self.func).__name__)
+        return IRFlatMap(
+            func=self.func,
+            name=f"flat_map({func_name})",
+            compute=self.compute,
+        )
 
 
 @dataclass(frozen=True)
